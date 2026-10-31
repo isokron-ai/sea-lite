@@ -5,6 +5,7 @@
  */
 
 import { KronicleLite } from 'kronicle-lite';
+import { PassThrough } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 
 import { titleMatchExpression } from '../src/handlers/dedup.js';
@@ -48,6 +49,35 @@ describe('kronicle-lite composition', () => {
     sea.close();
     expect(kl.chain.head().seq).toBeGreaterThan(0);
     kl.close();
+  });
+
+  it('survives kronicle-lite export → import → sea-lite rebuild', async () => {
+    const src = new SeaLite({ memory: true, actor: 'a' });
+    const t = src.create({ title: 'exported', body: 'b', kind: 'bug', priority: 'low', tags: ['e'], status: 'triaged', dry_run: false, claim_seconds: 60 });
+    src.update({ ticket_id: t.ticket.id, claim_token: t.claim_token!, note: 'n', dry_run: false });
+    const buf = new PassThrough();
+    const chunks: Buffer[] = [];
+    buf.on('data', (c: Buffer) => chunks.push(c));
+    src.kronicle.exportEvents(buf);
+    buf.end();
+    await new Promise((r) => buf.on('end', r));
+
+    const dstKl = new KronicleLite({ memory: true });
+    const input = new PassThrough();
+    input.end(Buffer.concat(chunks));
+    await dstKl.importEvents(input);
+    const dst = new SeaLite({ kronicle: dstKl, actor: 'a' });
+    expect(dst.list({ include_terminal: true, claimed: 'any', limit: 10, view: 'compact' }).count).toBe(0); // import projects documents only
+    const r = dst.rebuild();
+    expect(r.tickets).toBe(1);
+    const got = dst.get({ id: t.ticket.id });
+    expect(got.ticket.title).toBe('exported');
+    expect(got.notes.map((n) => n.body)).toEqual(['n']);
+    expect(dst.verify().ok).toBe(true);
+    // The holder's token still fences in the restored copy.
+    expect(dst.update({ ticket_id: t.ticket.id, claim_token: t.claim_token!, title: 'restored', dry_run: false }).changed).toEqual(['title']);
+    src.close();
+    dstKl.close();
   });
 
   it('refuses a store written by a newer sea-lite', () => {

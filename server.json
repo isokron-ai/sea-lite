@@ -1,0 +1,59 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rafe-walker/sea-lite",
+  "description": "Fenced work queue for parallel coding agents: leased claims, typed links, hash-chained history",
+  "repository": {
+    "url": "https://github.com/rafe-walker/sea-lite",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "websiteUrl": "https://isokron.ai",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "sea-lite",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve",
+          "description": "Run the stdio MCP server"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "KRONICLE_LITE_DATA_DIR",
+          "description": "Directory of the shared SQLite store (default ~/.kronicle-lite)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "SEA_LITE_ACTOR",
+          "description": "Actor label used on claims and writes (default local-agent)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "SEA_LITE_ROLE",
+          "description": "agent (default) or operator; operator unlocks force release",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "SEA_LITE_TRACKS",
+          "description": "Enabled lifecycle tracks, e.g. work,design (default work)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

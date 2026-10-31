@@ -1,0 +1,158 @@
+# Data model
+
+sea-lite is a projection: three tables (plus an FTS index) rebuilt from
+events on kronicle-lite's hash chain. This document is the contract between
+the handlers, `rebuild`, and anyone reading the file from another language.
+
+## Storage
+
+All tables live in kronicle-lite's SQLite file (`kronicle-lite.db`). sea-lite
+adds its own meta key, `sea_schema_version` (currently `1`), and never touches
+kronicle-lite's `schema_version`.
+
+### `sea_tickets`
+
+| column | meaning |
+| --- | --- |
+| `id` | uuid v4 |
+| `kind` | one of the 16 kinds (CHECK) |
+| `title`, `body` | text; body defaults to `''` |
+| `status` | one of the lifecycle states (CHECK) |
+| `priority` | `urgent` / `high` / `medium` / `low` / `parked` (CHECK) |
+| `tags` | JSON array of strings |
+| `assignee` | free-form actor label or NULL |
+| `duplicate_of` | ticket id set by `sea_transition to=duplicate` |
+| `created_by`, `created_at`, `updated_at` | provenance (ISO-8601 UTC) |
+| `row_version` | optimistic-concurrency counter; starts at 1, +1 per content write |
+| `claim_token_hash` | `sha256(token)` hex, or NULL when free |
+| `claim_actor` | holder label |
+| `claim_expires_at` | lease expiry (ISO-8601) |
+| `claim_write_count` | fenced writes made under the current claim |
+| `created_seq`, `last_seq` | chain seq of the creating event and the latest event touching the row |
+
+Indexes: `(status, priority, created_at)`, partial `(claim_expires_at)` where
+not null, `(assignee)`.
+
+### `sea_links`
+
+`link_id`, `from_id`, `to_id`, `link_type` (CHECK against the closed
+vocabulary), `state` (`active` | `tombstoned`), `created_by`, `created_at`,
+`chain_seq`, `tombstoned_at`, `tombstoned_by`, `tombstone_seq`. A partial
+unique index on `(from_id, to_id, link_type) WHERE state = 'active'` means at
+most one live edge per triple; a tombstoned edge can be re-added.
+
+### `sea_notes`
+
+`note_id`, `ticket_id`, `author`, `body`, `created_at`, `chain_seq`. Notes are
+append-only; they are the hand-off channel between agents.
+
+### `sea_tickets_fts`
+
+FTS5 over `title` and `body` with `ticket_id` unindexed, maintained by
+triggers. It is a standalone table (not `content=`) so a `VACUUM` cannot
+desynchronize it.
+
+## Events
+
+Every sea-lite mutation appends exactly the events below to the kronicle-lite
+chain, inside the same `BEGIN IMMEDIATE` transaction as the row change. The
+`occurred_at` of every event equals the `created_at` / `updated_at` it writes.
+
+| event type | payload (fields) | projection |
+| --- | --- | --- |
+| `sea_ticket.created` | `ticket_id kind title body status priority tags assignee created_by created_at` (+ `batch_id ref` from apply) | insert row, `row_version=1`, `created_seq=last_seq=seq` |
+| `sea_ticket.updated` | `ticket_id changes{…} tags row_version updated_at` | apply `changes` (title/body/kind/priority/assignee), set `tags`, `row_version`, `updated_at`, `last_seq`, `claim_write_count+1` |
+| `sea_ticket.status_set` | `ticket_id from to reason duplicate_of duplicates_link_id row_version updated_at claim_auto_released claim_token_hash` | set status (+ `duplicate_of`), bump; clear claim when `claim_auto_released` |
+| `sea_ticket.claimed` | `ticket_id claim_token_hash claim_actor expires_at lease_seconds rotated` (+ `set` / `via` / `on_create`) | set claim fields, `claim_write_count=0`, `last_seq` |
+| `sea_ticket.claim_released` | `ticket_id claim_token_hash claim_actor reason write_count` | clear claim, `last_seq` |
+| `sea_ticket.claim_force_released` | `ticket_id claim_token_hash previous_holder released_by reason write_count` | clear claim, `last_seq` |
+| `sea_ticket.claim_expired` | `ticket_id claim_token_hash claim_actor expired_at noticed_at noticed_by` | clear claim, `last_seq` |
+| `sea_ticket.note_added` | `ticket_id note_id body created_at` | insert note, `last_seq` |
+| `sea_link.created` | `link_id from_id to_id link_type created_at` (+ `from_row_version reason` via sea_link; `batch_id` via apply; `via` via transition) | insert active link; when `from_row_version` present, bump the from ticket |
+| `sea_link.tombstoned` | `link_id target_id from_id to_id link_type reason tombstoned_at from_row_version` | mark tombstoned; bump the from ticket |
+| `sea.batch_applied` | `batch_id tickets[{ref,ticket_id,title}] links[{link_id,from_ref,to_ref,from_id,to_id,link_type}] ticket_count link_count` | nothing (summary; carries the idempotency key for apply) |
+
+Not chained: `sea_refresh`. A heartbeat only updates `claim_expires_at` on the
+row. Consequence: after `sea-lite rebuild`, a lease shows the expiry last
+chained, which is never later than the live one.
+
+`target_id` on `sea_link.tombstoned` is the generic subject key kronicle-lite's
+retraction classifier reads, so a tombstoned link is reported as a safety
+retraction in `get_system_state`.
+
+### Idempotency
+
+`idempotency_key` on `sea_create`, `sea_apply`, `sea_update`, `sea_transition`
+and `sea_link` is stored on the chain event as `sea:<key>` (kronicle-lite's
+`events.idempotency_key` is UNIQUE). Before doing any row work, a handler looks
+the key up; on a hit it returns a result reconstructed from the stored
+payload with `replayed: true` and writes nothing. Reusing a key for a
+different operation is an `invalid_input` error, not a silent replay.
+
+Claims are not keyed: a repeated `sea_claim` by the current holder rotates
+the token, which is the useful behaviour for a retry.
+
+## Fence semantics
+
+- A claim token is 32 random bytes, hex-encoded (64 chars), shown to the
+  caller once. The row and the chain hold `sha256(token)` only.
+- `validateFence(row, token, actor, now)` checks in this order and reports
+  the first failure:
+  1. `fence_invalid` — no claim on the row, or `sha256(token)` does not match;
+  2. `fence_foreign_holder` — hash matches but `claim_actor` is not the caller
+     (a leaked token);
+  3. `fence_invalid` — claim row has no expiry (corrupt);
+  4. `fence_expired` — `claim_expires_at <= now`.
+- Leases: `sea_claim` / `sea_next` / `sea_create(claim_seconds)` take 1–600 s
+  (default 300). `sea_refresh` sets expiry to `max(current, now + n)`,
+  `n ≤ 600`.
+- Lazy expiry: any handler that loads a ticket row first runs `sweepExpired`.
+  If the lease has lapsed it clears the claim and appends
+  `sea_ticket.claim_expired` once (the cleared row cannot trigger it again).
+  `sea_list` and `sea_next` sweep every lapsed lease in the table so the
+  queue view is honest.
+- Claiming a set: ids are resolved, de-duplicated and sorted; rows are
+  checked in that order; any conflict throws and the transaction rolls back,
+  so either every ticket in the set is claimed or none is.
+- Entering a terminal status releases the claim (`claim_auto_released`).
+- Fenced tools: `sea_update`, `sea_transition`, `sea_link` (on `from`),
+  `sea_refresh`, `sea_release` (holder path). `sea_release force: true`
+  bypasses the fence and requires `--role operator`.
+
+## Optimistic concurrency
+
+`row_version` increments on every content write (`sea_update` with changes,
+`sea_transition`, `sea_link` add/remove on the `from` ticket). Pass
+`expected_version` to refuse a write when the row has moved; the
+`version_conflict` error carries `current_version` and a small snapshot so
+the caller can re-read without a round-trip. Claims and notes do not bump
+`row_version`.
+
+## Taxonomy
+
+Statuses: work track `idea → triaged → in_progress → resolved`; holding
+`parked | blocked | needs_decision` (from any active state; exit only to
+`idea`, `triaged`, `in_progress`, plus `in_design` when the design track is
+on); terminal `resolved | wont_fix | duplicate | dropped | merged`. Design
+track (`--tracks work,design` / `SEA_LITE_TRACKS`): `idea → in_design → ready
+→ in_progress`. Any active state may enter any holding or terminal state.
+Same-state transitions are rejected (`no_op_transition`).
+
+`sea_next` eligibility: status `triaged` or `in_progress`, no live claim,
+priority not `parked`, assignee is the caller or NULL, and every predecessor
+is terminal. Predecessors of T are tickets P with an active `P blocks T` or
+`T depends_on P`. Order: priority rank, then `in_progress` before `triaged`,
+then `created_seq` ascending.
+
+DAG-class link types (`parent_of`, `depends_on`, `blocks`) are kept acyclic:
+`sea_link add` runs a recursive-CTE reachability query from `to` back to
+`from` over active DAG edges and rejects with the cycle path; `sea_apply`
+checks the batch at its barrier. Other link types may form cycles.
+
+## Rebuild and verify
+
+`sea-lite rebuild` drops the sea tables (and their triggers), recreates them,
+and replays every event whose type starts with `sea` in chain order inside
+one transaction. `sea-lite verify` runs kronicle-lite's `verify()` over the
+whole chain and additionally reports any sea row whose `created_seq`,
+`last_seq`, `chain_seq` or `tombstone_seq` does not resolve to an event.
