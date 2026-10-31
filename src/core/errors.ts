@@ -20,6 +20,8 @@ export const ERROR_CODES = [
   'forbidden',
   'batch_invalid',
   'nothing_eligible',
+  'confirmation_required',
+  'confirmation_declined',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

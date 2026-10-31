@@ -9,7 +9,7 @@
  *   sea-lite verify  [--data-dir DIR]        chain verify + sea rows whose chain_seq is missing
  */
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { defaultDataDir } from 'kronicle-lite';
 
 import { SeaError } from './core/errors.js';
@@ -98,15 +98,23 @@ async function main(argv: string[]): Promise<number> {
   switch (cmd) {
     case 'serve': {
       const store = openStore(flags);
-      const server = createServer(store, { version: VERSION });
-      const transport = new StdioServerTransport();
       process.stderr.write(
         `sea-lite ${VERSION} serving on stdio; data dir ${store.kronicle.dataDir}; actor ${store.actor}; role ${store.role}; tracks ${store.lifecycle.tracks.join(',')}\n`,
       );
-      await server.connect(transport);
-      await new Promise<void>((resolve) => {
-        transport.onclose = () => resolve();
+      // serveStdio owns the era decision for the connection: a 2026-07-28
+      // client (per-request _meta) and a 2025 client (initialize handshake)
+      // are both served from the same factory. The store is shared; each
+      // pinned instance is a fresh McpServer over it.
+      const transport = new StdioServerTransport();
+      const handle = serveStdio(() => createServer(store, { version: VERSION }), {
+        transport,
+        onerror: (err) => process.stderr.write(`sea-lite: ${err.message}\n`),
       });
+      await new Promise<void>((resolve) => {
+        process.stdin.once('end', () => resolve());
+        process.stdin.once('close', () => resolve());
+      });
+      await handle.close();
       store.close();
       return 0;
     }

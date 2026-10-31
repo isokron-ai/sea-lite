@@ -181,6 +181,13 @@ export const TransitionShape = {
   to: Status,
   reason: z.string().max(2000).optional(),
   duplicate_of: TicketId.optional().describe('Required when to = duplicate; also creates a `duplicates` link.'),
+  confirm: z
+    .boolean()
+    .optional()
+    .describe(
+      'Terminal states (resolved | wont_fix | duplicate | dropped | merged) have no exit. Pass true to enter one directly. ' +
+        'When omitted, a client that supports elicitation is asked to confirm (input_required); one that does not gets confirmation_required.',
+    ),
   expected_version: ExpectedVersion,
   idempotency_key: IdempotencyKey,
   dry_run: DryRun,
