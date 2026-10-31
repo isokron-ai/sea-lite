@@ -1,0 +1,794 @@
+/**
+ * Ticket authoring and reading: create, apply (batch), update, transition,
+ * get, list. Every write is one BEGIN IMMEDIATE transaction holding the row
+ * change(s) and the chain append(s) together.
+ */
+
+import type { ChainHead } from 'kronicle-lite';
+
+import { SeaError } from '../core/errors.js';
+import { EVENT, idemKey } from '../core/events.js';
+import { clampLease, expiryFrom, hashToken, newClaimToken, validateFence } from '../core/fence.js';
+import {
+  activeLinksFor,
+  addNote,
+  checkVersion,
+  mustGetRow,
+  notesFor,
+  resolveId,
+  sweepAllExpired,
+  sweepExpired,
+  tx,
+  uuid,
+  type Ctx,
+} from '../core/repo.js';
+import {
+  parseTags,
+  rowToLink,
+  rowToTicket,
+  toCompact,
+  type LinkView,
+  type NoteRow,
+  type Ticket,
+  type TicketCompact,
+  type TicketRow,
+} from '../core/types.js';
+import { detectCycle, type DirectedEdge } from '../model/cycle-check.js';
+import { isTerminalStatus, PRIORITY_RANK, TERMINAL_STATES, sqlIn, type TicketStatus } from '../model/enums.js';
+import { legalNextStates, validateTransition } from '../model/lifecycle.js';
+import type { ApplyInput, CreateInput, GetInput, ListInput, TransitionInput, UpdateInput } from '../model/schemas.js';
+import { findPossibleDuplicates, type PossibleDuplicate } from './dedup.js';
+
+// ───────────────────────────── create ─────────────────────────────
+
+export interface CreateResult {
+  ticket: Ticket;
+  claim_token: string | null;
+  claim_expires_at: string | null;
+  possible_duplicates: PossibleDuplicate[];
+  head: ChainHead;
+  replayed: boolean;
+  dry_run: boolean;
+}
+
+interface CreatedPayload {
+  ticket_id: string;
+  kind: Ticket['kind'];
+  title: string;
+  body: string;
+  status: TicketStatus;
+  priority: Ticket['priority'];
+  tags: string[];
+  assignee: string | null;
+  created_by: string;
+  created_at: string;
+  batch_id?: string;
+  ref?: string;
+}
+
+function ticketFromCreatedPayload(p: CreatedPayload, seq: number): Ticket {
+  return {
+    id: p.ticket_id,
+    kind: p.kind,
+    title: p.title,
+    body: p.body,
+    status: p.status,
+    priority: p.priority,
+    tags: p.tags,
+    assignee: p.assignee,
+    duplicate_of: null,
+    created_by: p.created_by,
+    created_at: p.created_at,
+    updated_at: p.created_at,
+    row_version: 1,
+    claim: null,
+    created_seq: seq,
+    last_seq: seq,
+  };
+}
+
+/** Insert one ticket row + its created event. Caller holds the transaction. */
+function insertTicket(
+  ctx: Ctx,
+  fields: {
+    title: string;
+    body: string;
+    kind: Ticket['kind'];
+    priority: Ticket['priority'];
+    tags: string[];
+    assignee: string | undefined;
+    status: TicketStatus;
+  },
+  extra: { batch_id?: string; ref?: string } = {},
+  idempotency_key?: string,
+): { row: TicketRow; seq: number } {
+  const id = uuid();
+  const created_at = ctx.now.toISOString();
+  const tags = [...new Set(fields.tags)];
+  const payload: CreatedPayload = {
+    ticket_id: id,
+    kind: fields.kind,
+    title: fields.title,
+    body: fields.body,
+    status: fields.status,
+    priority: fields.priority,
+    tags,
+    assignee: fields.assignee ?? null,
+    created_by: ctx.actor,
+    created_at,
+    ...extra,
+  };
+  const r = ctx.chain.append({
+    event_type: EVENT.ticket_created,
+    actor_id: ctx.actor,
+    occurred_at: ctx.now.toISOString(),
+    payload: payload as unknown as Record<string, unknown>,
+    ...(idempotency_key !== undefined ? { idempotency_key } : {}),
+  });
+  ctx.db
+    .prepare(
+      `INSERT INTO sea_tickets (id, kind, title, body, status, priority, tags, assignee, duplicate_of, created_by,
+         created_at, updated_at, row_version, created_seq, last_seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?)`,
+    )
+    .run(
+      id,
+      fields.kind,
+      fields.title,
+      fields.body,
+      fields.status,
+      fields.priority,
+      JSON.stringify(tags),
+      fields.assignee ?? null,
+      ctx.actor,
+      created_at,
+      created_at,
+      r.event.seq,
+      r.event.seq,
+    );
+  return { row: mustGetRow(ctx.db, id), seq: r.event.seq };
+}
+
+/** Set a fresh claim on a row and chain it. Returns the one-time token. */
+export function placeClaim(
+  ctx: Ctx,
+  row: TicketRow,
+  lease_seconds: number,
+  extra: Record<string, unknown> = {},
+): { token: string; expires_at: string; seq: number } {
+  const token = newClaimToken();
+  const token_hash = hashToken(token);
+  const expires_at = expiryFrom(ctx.now, lease_seconds);
+  const rotated = row.claim_token_hash !== null && row.claim_actor === ctx.actor;
+  const r = ctx.chain.append({
+    event_type: EVENT.ticket_claimed,
+    actor_id: ctx.actor,
+    occurred_at: ctx.now.toISOString(),
+    payload: {
+      ticket_id: row.id,
+      claim_token_hash: token_hash,
+      claim_actor: ctx.actor,
+      expires_at,
+      lease_seconds,
+      rotated,
+      ...extra,
+    },
+  });
+  ctx.db
+    .prepare(
+      `UPDATE sea_tickets SET claim_token_hash = ?, claim_actor = ?, claim_expires_at = ?, claim_write_count = 0,
+         last_seq = ? WHERE id = ?`,
+    )
+    .run(token_hash, ctx.actor, expires_at, r.event.seq, row.id);
+  return { token, expires_at, seq: r.event.seq };
+}
+
+export function create(ctx: Ctx, input: CreateInput): CreateResult {
+  const key = idemKey(input.idempotency_key);
+  return tx(ctx.db, () => {
+    if (key !== undefined) {
+      const prior = ctx.chain.findByIdempotencyKey(key);
+      if (prior) {
+        if (prior.event_type !== EVENT.ticket_created) {
+          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
+        }
+        return {
+          ticket: ticketFromCreatedPayload(prior.payload as unknown as CreatedPayload, prior.seq),
+          claim_token: null,
+          claim_expires_at: null,
+          possible_duplicates: [],
+          head: ctx.chain.head(),
+          replayed: true,
+          dry_run: false,
+        };
+      }
+    }
+    const possible_duplicates = findPossibleDuplicates(ctx.db, input.title);
+    const lease = input.claim_seconds !== undefined ? clampLease(input.claim_seconds) : null;
+    if (input.dry_run) {
+      const preview: Ticket = {
+        id: '(dry_run)',
+        kind: input.kind,
+        title: input.title,
+        body: input.body,
+        status: input.status,
+        priority: input.priority,
+        tags: [...new Set(input.tags)],
+        assignee: input.assignee ?? null,
+        duplicate_of: null,
+        created_by: ctx.actor,
+        created_at: ctx.now.toISOString(),
+        updated_at: ctx.now.toISOString(),
+        row_version: 1,
+        claim: null,
+        created_seq: 0,
+        last_seq: 0,
+      };
+      return {
+        ticket: preview,
+        claim_token: null,
+        claim_expires_at: null,
+        possible_duplicates,
+        head: ctx.chain.head(),
+        replayed: false,
+        dry_run: true,
+      };
+    }
+    const { row } = insertTicket(
+      ctx,
+      {
+        title: input.title,
+        body: input.body,
+        kind: input.kind,
+        priority: input.priority,
+        tags: input.tags,
+        assignee: input.assignee,
+        status: input.status,
+      },
+      {},
+      key,
+    );
+    let claim_token: string | null = null;
+    let claim_expires_at: string | null = null;
+    if (lease !== null) {
+      const c = placeClaim(ctx, row, lease, { on_create: true });
+      claim_token = c.token;
+      claim_expires_at = c.expires_at;
+    }
+    return {
+      ticket: rowToTicket(mustGetRow(ctx.db, row.id)),
+      claim_token,
+      claim_expires_at,
+      possible_duplicates,
+      head: ctx.chain.head(),
+      replayed: false,
+      dry_run: false,
+    };
+  });
+}
+
+// ───────────────────────────── apply (batch) ─────────────────────────────
+
+export interface ApplyResult {
+  batch_id: string | null;
+  tickets: { ref: string; ticket_id: string; title: string }[];
+  links: { link_id: string; from_ref: string; to_ref: string; from_id: string; to_id: string; link_type: string }[];
+  head: ChainHead;
+  replayed: boolean;
+  dry_run: boolean;
+}
+
+interface BatchPayload {
+  batch_id: string;
+  tickets: { ref: string; ticket_id: string; title: string }[];
+  links: { link_id: string; from_ref: string; to_ref: string; from_id: string; to_id: string; link_type: string }[];
+}
+
+export function validateBatch(input: ApplyInput): void {
+  const refs = new Set<string>();
+  const problems: { code: string; message: string; at?: string }[] = [];
+  for (const t of input.tickets) {
+    if (refs.has(t.ref)) problems.push({ code: 'duplicate_ref', message: `ref "${t.ref}" appears more than once`, at: t.ref });
+    refs.add(t.ref);
+  }
+  const seenLinks = new Set<string>();
+  for (const l of input.links) {
+    if (!refs.has(l.from_ref)) {
+      problems.push({
+        code: 'foreign_ref',
+        message: `link from_ref "${l.from_ref}" is not a ticket in this batch (links to existing tickets: use sea_link after apply)`,
+        at: l.from_ref,
+      });
+    }
+    if (!refs.has(l.to_ref)) {
+      problems.push({
+        code: 'foreign_ref',
+        message: `link to_ref "${l.to_ref}" is not a ticket in this batch (links to existing tickets: use sea_link after apply)`,
+        at: l.to_ref,
+      });
+    }
+    if (l.from_ref === l.to_ref) problems.push({ code: 'self_loop', message: `link ${l.link_type} from "${l.from_ref}" to itself`, at: l.from_ref });
+    const k = `${l.from_ref}|${l.to_ref}|${l.link_type}`;
+    if (seenLinks.has(k)) problems.push({ code: 'duplicate_link', message: `link ${k.replace(/\|/g, ' ')} appears more than once` });
+    seenLinks.add(k);
+  }
+  if (problems.length > 0) {
+    throw new SeaError('batch_invalid', `batch rejected: ${problems.length} problem(s); nothing was written`, { problems });
+  }
+  const edges: DirectedEdge[] = input.links.map((l) => ({ from: l.from_ref, to: l.to_ref, linkType: l.link_type }));
+  // New tickets have no existing edges, so the barrier is batch-local.
+  const cycle = detectCycle([], edges);
+  if (cycle) {
+    throw new SeaError('cycle', `batch would create a cycle: ${cycle.path.join(' → ')} via ${cycle.via.linkType}`, {
+      path: cycle.path,
+      via: cycle.via,
+    });
+  }
+}
+
+export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
+  const key = idemKey(input.idempotency_key);
+  return tx(ctx.db, () => {
+    if (key !== undefined) {
+      const prior = ctx.chain.findByIdempotencyKey(key);
+      if (prior) {
+        if (prior.event_type !== EVENT.batch_applied) {
+          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
+        }
+        const p = prior.payload as unknown as BatchPayload;
+        return { batch_id: p.batch_id, tickets: p.tickets, links: p.links, head: ctx.chain.head(), replayed: true, dry_run: false };
+      }
+    }
+    validateBatch(input);
+    if (input.dry_run) {
+      return {
+        batch_id: null,
+        tickets: input.tickets.map((t) => ({ ref: t.ref, ticket_id: '(dry_run)', title: t.title })),
+        links: input.links.map((l) => ({
+          link_id: '(dry_run)',
+          from_ref: l.from_ref,
+          to_ref: l.to_ref,
+          from_id: '(dry_run)',
+          to_id: '(dry_run)',
+          link_type: l.link_type,
+        })),
+        head: ctx.chain.head(),
+        replayed: false,
+        dry_run: true,
+      };
+    }
+    const batch_id = uuid();
+    const byRef = new Map<string, string>();
+    const tickets: BatchPayload['tickets'] = [];
+    for (const t of input.tickets) {
+      const { row } = insertTicket(
+        ctx,
+        { title: t.title, body: t.body, kind: t.kind, priority: t.priority, tags: t.tags, assignee: t.assignee, status: t.status },
+        { batch_id, ref: t.ref },
+      );
+      byRef.set(t.ref, row.id);
+      tickets.push({ ref: t.ref, ticket_id: row.id, title: row.title });
+    }
+    const links: BatchPayload['links'] = [];
+    for (const l of input.links) {
+      const from_id = byRef.get(l.from_ref)!;
+      const to_id = byRef.get(l.to_ref)!;
+      const link_id = insertLink(ctx, from_id, to_id, l.link_type, { batch_id });
+      links.push({ link_id, from_ref: l.from_ref, to_ref: l.to_ref, from_id, to_id, link_type: l.link_type });
+    }
+    const payload: BatchPayload = { batch_id, tickets, links };
+    ctx.chain.append({
+      event_type: EVENT.batch_applied,
+      actor_id: ctx.actor,
+    occurred_at: ctx.now.toISOString(),
+      payload: { ...payload, ticket_count: tickets.length, link_count: links.length } as unknown as Record<string, unknown>,
+      ...(key !== undefined ? { idempotency_key: key } : {}),
+    });
+    return { batch_id, tickets, links, head: ctx.chain.head(), replayed: false, dry_run: false };
+  });
+}
+
+/** Insert an active link row + event. Caller has validated everything. */
+export function insertLink(
+  ctx: Ctx,
+  from_id: string,
+  to_id: string,
+  link_type: string,
+  extra: Record<string, unknown> = {},
+  idempotency_key?: string,
+): string {
+  const link_id = uuid();
+  const created_at = ctx.now.toISOString();
+  const r = ctx.chain.append({
+    event_type: EVENT.link_created,
+    actor_id: ctx.actor,
+    occurred_at: ctx.now.toISOString(),
+    payload: { link_id, from_id, to_id, link_type, created_at, ...extra },
+    ...(idempotency_key !== undefined ? { idempotency_key } : {}),
+  });
+  ctx.db
+    .prepare(
+      `INSERT INTO sea_links (link_id, from_id, to_id, link_type, state, created_by, created_at, chain_seq)
+       VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`,
+    )
+    .run(link_id, from_id, to_id, link_type, ctx.actor, created_at, r.event.seq);
+  return link_id;
+}
+
+// ───────────────────────────── update ─────────────────────────────
+
+export interface UpdateResult {
+  ticket: Ticket | null;
+  ticket_id: string;
+  changed: string[];
+  row_version: number;
+  note: NoteRow | null;
+  head: ChainHead;
+  replayed: boolean;
+  dry_run: boolean;
+}
+
+export function update(ctx: Ctx, input: UpdateInput): UpdateResult {
+  const key = idemKey(input.idempotency_key);
+  return tx(ctx.db, () => {
+    if (key !== undefined) {
+      const prior = ctx.chain.findByIdempotencyKey(key);
+      if (prior) {
+        if (prior.event_type !== EVENT.ticket_updated) {
+          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
+        }
+        const p = prior.payload as { ticket_id: string; changes: Record<string, unknown>; row_version: number };
+        return {
+          ticket: null,
+          ticket_id: p.ticket_id,
+          changed: Object.keys(p.changes),
+          row_version: p.row_version,
+          note: null,
+          head: ctx.chain.head(),
+          replayed: true,
+          dry_run: false,
+        };
+      }
+    }
+    const id = resolveId(ctx.db, input.ticket_id);
+    const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
+    validateFence(row, input.claim_token, ctx.actor, ctx.now);
+    checkVersion(row, input.expected_version);
+
+    const changes: Record<string, unknown> = {};
+    if (input.title !== undefined && input.title !== row.title) changes['title'] = input.title;
+    if (input.body !== undefined && input.body !== row.body) changes['body'] = input.body;
+    if (input.kind !== undefined && input.kind !== row.kind) changes['kind'] = input.kind;
+    if (input.priority !== undefined && input.priority !== row.priority) changes['priority'] = input.priority;
+    if (input.assignee !== undefined && input.assignee !== row.assignee) changes['assignee'] = input.assignee;
+    let tags = parseTags(row.tags);
+    if (input.add_tags || input.remove_tags) {
+      const next = new Set(tags);
+      for (const t of input.add_tags ?? []) next.add(t);
+      for (const t of input.remove_tags ?? []) next.delete(t);
+      const arr = [...next];
+      if (JSON.stringify(arr) !== JSON.stringify(tags)) {
+        changes['tags'] = arr;
+        tags = arr;
+      }
+    }
+    const changed = Object.keys(changes);
+    if (changed.length === 0 && input.note === undefined) {
+      throw new SeaError('invalid_input', 'nothing to change: no field differs and no note was given');
+    }
+    if (input.dry_run) {
+      return {
+        ticket: rowToTicket(row),
+        ticket_id: id,
+        changed,
+        row_version: row.row_version,
+        note: null,
+        head: ctx.chain.head(),
+        replayed: false,
+        dry_run: true,
+      };
+    }
+    let row_version = row.row_version;
+    if (changed.length > 0) {
+      row_version = row.row_version + 1;
+      const updated_at = ctx.now.toISOString();
+      const r = ctx.chain.append({
+        event_type: EVENT.ticket_updated,
+        actor_id: ctx.actor,
+    occurred_at: ctx.now.toISOString(),
+        payload: { ticket_id: id, changes, tags, row_version, updated_at },
+        ...(key !== undefined ? { idempotency_key: key } : {}),
+      });
+      ctx.db
+        .prepare(
+          `UPDATE sea_tickets SET title = ?, body = ?, kind = ?, priority = ?, tags = ?, assignee = ?, row_version = ?,
+             updated_at = ?, claim_write_count = claim_write_count + 1, last_seq = ? WHERE id = ?`,
+        )
+        .run(
+          (changes['title'] as string | undefined) ?? row.title,
+          (changes['body'] as string | undefined) ?? row.body,
+          (changes['kind'] as string | undefined) ?? row.kind,
+          (changes['priority'] as string | undefined) ?? row.priority,
+          JSON.stringify(tags),
+          'assignee' in changes ? (changes['assignee'] as string | null) : row.assignee,
+          row_version,
+          updated_at,
+          r.event.seq,
+          id,
+        );
+    }
+    const note = input.note !== undefined ? addNote(ctx, id, input.note) : null;
+    return {
+      ticket: rowToTicket(mustGetRow(ctx.db, id)),
+      ticket_id: id,
+      changed,
+      row_version,
+      note,
+      head: ctx.chain.head(),
+      replayed: false,
+      dry_run: false,
+    };
+  });
+}
+
+// ───────────────────────────── transition ─────────────────────────────
+
+export interface TransitionResult {
+  ticket: Ticket | null;
+  ticket_id: string;
+  from: TicketStatus;
+  to: TicketStatus;
+  claim_released: boolean;
+  duplicates_link_id: string | null;
+  legal_next: readonly TicketStatus[];
+  head: ChainHead;
+  replayed: boolean;
+  dry_run: boolean;
+}
+
+export function transition(ctx: Ctx, input: TransitionInput): TransitionResult {
+  const key = idemKey(input.idempotency_key);
+  return tx(ctx.db, () => {
+    if (key !== undefined) {
+      const prior = ctx.chain.findByIdempotencyKey(key);
+      if (prior) {
+        if (prior.event_type !== EVENT.ticket_status_set) {
+          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
+        }
+        const p = prior.payload as {
+          ticket_id: string;
+          from: TicketStatus;
+          to: TicketStatus;
+          claim_auto_released: boolean;
+          duplicates_link_id: string | null;
+        };
+        return {
+          ticket: null,
+          ticket_id: p.ticket_id,
+          from: p.from,
+          to: p.to,
+          claim_released: p.claim_auto_released,
+          duplicates_link_id: p.duplicates_link_id ?? null,
+          legal_next: legalNextStates(p.to, ctx.lifecycle),
+          head: ctx.chain.head(),
+          replayed: true,
+          dry_run: false,
+        };
+      }
+    }
+    const id = resolveId(ctx.db, input.ticket_id);
+    const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
+    validateFence(row, input.claim_token, ctx.actor, ctx.now);
+    checkVersion(row, input.expected_version);
+
+    const v = validateTransition(row.status, input.to, ctx.lifecycle);
+    if (!v.allowed) {
+      throw new SeaError('illegal_transition', `${row.status} → ${input.to}: ${v.message}`, {
+        ticket_id: id,
+        from: row.status,
+        to: input.to,
+        reason: v.reason,
+        legal_next: v.legal_next ?? [],
+      });
+    }
+    let duplicate_of: string | null = null;
+    if (input.to === 'duplicate') {
+      if (input.duplicate_of === undefined) {
+        throw new SeaError('invalid_input', 'to = duplicate requires duplicate_of', { ticket_id: id });
+      }
+      duplicate_of = resolveId(ctx.db, input.duplicate_of);
+      if (duplicate_of === id) throw new SeaError('self_loop', 'a ticket cannot duplicate itself', { ticket_id: id });
+    }
+    const willRelease = isTerminalStatus(input.to) && row.claim_token_hash !== null;
+    if (input.dry_run) {
+      return {
+        ticket: rowToTicket(row),
+        ticket_id: id,
+        from: row.status,
+        to: input.to,
+        claim_released: willRelease,
+        duplicates_link_id: null,
+        legal_next: legalNextStates(input.to, ctx.lifecycle),
+        head: ctx.chain.head(),
+        replayed: false,
+        dry_run: true,
+      };
+    }
+    let duplicates_link_id: string | null = null;
+    if (duplicate_of !== null) {
+      const existing = ctx.db
+        .prepare(`SELECT link_id FROM sea_links WHERE state = 'active' AND from_id = ? AND to_id = ? AND link_type = 'duplicates'`)
+        .get(id, duplicate_of) as { link_id: string } | undefined;
+      duplicates_link_id = existing ? existing.link_id : insertLink(ctx, id, duplicate_of, 'duplicates', { via: 'transition' });
+    }
+    const row_version = row.row_version + 1;
+    const updated_at = ctx.now.toISOString();
+    const r = ctx.chain.append({
+      event_type: EVENT.ticket_status_set,
+      actor_id: ctx.actor,
+    occurred_at: ctx.now.toISOString(),
+      payload: {
+        ticket_id: id,
+        from: row.status,
+        to: input.to,
+        reason: input.reason ?? null,
+        duplicate_of,
+        duplicates_link_id,
+        row_version,
+        updated_at,
+        claim_auto_released: willRelease,
+        claim_token_hash: willRelease ? row.claim_token_hash : null,
+      },
+      ...(key !== undefined ? { idempotency_key: key } : {}),
+    });
+    ctx.db
+      .prepare(
+        `UPDATE sea_tickets SET status = ?, duplicate_of = COALESCE(?, duplicate_of), row_version = ?, updated_at = ?,
+           claim_write_count = claim_write_count + 1, last_seq = ? WHERE id = ?`,
+      )
+      .run(input.to, duplicate_of, row_version, updated_at, r.event.seq, id);
+    if (willRelease) {
+      ctx.db
+        .prepare(`UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0 WHERE id = ?`)
+        .run(id);
+    }
+    return {
+      ticket: rowToTicket(mustGetRow(ctx.db, id)),
+      ticket_id: id,
+      from: row.status,
+      to: input.to,
+      claim_released: willRelease,
+      duplicates_link_id,
+      legal_next: legalNextStates(input.to, ctx.lifecycle),
+      head: ctx.chain.head(),
+      replayed: false,
+      dry_run: false,
+    };
+  });
+}
+
+// ───────────────────────────── get ─────────────────────────────
+
+export interface LinkWithPeer extends LinkView {
+  direction: 'out' | 'in';
+  peer: { id: string; title: string; status: TicketStatus };
+}
+
+export interface GetResult {
+  ticket: Ticket;
+  legal_next: readonly TicketStatus[];
+  links: LinkWithPeer[];
+  notes: NoteRow[];
+  head: ChainHead;
+}
+
+export function get(ctx: Ctx, input: GetInput): GetResult {
+  return tx(ctx.db, () => {
+    const id = resolveId(ctx.db, input.id);
+    const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
+    const links: LinkWithPeer[] = activeLinksFor(ctx.db, id).map((l) => {
+      const peerId = l.from_id === id ? l.to_id : l.from_id;
+      const peer = mustGetRow(ctx.db, peerId);
+      return { ...rowToLink(l), direction: l.from_id === id ? 'out' : 'in', peer: { id: peer.id, title: peer.title, status: peer.status } };
+    });
+    return {
+      ticket: rowToTicket(row),
+      legal_next: legalNextStates(row.status, ctx.lifecycle),
+      links,
+      notes: notesFor(ctx.db, id),
+      head: ctx.chain.head(),
+    };
+  });
+}
+
+// ───────────────────────────── list ─────────────────────────────
+
+export interface ListResult {
+  tickets: (Ticket | TicketCompact)[];
+  count: number;
+  next_cursor: string | null;
+  swept_expired: number;
+  head: ChainHead;
+}
+
+function encodeCursor(offset: number): string {
+  return Buffer.from(JSON.stringify({ o: offset }), 'utf8').toString('base64url');
+}
+
+function decodeCursor(c: string | undefined): number {
+  if (c === undefined) return 0;
+  try {
+    const v = JSON.parse(Buffer.from(c, 'base64url').toString('utf8')) as { o?: unknown };
+    return typeof v.o === 'number' && Number.isInteger(v.o) && v.o >= 0 ? v.o : 0;
+  } catch {
+    throw new SeaError('invalid_input', 'cursor is not one this server issued');
+  }
+}
+
+export function list(ctx: Ctx, input: ListInput): ListResult {
+  return tx(ctx.db, () => {
+    const swept = sweepAllExpired(ctx);
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (input.status && input.status.length > 0) {
+      where.push(`t.status IN (${input.status.map(() => '?').join(', ')})`);
+      params.push(...input.status);
+    } else if (!input.include_terminal) {
+      where.push(`t.status NOT IN (${sqlIn(TERMINAL_STATES)})`);
+    }
+    if (input.kind && input.kind.length > 0) {
+      where.push(`t.kind IN (${input.kind.map(() => '?').join(', ')})`);
+      params.push(...input.kind);
+    }
+    if (input.priority && input.priority.length > 0) {
+      where.push(`t.priority IN (${input.priority.map(() => '?').join(', ')})`);
+      params.push(...input.priority);
+    }
+    if (input.assignee !== undefined) {
+      if (input.assignee === 'none') where.push(`t.assignee IS NULL`);
+      else {
+        where.push(`t.assignee = ?`);
+        params.push(input.assignee === 'me' ? ctx.actor : input.assignee);
+      }
+    }
+    if (input.tag !== undefined) {
+      where.push(`EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)`);
+      params.push(input.tag);
+    }
+    if (input.claimed === 'yes') where.push(`t.claim_token_hash IS NOT NULL`);
+    else if (input.claimed === 'no') where.push(`t.claim_token_hash IS NULL`);
+    else if (input.claimed === 'mine') {
+      where.push(`t.claim_actor = ?`);
+      params.push(ctx.actor);
+    }
+    let fromSql = `sea_tickets t`;
+    let orderSql = `CASE t.priority ${Object.entries(PRIORITY_RANK)
+      .map(([p, r]) => `WHEN '${p}' THEN ${r}`)
+      .join(' ')} END, t.updated_at DESC, t.id`;
+    if (input.query !== undefined && input.query.trim().length > 0) {
+      const expr = input.query
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((w) => w.length > 0)
+        .map((w) => `"${w.replace(/"/g, '""')}"`)
+        .join(' OR ');
+      if (expr.length > 0) {
+        fromSql = `sea_tickets_fts f JOIN sea_tickets t ON t.id = f.ticket_id`;
+        where.push(`sea_tickets_fts MATCH ?`);
+        params.push(expr);
+        orderSql = `bm25(sea_tickets_fts), t.updated_at DESC`;
+      }
+    }
+    const offset = decodeCursor(input.cursor);
+    const sql = `SELECT t.* FROM ${fromSql}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${orderSql} LIMIT ? OFFSET ?`;
+    const rows = ctx.db.prepare(sql).all(...params, input.limit + 1, offset) as TicketRow[];
+    const page = rows.slice(0, input.limit);
+    const tickets = page.map((r) => (input.view === 'full' ? rowToTicket(r) : toCompact(rowToTicket(r))));
+    return {
+      tickets,
+      count: tickets.length,
+      next_cursor: rows.length > input.limit ? encodeCursor(offset + input.limit) : null,
+      swept_expired: swept,
+      head: ctx.chain.head(),
+    };
+  });
+}
