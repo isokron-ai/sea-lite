@@ -202,7 +202,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       description:
         'Dispatch: atomically pick and claim the highest-priority unclaimed triaged or in_progress ticket that is assigned ' +
         'to you or unassigned, is not priority parked, and whose predecessors (tickets that `blocks` it, tickets it ' +
-        '`depends_on`) are all terminal. in_progress beats triaged at equal priority; older first. Returns ticket + ' +
+        '`depends_on`) are all terminal. in_progress beats triaged at equal priority; then oldest (chain order) first. Returns ticket + ' +
         'claim_token, or ticket: null with reason nothing_eligible. Call it in a loop.',
       inputSchema: NextShape,
       annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },

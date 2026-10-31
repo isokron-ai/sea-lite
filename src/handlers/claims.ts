@@ -182,7 +182,7 @@ export function next(ctx: Ctx, input: NextInput): NextResult {
     }
     const order = `CASE t.priority ${Object.entries(PRIORITY_RANK)
       .map(([p, r]) => `WHEN '${p}' THEN ${r}`)
-      .join(' ')} END, CASE t.status WHEN 'in_progress' THEN 0 ELSE 1 END, t.created_at ASC, t.id ASC`;
+      .join(' ')} END, CASE t.status WHEN 'in_progress' THEN 0 ELSE 1 END, t.created_seq ASC`;
     const considered = (
       ctx.db.prepare(`SELECT COUNT(*) AS n FROM sea_tickets t WHERE ${where.join(' AND ')}`).get(...params) as { n: number }
     ).n;
