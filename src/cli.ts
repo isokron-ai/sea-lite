@@ -18,7 +18,8 @@ import { ALL_STATES, type TicketStatus } from './model/enums.js';
 import { createServer } from './server.js';
 import { parseRole, parseTracks, SeaLite } from './store.js';
 
-export const VERSION = '0.1.0';
+export { VERSION } from './version.js';
+import { VERSION } from './version.js';
 
 interface Args {
   cmd: string;

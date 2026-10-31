@@ -5,6 +5,7 @@
  */
 
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { VERSION } from './version.js';
 import { ChainConflictError } from 'kronicle-lite';
 import { z } from 'zod';
 
@@ -60,7 +61,7 @@ function wrap<T>(fn: () => T): ToolText {
 export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServer {
   const states = enabledStates(store.lifecycle).join(' | ');
   const server = new McpServer(
-    { name: 'sea-lite', version: opts.version ?? '0.1.0' },
+    { name: 'sea-lite', version: opts.version ?? VERSION },
     {
       instructions:
         'sea-lite is a work queue for parallel coding agents. Tickets are fenced: every mutation (update, transition, link) ' +
