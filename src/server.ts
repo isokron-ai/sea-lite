@@ -85,7 +85,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'Pass `claim_seconds` to claim it in the same call and get a claim_token back. `idempotency_key` makes retries safe. ' +
         `Kinds: ${TICKET_KINDS.join(' | ')}. Priorities: ${PRIORITIES.join(' | ')}.`,
       inputSchema: CreateShape,
-      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) => wrap(() => store.create(args)),
   );
@@ -100,7 +100,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'duplicate links, or a parent_of/depends_on/blocks cycle — the error lists every problem. `dry_run` validates only. ' +
         'Use this to lay down an epic with its children and dependency edges in one shot.',
       inputSchema: ApplyShape,
-      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) => wrap(() => store.apply(args)),
   );
@@ -115,7 +115,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'version_conflict if someone changed the ticket since you read it. Notes are the hand-off channel: write what you ' +
         'found and what is left before you release.',
       inputSchema: UpdateShape,
-      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     (args) => wrap(() => store.update(args)),
   );
@@ -131,7 +131,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         `\`duplicates\` link. Entering a terminal state releases your claim. On rejection the error carries legal_next. ` +
         `Known statuses: ${ALL_STATES.join(' | ')}.`,
       inputSchema: TransitionShape,
-      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     (args) => wrap(() => store.transition(args)),
   );
@@ -146,7 +146,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'its path. Remove tombstones the link (history keeps it). `from blocks to` and `from depends_on to` decide what sea_next ' +
         'may hand out: a ticket is eligible only when every predecessor is terminal.',
       inputSchema: LinkShape,
-      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     (args) => wrap(() => store.link(args)),
   );
@@ -163,7 +163,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         '600 s; refresh with sea_refresh or let them lapse. Fails with already_claimed (naming the holder and expiry) if any ' +
         'ticket is held by someone else. Claiming a ticket you already hold rotates its token.',
       inputSchema: ClaimShape,
-      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) => wrap(() => store.claim(args)),
   );
@@ -176,7 +176,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'Heartbeat: set the lease expiry to now + extend_by_seconds (≤ 600) if that is later than the current expiry; never ' +
         'shortens. Holder-only. Not recorded on the chain, so heartbeats do not flood anyone\'s orient delta.',
       inputSchema: RefreshShape,
-      annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     (args) => wrap(() => store.refresh(args)),
   );
@@ -190,7 +190,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'Operator (server started with --role operator): `force: true` releases any holder and is recorded as ' +
         'sea_ticket.claim_force_released with your reason.',
       inputSchema: ReleaseShape,
-      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     (args) => wrap(() => store.release(args)),
   );
@@ -205,7 +205,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         '`depends_on`) are all terminal. in_progress beats triaged at equal priority; then oldest (chain order) first. Returns ticket + ' +
         'claim_token, or ticket: null with reason nothing_eligible. Call it in a loop.',
       inputSchema: NextShape,
-      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) => wrap(() => store.next(args)),
   );

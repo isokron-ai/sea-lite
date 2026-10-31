@@ -4,6 +4,17 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.1.1] — 2026-10-31
+
+### Fixed
+
+- Every write tool now sets `destructiveHint` explicitly. The MCP default is
+  `true`, so clients were treating `sea_next`, `sea_claim`, `sea_refresh`,
+  `sea_create` and `sea_apply` as destructive and prompting on each call.
+  Additive tools are `destructiveHint: false`; `sea_update`, `sea_transition`
+  (terminal states have no exit), `sea_link` (remove) and `sea_release`
+  (operator force) are `true`.
+
 ## [0.1.0] — 2026-10-31
 
 First public release.

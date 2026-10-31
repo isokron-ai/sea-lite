@@ -73,6 +73,14 @@ describe('MCP server (in-process transport)', () => {
     expect(get.annotations?.readOnlyHint).toBe(true);
   });
 
+  it('sets destructiveHint explicitly on every write tool (spec default is true)', async () => {
+    const { tools } = await client.listTools();
+    const hints = Object.fromEntries(tools.map((t) => [t.name, t.annotations?.destructiveHint]));
+    for (const t of ['sea_create', 'sea_apply', 'sea_claim', 'sea_refresh', 'sea_next']) expect(hints[t], t).toBe(false);
+    for (const t of ['sea_update', 'sea_transition', 'sea_link', 'sea_release']) expect(hints[t], t).toBe(true);
+    for (const t of ['sea_get', 'sea_list', 'sea_history']) expect(hints[t], t).toBeUndefined();
+  });
+
   it('runs the queue loop: create → next → update → transition → history, with fenced errors as isError', async () => {
     const created = parse<{ ticket: { id: string }; possible_duplicates: unknown[] }>(
       await client.callTool({ name: 'sea_create', arguments: { title: 'Wire the thing', kind: 'feature', priority: 'high', status: 'triaged' } }),
