@@ -11,25 +11,10 @@ jobs:
         node: [20, 22]
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: sea-lite
-      # kronicle-lite is a file:../kronicle-lite dependency until 0.2.0 is
-      # published; check it out as a sibling and build it first.
-      # TODO(publish): drop this step once package.json points at ^0.2.0.
-      - uses: actions/checkout@v4
-        with:
-          repository: rafe-walker/kronicle-lite
-          path: kronicle-lite
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm ci && npm run build
-        working-directory: kronicle-lite
       - run: npm ci
-        working-directory: sea-lite
       - run: npm run lint
-        working-directory: sea-lite
       - run: npm run typecheck
-        working-directory: sea-lite
       - run: npm test
-        working-directory: sea-lite

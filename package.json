@@ -56,10 +56,9 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "better-sqlite3": "^12.6.0",
-    "kronicle-lite": "file:../kronicle-lite",
+    "kronicle-lite": "^0.2.0",
     "zod": "^3.25.76"
   },
-  "//": "TODO(publish): switch kronicle-lite from file:../kronicle-lite to ^0.2.0 once 0.2.0 is on npm.",
   "devDependencies": {
     "@eslint/js": "^9.39.0",
     "@types/better-sqlite3": "^7.6.13",
