@@ -1,0 +1,74 @@
+{
+  "name": "sea-lite",
+  "version": "0.1.0",
+  "description": "MCP work queue for parallel coding agents: claim fencing, typed links, atomic batches, hash-chained history (composes with kronicle-lite).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "sea-lite": "dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "skills",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "lint": "eslint src test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "serve": "node dist/cli.js serve"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "work-queue",
+    "tickets",
+    "claim-fencing",
+    "lease",
+    "parallel-agents",
+    "sqlite",
+    "hash-chain",
+    "kronicle-lite"
+  ],
+  "author": "Joshua Bryan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rafe-walker/sea-lite.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "better-sqlite3": "^12.6.0",
+    "kronicle-lite": "file:../kronicle-lite",
+    "zod": "^3.25.76"
+  },
+  "//": "TODO(publish): switch kronicle-lite from file:../kronicle-lite to ^0.2.0 once 0.2.0 is on npm.",
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.19.0",
+    "eslint": "^9.39.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^3.2.4"
+  },
+  "mcpName": "io.github.rafe-walker/sea-lite"
+}
