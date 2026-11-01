@@ -27,7 +27,9 @@ sea-lite is a small MCP server where tickets are **fenced**:
   the precedence graph is kept acyclic on every write.
 - `sea_apply` lays down up to 50 tickets and 100 links in **one all-or-nothing
   write**, so an epic with its children and dependency edges lands as a unit
-  or not at all.
+  or not at all — and its links may point at tickets that already exist.
+- A claim can be **bound to a git worktree**; removing the worktree
+  (`sea-lite release-worktree`, a `WorktreeRemove` hook) releases it.
 - Every change is an event on a **hash chain** — the one
   [kronicle-lite](https://github.com/rafe-walker/kronicle-lite) keeps. The
   same SQLite file holds both. `sea_history` shows a ticket's record and
@@ -39,7 +41,10 @@ metadata, `server/discover`, cacheable `tools/list`, `outputSchema` +
 `structuredContent` on every tool, multi round-trip confirmation) and still
 serves 2025-era clients that open with `initialize` — the same process
 answers both. Runs over stdio next to Claude Code, Cursor, Codex, Copilot,
-Claude Desktop or any MCP client. Several server processes (one per agent,
+Claude Desktop or any MCP client, or over **Streamable HTTP**
+(`serve --http`, loopback, bearer tokens, one token per actor if you want
+attributable claims). `sea_stats` / `sea-lite stats` account for who held
+what for how long; `sea-lite doctor` checks the install. Several server processes (one per agent,
 or one shared) can point at the same file; SQLite's write lock and
 `BEGIN IMMEDIATE` make claims exclusive across processes.
 
@@ -79,8 +84,8 @@ blocked before it happens.
 ```
 
 Cursor asks before running MCP tools unless you allowlist them; the
-read-only ones (`sea_get`, `sea_list`, `sea_history`, `sea_scope_check`)
-are safe to allow. Put `skills/work-queue/SKILL.md` into a project rule so
+read-only ones (`sea_get`, `sea_list`, `sea_history`, `sea_scope_check`,
+`sea_stats`) are safe to allow. Put `skills/work-queue/SKILL.md` into a project rule so
 the agent claims its paths before editing.
 
 ### Codex (CLI, IDE extension, app)
@@ -108,7 +113,7 @@ coding agent runs in a fresh Actions sandbox, so point it at a store the
 run can reach, and allowlist tools explicitly: GitHub recommends read-only
 tools, and Copilot code review only loads tools whose
 `annotations.readOnlyHint` is `true`. Ours that qualify: **`sea_get`,
-`sea_list`, `sea_history`, `sea_scope_check`**.
+`sea_list`, `sea_history`, `sea_scope_check`, `sea_stats`**.
 
 ```json
 {
@@ -118,7 +123,7 @@ tools, and Copilot code review only loads tools whose
       "command": "npx",
       "args": ["-y", "sea-lite", "serve", "--actor", "copilot", "--data-dir", "/tmp/sea-lite"],
       "env": { "SEA_LITE_ROLE": "agent" },
-      "tools": ["sea_get", "sea_list", "sea_history", "sea_scope_check"]
+      "tools": ["sea_get", "sea_list", "sea_history", "sea_scope_check", "sea_stats"]
     }
   }
 }
@@ -139,6 +144,42 @@ and variables for the `env` block must be named `COPILOT_MCP_*`.
 A 2026-07-28 client probes with `server/discover`; a 2025 client sends
 `initialize`; both are served.
 
+### Over HTTP (`serve --http`)
+
+For a client that cannot spawn a process, or several agents sharing one
+queue server:
+
+```sh
+npx sea-lite serve --http --actor owner          # http://127.0.0.1:7418/mcp
+npx sea-lite add-token --actor agent-a           # prints a token once; stores its sha256
+npx sea-lite add-token --actor agent-b
+```
+
+```json
+{ "mcpServers": { "sea-lite": { "type": "http", "url": "http://127.0.0.1:7418/mcp",
+  "headers": { "Authorization": "Bearer <agent-a's token>" } } } }
+```
+
+| Flag | Default | |
+| --- | --- | --- |
+| `--port N` / `--host H` | `7418` / `127.0.0.1` | kronicle-lite's `serve --http` is 7417 |
+| `--bearer T` / `--bearer-file F` | `<data dir>/http-bearer.token` (created `0600`) | the shared owner token (same file kronicle-lite uses) |
+| `--actors-file F` | `<data dir>/http-actors.json` if present | per-actor tokens from `add-token` (sha256 only, `0600`) |
+| `--allow-origin H,..` / `--allow-host H,..` | loopback only | DNS-rebinding defence; add the names clients use |
+
+- **Identity per request.** The shared bearer acts as `--actor` (role
+  `--role`), and a per-call `actor_id` is a self-asserted label, as on
+  stdio. An actor token acts as *its* actor (and its entry's `role`); an
+  `actor_id` naming anyone else is refused with `forbidden`. So claims,
+  notes, chain events and `sea_stats` are attributable per token.
+- **2026-07-28 only, stateless.** POST to one endpoint; no session id;
+  `GET`/`DELETE` → 405; a 2025 `initialize` → 400 / `-32022` (use stdio
+  for those clients). Missing or wrong bearer → 401; foreign `Origin` or
+  `Host` → 403.
+- **One trust domain.** Every token reaches the whole store; there are no
+  per-ticket permissions, no read isolation, no TLS. Off-box, put TLS in
+  front. Read `docs/THREAT-MODEL.md` → "HTTP transport" before exposing it.
+
 ## Sixty-second tour
 
 ```sh
@@ -153,6 +194,8 @@ npx sea-lite list
 npx sea-lite show 0060ea49
 npx sea-lite verify          # recompute every chain hash, exit 1 on mismatch
 npx sea-lite rebuild         # drop + replay the sea tables from the chain
+npx sea-lite stats --since 7d   # per actor: claims, releases, expiries, lease time
+npx sea-lite doctor          # read-only health checks, exit 1 on a failure
 ```
 
 The agent's loop, in tool calls:
@@ -176,10 +219,10 @@ npx sea-lite scope-check src/handlers/claims.ts --actor me   # exit 1 if someone
 | Tool | What it does |
 | --- | --- |
 | `sea_create` | One ticket (`idea`, or `triaged` to make it dispatchable). Returns `possible_duplicates` (exact + full-text title match) but never blocks. `claim_seconds` claims it in the same call. |
-| `sea_apply` | 1–50 tickets + ≤ 100 links between them, all-or-nothing. Rejects duplicate refs, foreign refs, self-loops, duplicate links and cycles with a list of every problem. `dry_run`. |
+| `sea_apply` | 1–50 tickets + ≤ 100 links, all-or-nothing. A link end is a batch `ref` or an existing ticket (`from_id` fenced by its token in `claims`; `to_id` unfenced). Rejects duplicate refs, unknown refs/ids, self-loops, duplicate links and cycles (over existing links too) with a list of every problem. `dry_run`. |
 | `sea_get` | Ticket by id or ≥ 8-char prefix: fields, `row_version`, claim holder/expiry (never the token), active links with peer title/status, notes, `legal_next`. |
 | `sea_list` | Filters (status, kind, priority, assignee `me`/`none`, tag, claimed `any`/`yes`/`no`/`mine`), FTS5 `query`, cursor paging, `compact`/`full`. |
-| `sea_claim` | Lease one or a set of tickets (all-or-nothing, locked in id order). Returns a token per ticket. Re-claiming your own ticket rotates the token. `scope.paths` locks the paths you will edit for the lease; `scope_conflict` if they overlap another actor's live scope. |
+| `sea_claim` | Lease one or a set of tickets (all-or-nothing, locked in id order). Returns a token per ticket. Re-claiming your own ticket rotates the token. `scope.paths` locks the paths you will edit for the lease; `scope_conflict` if they overlap another actor's live scope. `scope.worktree` binds the claim to a git worktree. |
 | `sea_refresh` | Extend a lease to now + N (≤ 600); never shortens; holder-only. Not chained. |
 | `sea_release` | Holder gives the ticket back (with a hand-off `note`). `force: true` for operators (`--role operator`), recorded as a force release. |
 | `sea_update` | Title/body/kind/priority/assignee, tags add/remove, append a note. Fenced; `expected_version` (OCC); `idempotency_key`; `dry_run`. |
@@ -188,6 +231,7 @@ npx sea-lite scope-check src/handlers/claims.ts --actor me   # exit 1 if someone
 | `sea_next` | Pick + claim the highest-priority unclaimed `triaged`/`in_progress` ticket assigned to me or unassigned whose predecessors are all terminal. Takes `scope.paths` like `sea_claim`. |
 | `sea_history` | Events for one ticket, or a `since_seq` feed of all sea events, with chain verification status. |
 | `sea_scope_check` | Read-only: would editing these paths collide with another actor's live scope? `{ ok, conflicts }`. For an edit hook; no claim needed. |
+| `sea_stats` | Read-only, per actor, derived from the chain: claims taken / rotated / released / expired / force-released, lease-seconds held, transitions, tickets created, live claims. `since: 24h \| 7d \| ISO`. |
 
 Plus a `sea://tickets/{id}` resource (same shape as `sea_get`).
 
@@ -231,6 +275,49 @@ sea_claim { ticket_ids: [id], scope: { paths: ["src/handlers", "docs/*.md"] } }
   claim. `hooks/README.md` has a Claude Code `PreToolUse` example that
   blocks an edit inside someone else's scope with the holder and expiry in
   the message.
+- Paths are repo-relative with `/`; backslashes are accepted and
+  normalized, so Windows agents and POSIX agents lock the same entries.
+
+### Worktree-bound claims
+
+An agent working in a git worktree can bind its claim to it:
+
+```
+sea_next { scope: { paths: ["src/auth"], worktree: "/home/me/repo-wt-auth" } }
+```
+
+`worktree` is an absolute path (normalized: `C:\Repo\wt\` → `c:/Repo/wt`),
+may come with or without `paths` (alone it locks no paths), and shows up
+as `claim.worktree` in `sea_get` / `sea_list`. When the worktree is
+removed, `sea-lite release-worktree <path>` — or the `WorktreeRemove` hook
+in `hooks/` (`release-worktree --hook`) — releases every live claim bound
+to it, whoever holds it, chained as `claim_released` with
+`via: release_worktree`. `sea-lite doctor` warns about live claims bound
+to a worktree that no longer exists.
+
+## Accounting and health
+
+`sea_stats` (MCP, read-only) and `sea-lite stats [--since 24h|7d|ISO]
+[--for ACTOR] [--json]` report, per actor: claims taken (and token
+rotations, scoped claims), released by the holder, released by a terminal
+transition, expired, force-released (and force releases issued as
+operator), lease-seconds held, live claims, status transitions and tickets
+created. Everything is derived from the chain plus the live projection, so
+it costs no writes and gives the same answer after `rebuild`. Lease time
+runs from each `claimed` event to whatever ended it (the recorded expiry
+for a lapsed lease, which includes unchained refreshes) and is clipped to
+the window. `scope_conflict` refusals are not chained, so they are not
+counted. Over `serve --http` with actor tokens the actor column is tied to
+a credential; on stdio it is the label each agent chose.
+
+`sea-lite doctor [--json] [--cwd DIR] [--actors-file F]` is read-only (the
+database is opened `readonly`; nothing is created or swept) and exits 1 if
+any check fails: Node ≥ 20, data dir present and `0700`, HTTP token files
+`0600` and well-formed, the database opens and passes `quick_check`,
+`sea_schema_version` vs this build, the full chain verifies and every sea
+row's `chain_seq` exists, claims (live; lapsed leases nobody swept for an
+hour; claims on vanished worktrees), and the served tool catalog matches
+the fingerprint pinned for this release.
 
 ## Lifecycle
 
@@ -307,18 +394,21 @@ dependency is the library.
   writing a ticket it does not hold. It does not stop a process with the
   SQLite file from editing rows directly. The chain makes that detectable
   (`sea-lite verify`), not impossible.
-- **Self-asserted actors.** `--actor` and per-call `actor_id` are labels the
-  caller chooses. The "different holder" check is defence in depth against a
-  leaked token, not authentication. See `docs/THREAT-MODEL.md`.
+- **Self-asserted actors.** On stdio (and with the shared HTTP bearer)
+  `--actor` and per-call `actor_id` are labels the caller chooses. The
+  "different holder" check is defence in depth against a leaked token, not
+  authentication. Per-actor HTTP tokens bind the actor to a credential, but
+  within one trust domain. See `docs/THREAT-MODEL.md`.
 - **Lazy expiry.** A lapsed lease is noticed by the next read or write that
   touches the ticket (or by `sea_list` / `sea_next`, which sweep). Nothing
   fires on its own.
-- **Local only.** stdio transport, one machine, one file.
+- **One file, one trust domain.** stdio, or loopback HTTP with bearer
+  tokens; no TLS, no per-ticket permissions, no multi-tenant isolation.
 
 ## Roadmap
 
-See `ROADMAP.md`. Next up: links from `sea_apply` to existing tickets,
-bulk mutate, Streamable HTTP, a read-only board.
+See `ROADMAP.md`. Next up: scope-aware dispatch, bulk mutate, a read-only
+board.
 
 ## Development
 
@@ -331,7 +421,10 @@ npm run catalog:check    # tools/list etc. must match .mcp-catalog/sea-lite.json
 The tool catalog is a reviewed artifact: `.mcp-catalog/sea-lite.json` is
 the canonical snapshot (via [mcp-catalog-snap](https://github.com/rafe-walker/mcp-catalog-snap))
 and CI fails on drift. Changed a description or schema on purpose? Run
-`npm run catalog:snapshot` and commit the diff.
+`npm run catalog:snapshot`, copy the new `sha256` into
+`CATALOG_FINGERPRINT` in `src/catalog.ts` (what `doctor` checks a
+running build against; a test keeps the two equal), and commit the diff.
+CI runs on Linux, macOS and Windows, Node 20 and 22.
 
 ## License
 

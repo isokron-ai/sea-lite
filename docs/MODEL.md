@@ -29,6 +29,7 @@ kronicle-lite's `schema_version`.
 | `claim_expires_at` | lease expiry (ISO-8601) |
 | `claim_write_count` | fenced writes made under the current claim |
 | `claim_scope` | JSON array of normalized repo-relative paths the claim locks, or NULL (since schema v2; added with `ALTER TABLE` on older stores) |
+| `claim_worktree` | Normalized absolute worktree path the claim is bound to, or NULL (since schema v3; added with `ALTER TABLE` on older stores) |
 | `created_seq`, `last_seq` | chain seq of the creating event and the latest event touching the row |
 
 Indexes: `(status, priority, created_at)`, partial `(claim_expires_at)` where
@@ -64,14 +65,14 @@ chain, inside the same `BEGIN IMMEDIATE` transaction as the row change. The
 | `sea_ticket.created` | `ticket_id kind title body status priority tags assignee created_by created_at` (+ `batch_id ref` from apply) | insert row, `row_version=1`, `created_seq=last_seq=seq` |
 | `sea_ticket.updated` | `ticket_id changes{…} tags row_version updated_at` | apply `changes` (title/body/kind/priority/assignee), set `tags`, `row_version`, `updated_at`, `last_seq`, `claim_write_count+1` |
 | `sea_ticket.status_set` | `ticket_id from to reason duplicate_of duplicates_link_id row_version updated_at claim_auto_released claim_token_hash` | set status (+ `duplicate_of`), bump; clear claim when `claim_auto_released` |
-| `sea_ticket.claimed` | `ticket_id claim_token_hash claim_actor expires_at lease_seconds rotated scope` (+ `set` / `via` / `on_create`) | set claim fields and `claim_scope` (`scope.paths`, or NULL), `claim_write_count=0`, `last_seq` |
-| `sea_ticket.claim_released` | `ticket_id claim_token_hash claim_actor scope reason write_count` | clear claim (and scope), `last_seq` |
+| `sea_ticket.claimed` | `ticket_id claim_token_hash claim_actor expires_at lease_seconds rotated scope` (+ `worktree` when bound; `set` / `via` / `on_create`) | set claim fields, `claim_scope` (`scope.paths`, or NULL) and `claim_worktree`, `claim_write_count=0`, `last_seq` |
+| `sea_ticket.claim_released` | `ticket_id claim_token_hash claim_actor scope reason write_count` (+ `worktree via` from `release-worktree`, where `actor_id` is the caller and `claim_actor` the holder) | clear claim (and scope), `last_seq` |
 | `sea_ticket.claim_force_released` | `ticket_id claim_token_hash previous_holder scope released_by reason write_count` | clear claim (and scope), `last_seq` |
 | `sea_ticket.claim_expired` | `ticket_id claim_token_hash claim_actor scope expired_at noticed_at noticed_by` | clear claim (and scope), `last_seq` |
 | `sea_ticket.note_added` | `ticket_id note_id body created_at` | insert note, `last_seq` |
-| `sea_link.created` | `link_id from_id to_id link_type created_at` (+ `from_row_version reason` via sea_link; `batch_id` via apply; `via` via transition) | insert active link; when `from_row_version` present, bump the from ticket |
+| `sea_link.created` | `link_id from_id to_id link_type created_at` (+ `from_row_version reason` via sea_link; `batch_id` via apply, plus `from_row_version` when the from end is an existing ticket; `via` via transition) | insert active link; when `from_row_version` present, bump the from ticket |
 | `sea_link.tombstoned` | `link_id target_id from_id to_id link_type reason tombstoned_at from_row_version` | mark tombstoned; bump the from ticket |
-| `sea.batch_applied` | `batch_id tickets[{ref,ticket_id,title}] links[{link_id,from_ref,to_ref,from_id,to_id,link_type}] ticket_count link_count` | nothing (summary; carries the idempotency key for apply) |
+| `sea.batch_applied` | `batch_id tickets[{ref,ticket_id,title}] links[{link_id,from_ref,to_ref,from_id,to_id,link_type}] ticket_count link_count` (`from_ref` / `to_ref` null for an existing-ticket end) | nothing (summary; carries the idempotency key for apply) |
 
 Not chained: `sea_refresh`. A heartbeat only updates `claim_expires_at` on the
 row. Consequence: after `sea-lite rebuild`, a lease shows the expiry last
@@ -151,6 +152,16 @@ to every ticket in the set. Release, force release, lazy expiry and a
 terminal transition clear the scope with the claim; `rebuild` restores live
 scopes from `sea_ticket.claimed` payloads. `sea_scope_check` answers "would
 these paths collide with someone else's scope?" without taking a claim.
+
+A claim may also be bound to a worktree (`scope.worktree`, an absolute
+path). The binding is metadata, not a lock: overlap is decided on `paths`
+alone, because two worktrees of one repository editing the same
+repo-relative file still merge-conflict. Paths are normalized lexically —
+backslashes to `/`, `.` / `..` / repeated and trailing separators resolved,
+drive letter lower-cased — and Windows-style paths (`c:/…`, `//host/share/…`)
+compare case-insensitively. `release-worktree` releases every live claim
+bound to a worktree regardless of holder; a lapsed one is recorded as
+expired instead.
 
 ## Optimistic concurrency
 

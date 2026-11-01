@@ -4,6 +4,64 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.3.0] — unreleased
+
+### Added
+
+- **`sea-lite serve --http`** — Streamable HTTP, mirroring kronicle-lite's:
+  one POST endpoint (`/mcp`), stateless, MCP 2026-07-28 only (a 2025
+  `initialize` gets `400` / `-32022`; stdio still serves both eras),
+  `127.0.0.1:7418` by default, `Host` and `Origin` validated before the
+  bearer, bearer compared in constant time. Flags: `--port`, `--host`,
+  `--bearer` / `--bearer-file`, `--actors-file`, `--allow-origin`,
+  `--allow-host`. The shared bearer is `<data dir>/http-bearer.token`
+  (created `0600`; the same file kronicle-lite uses) and acts as `--actor`.
+- **Per-actor HTTP tokens.** `sea-lite add-token --actor NAME [--role R]`
+  mints a token, stores only its sha256 in `<data dir>/http-actors.json`
+  (`0600`) and prints it once. A request with that token is served as that
+  actor and role; a per-call `actor_id` naming anyone else is refused with
+  `forbidden`. `SeaLite.as(actor, role)` (a view over the open store) and
+  `createServer(store, { bindActor })` are the building blocks.
+- **`sea_stats`** (read-only tool) and **`sea-lite stats [--since] [--for]
+  [--json]`**: per actor — claims taken / rotated / scoped, released,
+  released on a terminal transition, expired, force-released, force
+  releases issued, lease-seconds held, live claims, transitions, tickets
+  created — derived from the chain and the projection; no new write path.
+  `scope_conflict` refusals are not chained and so are not counted.
+- **`sea-lite doctor [--json]`**: read-only checks (Node, data dir and
+  permissions, HTTP token files, DB `quick_check`, sea schema version,
+  full chain verify + dangling `chain_seq`, stale and orphaned claims,
+  catalog fingerprint vs the one pinned in `src/catalog.ts`); exit 0/1.
+- **`sea_apply` links to existing tickets**: a link end may be `from_id` /
+  `to_id` instead of a batch ref. A `from_id` needs its claim token in the
+  new optional `claims` list and bumps that ticket's `row_version`; the
+  cycle check runs over existing links plus the batch. New problem codes in
+  `batch_invalid`: `bad_endpoint`, `unknown_ticket`, `fence_missing`,
+  `link_exists`.
+- **Worktree-bound claims**: `scope.worktree` (absolute path) on
+  `sea_claim` / `sea_next`, with or without `scope.paths`; reported as
+  `claim.worktree`; **`sea-lite release-worktree <path> | --hook`** releases
+  every live claim bound to it (chained as `claim_released`,
+  `via: release_worktree`), with a `WorktreeRemove` hook example.
+- CI on Linux, macOS and Windows × Node 20 and 22; `.gitattributes` pins LF.
+
+### Changed
+
+- Schema v3: `sea_tickets.claim_worktree`, added with `ALTER TABLE` on open.
+  A 0.2.0 process refuses to open a store a 0.3.0 process has touched
+  (its newer-schema guard); upgrade every process sharing the file.
+- `sea_apply` output: `links[].from_ref` / `to_ref` are `null` for an
+  existing-ticket end. `ClaimView` and `sea_claim` output gain `worktree`.
+- `sea_ticket.claimed` payloads carry `worktree` only when the claim is
+  bound to one; unbound claims are byte-for-byte unchanged. No hash recipe,
+  cursor or existing payload field changed.
+- `hooks/scope-check.sh` relativizes paths in Node, so Windows paths work.
+
+### Dependencies
+
+- `@modelcontextprotocol/node` ^2.1.2 (new; the Node HTTP adapter, as in
+  kronicle-lite).
+
 ## [0.2.0] — 2026-10-31
 
 ### Changed

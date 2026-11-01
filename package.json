@@ -1,6 +1,6 @@
 {
   "name": "sea-lite",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP work queue for parallel coding agents: claim fencing, path-scoped claims, typed links, atomic batches, hash-chained history (composes with kronicle-lite).",
   "license": "Apache-2.0",
   "type": "module",
