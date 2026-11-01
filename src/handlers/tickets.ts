@@ -39,7 +39,7 @@ import {
 import { detectCycle, type DirectedEdge } from '../model/cycle-check.js';
 import { DAG_LINK_TYPES, isTerminalStatus, PRIORITY_RANK, TERMINAL_STATES, sqlIn, type TicketStatus } from '../model/enums.js';
 import { legalNextStates, validateTransition } from '../model/lifecycle.js';
-import type { ApplyInput, CreateInput, ExpandedBatch, FencedItem, FinishInput, GetInput, ListInput, TransitionInput, TransitionManyInput, UpdateInput } from '../model/schemas.js';
+import { plainOrigins, type ApplyInput, type BatchOrigin, type CreateInput, type ExpandedBatch, type FencedItem, type GetInput, type ListInput, type TransitionInput, type TransitionManyInput, type UpdateInput } from '../model/schemas.js';
 import { expandBatch } from '../model/templates.js';
 import { findPossibleDuplicates, type PossibleDuplicate } from './dedup.js';
 
@@ -311,7 +311,12 @@ interface BatchPayload {
   links: ApplyLink[];
 }
 
-type Problem = { code: string; message: string; at?: string | undefined };
+type Problem = { code: string; message: string; at?: string | undefined } & Partial<BatchOrigin>;
+
+/** Prefix a problem with where it came from (tickets[i], links[i], templates[t] item k (ref) …). */
+function located(o: BatchOrigin | undefined, p: Problem): Problem {
+  return o === undefined ? p : { ...p, ...o, message: `${o.where}: ${p.message}` };
+}
 
 /** Graph key for a batch endpoint: refs and existing ids live in separate namespaces. */
 const refNode = (ref: string) => `ref:${ref}`;
@@ -323,49 +328,63 @@ const endpoint = (ref: string | undefined, id: string | undefined): string => (r
  * (`from_id` / `to_id`) are checked against the store in `apply`.
  */
 export function validateBatch(input: ExpandedBatch): void {
-  const refs = new Set<string>();
+  const origins = input.origins ?? plainOrigins(input);
+  const refs = new Map<string, number>();
   const problems: Problem[] = [];
-  for (const t of input.tickets) {
-    if (refs.has(t.ref)) problems.push({ code: 'duplicate_ref', message: `ref "${t.ref}" appears more than once`, at: t.ref });
-    refs.add(t.ref);
-  }
-  const seenLinks = new Set<string>();
-  for (const l of input.links) {
+  input.tickets.forEach((t, k) => {
+    const first = refs.get(t.ref);
+    if (first !== undefined) {
+      problems.push(located(origins.tickets[k], { code: 'duplicate_ref', message: `ref "${t.ref}" is already used by ${origins.tickets[first]?.where ?? `tickets[${first}]`}`, at: t.ref }));
+    } else refs.set(t.ref, k);
+  });
+  const seenLinks = new Map<string, number>();
+  input.links.forEach((l, li) => {
+    const o = origins.links[li];
     for (const [side, ref, id] of [
       ['from', l.from_ref, l.from_id],
       ['to', l.to_ref, l.to_id],
     ] as const) {
       if ((ref === undefined) === (id === undefined)) {
-        problems.push({ code: 'bad_endpoint', message: `link ${side}: give exactly one of ${side}_ref (a ticket in this batch) or ${side}_id (an existing ticket)` });
+        problems.push(located(o, { code: 'bad_endpoint', message: `give exactly one of ${side}_ref (a ticket in this batch) or ${side}_id (an existing ticket)` }));
       } else if (ref !== undefined && !refs.has(ref)) {
-        problems.push({
-          code: 'foreign_ref',
-          message: `link ${side}_ref "${ref}" is not a ticket in this batch (for an existing ticket use ${side}_id)`,
-          at: ref,
-        });
+        problems.push(located(o, { code: 'foreign_ref', message: `${side}_ref "${ref}" is not a ticket in this batch (for an existing ticket use ${side}_id)`, at: ref }));
       }
     }
     const from = endpoint(l.from_ref, l.from_id);
     const to = endpoint(l.to_ref, l.to_id);
-    if (from === to) problems.push({ code: 'self_loop', message: `link ${l.link_type} from "${l.from_ref ?? l.from_id}" to itself`, at: l.from_ref ?? l.from_id });
+    if (from === to) problems.push(located(o, { code: 'self_loop', message: `${l.link_type} from "${l.from_ref ?? l.from_id}" to itself`, at: l.from_ref ?? l.from_id }));
     const k = `${from}|${to}|${l.link_type}`;
-    if (seenLinks.has(k)) problems.push({ code: 'duplicate_link', message: `link ${k.replace(/\|/g, ' ')} appears more than once` });
-    seenLinks.add(k);
-  }
+    const first = seenLinks.get(k);
+    if (first !== undefined) {
+      problems.push(located(o, { code: 'duplicate_link', message: `${showNode(from)} ${l.link_type} ${showNode(to)} is already given by ${origins.links[first]?.where ?? `links[${first}]`}` }));
+    } else seenLinks.set(k, li);
+  });
   if (problems.length > 0) {
     throw new SeaError('batch_invalid', `batch rejected: ${problems.length} problem(s); nothing was written`, { problems });
   }
   const edges: DirectedEdge[] = input.links.map((l) => ({ from: endpoint(l.from_ref, l.from_id), to: endpoint(l.to_ref, l.to_id), linkType: l.link_type }));
   const cycle = detectCycle([], edges);
-  if (cycle) throw cycleError(cycle.path, cycle.via);
+  if (cycle) throw cycleError(cycle.path, cycle.via, edges, origins);
 }
 
-function cycleError(path: readonly string[], via: DirectedEdge): SeaError {
-  const show = (n: string) => n.replace(/^(ref|id):/, '');
-  return new SeaError('cycle', `batch would create a cycle: ${path.map(show).join(' → ')} via ${via.linkType}`, {
-    path: path.map(show),
-    via: { from: show(via.from), to: show(via.to), linkType: via.linkType },
-  });
+const showNode = (n: string) => n.replace(/^(ref|id):/, '');
+
+/**
+ * The cycle by refs (existing tickets by id), and which link of the request
+ * closes it, by where it was written.
+ */
+function cycleError(path: readonly string[], via: DirectedEdge, batchEdges: readonly DirectedEdge[], origins: { links: BatchOrigin[] }): SeaError {
+  const idx = batchEdges.findIndex((e) => e.from === via.from && e.to === via.to && e.linkType === via.linkType);
+  const o = idx >= 0 ? origins.links[idx] : undefined;
+  return new SeaError(
+    'cycle',
+    `batch would create a cycle: ${path.map(showNode).join(' → ')} via ${via.linkType}${o !== undefined ? `, closed by ${o.where}` : ''}`,
+    {
+      path: path.map(showNode),
+      via: { from: showNode(via.from), to: showNode(via.to), linkType: via.linkType },
+      ...(o !== undefined ? { closed_by: o } : {}),
+    },
+  );
 }
 
 /**
@@ -375,53 +394,56 @@ function cycleError(path: readonly string[], via: DirectedEdge): SeaError {
  * existing DAG edges and the batch's edges stays acyclic. Returns id → full id.
  */
 function validateExisting(ctx: Ctx, input: ExpandedBatch & Pick<ApplyInput, 'claims'>): Map<string, string> {
+  const origins = input.origins ?? plainOrigins(input);
   const resolved = new Map<string, string>();
   const problems: Problem[] = [];
-  const resolveOne = (raw: string): string | null => {
+  const resolveOne = (raw: string, o: BatchOrigin, field: string): string | null => {
     if (resolved.has(raw)) return resolved.get(raw)!;
     try {
       const id = resolveId(ctx.db, raw);
       resolved.set(raw, id);
       return id;
     } catch (e) {
-      problems.push({ code: 'unknown_ticket', message: e instanceof Error ? e.message : String(e), at: raw });
+      problems.push(located(o, { code: 'unknown_ticket', message: `${field} "${raw}": ${e instanceof Error ? e.message : String(e)}`, at: raw }));
       return null;
     }
   };
-  const fromIds = new Set<string>();
-  for (const l of input.links) {
+  const fromIds = new Map<string, BatchOrigin>();
+  input.links.forEach((l, li) => {
+    const o = origins.links[li] ?? { where: `links[${li}]`, link: li };
     if (l.from_id !== undefined) {
-      const id = resolveOne(l.from_id);
-      if (id !== null) fromIds.add(id);
+      const id = resolveOne(l.from_id, o, 'from_id');
+      if (id !== null && !fromIds.has(id)) fromIds.set(id, o);
     }
-    if (l.to_id !== undefined) resolveOne(l.to_id);
-  }
+    if (l.to_id !== undefined) resolveOne(l.to_id, o, 'to_id');
+  });
   const tokens = new Map<string, string>();
-  for (const c of input.claims ?? []) {
-    const id = resolveOne(c.ticket_id);
+  (input.claims ?? []).forEach((c, ci) => {
+    const id = resolveOne(c.ticket_id, { where: `claims[${ci}]` }, 'ticket_id');
     if (id !== null) tokens.set(id, c.claim_token);
-  }
+  });
   if (problems.length > 0) throw new SeaError('batch_invalid', `batch rejected: ${problems.length} problem(s); nothing was written`, { problems });
 
-  for (const id of [...fromIds].sort()) {
+  for (const id of [...fromIds.keys()].sort()) {
     const token = tokens.get(id);
     if (token === undefined) {
-      problems.push({ code: 'fence_missing', message: `links from existing ticket ${id} need its claim_token in claims`, at: id });
+      problems.push(located(fromIds.get(id), { code: 'fence_missing', message: `links from existing ticket ${id} need its claim_token in claims`, at: id }));
       continue;
     }
     // Fence failures (foreign holder, expired, wrong token) keep their own error codes.
     validateFence(sweepExpired(ctx, mustGetRow(ctx.db, id)), token, ctx.actor, ctx.now);
   }
-  for (const l of input.links) {
-    if (l.from_id === undefined || l.to_id === undefined) continue;
+  input.links.forEach((l, li) => {
+    if (l.from_id === undefined || l.to_id === undefined) return;
+    const o = origins.links[li];
     const from = resolved.get(l.from_id)!;
     const to = resolved.get(l.to_id)!;
-    if (from === to) problems.push({ code: 'self_loop', message: `link ${l.link_type} from ${from} to itself`, at: from });
+    if (from === to) problems.push(located(o, { code: 'self_loop', message: `${l.link_type} from ${from} to itself`, at: from }));
     const dup = ctx.db
       .prepare(`SELECT link_id FROM sea_links WHERE state = 'active' AND from_id = ? AND to_id = ? AND link_type = ?`)
       .get(from, to, l.link_type) as { link_id: string } | undefined;
-    if (dup) problems.push({ code: 'link_exists', message: `active ${l.link_type} link ${from} → ${to} already exists (${dup.link_id})`, at: dup.link_id });
-  }
+    if (dup) problems.push(located(o, { code: 'link_exists', message: `active ${l.link_type} link ${from} → ${to} already exists (${dup.link_id})`, at: dup.link_id }));
+  });
   if (problems.length > 0) throw new SeaError('batch_invalid', `batch rejected: ${problems.length} problem(s); nothing was written`, { problems });
 
   // Cycle check over union(existing DAG edges, batch edges). Existing tickets are keyed by full id.
@@ -429,7 +451,7 @@ function validateExisting(ctx: Ctx, input: ExpandedBatch & Pick<ApplyInput, 'cla
   const existing = existingDagEdges(ctx).map((e) => ({ from: `id:${e.from}`, to: `id:${e.to}`, linkType: e.linkType }));
   const batch = input.links.map((l) => ({ from: node(l.from_ref, l.from_id), to: node(l.to_ref, l.to_id), linkType: l.link_type }));
   const cycle = detectCycle(existing, batch);
-  if (cycle) throw cycleError(cycle.path, cycle.via);
+  if (cycle) throw cycleError(cycle.path, cycle.via, batch, origins);
   return resolved;
 }
 
@@ -704,7 +726,8 @@ export interface TransitionResult {
   dry_run: boolean;
 }
 
-export function transition(ctx: Ctx, input: TransitionInput): TransitionResult {
+/** `payloadExtra` adds fields to the chained status_set payload (sea_finish records its outcome and commit there). */
+export function transition(ctx: Ctx, input: TransitionInput, payloadExtra: Record<string, unknown> = {}): TransitionResult {
   const key = idemKey(input.idempotency_key);
   return tx(ctx.db, () => {
     if (key !== undefined) {
@@ -796,6 +819,7 @@ export function transition(ctx: Ctx, input: TransitionInput): TransitionResult {
         updated_at,
         claim_auto_released: willRelease,
         claim_token_hash: willRelease ? row.claim_token_hash : null,
+        ...payloadExtra,
       },
       ...(key !== undefined ? { idempotency_key: key } : {}),
     });
@@ -1052,24 +1076,4 @@ export function fencedItems(args: { ticket_id?: string | undefined; claim_token?
     throw new SeaError('invalid_input', 'give ticket_id + claim_token (one ticket) or tickets: [{ticket_id, claim_token}] (several)');
   }
   return [{ ticket_id: args.ticket_id, claim_token: args.claim_token, ...(args.expected_version !== undefined ? { expected_version: args.expected_version } : {}) }];
-}
-
-export interface FinishResult {
-  finished: TransitionManyItem[];
-  note_added: boolean;
-  replayed: boolean;
-  dry_run: boolean;
-}
-
-/** One-call finish: note (optional) + terminal status + claim released, for one ticket or many. */
-export function finish(ctx: Ctx, input: FinishInput): FinishResult {
-  const r = transitionMany(ctx, {
-    tickets: fencedItems(input),
-    to: input.status,
-    dry_run: input.dry_run,
-    ...(input.reason !== undefined ? { reason: input.reason } : {}),
-    ...(input.note !== undefined ? { note: input.note } : {}),
-    ...(input.idempotency_key !== undefined ? { idempotency_key: input.idempotency_key } : {}),
-  });
-  return { finished: r.results, note_added: input.note !== undefined && !r.dry_run && !r.replayed, replayed: r.replayed, dry_run: r.dry_run };
 }

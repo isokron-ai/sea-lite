@@ -46,8 +46,9 @@ sea-lite is a small MCP server where tickets are **fenced**:
   it deterministically. The result is a ref → id map, not an echo.
 - **Lean on context**: `serve --core` publishes the nine day-to-day tools in
   ~12 KB of `tools/list` (the full fifteen take ~32 KB; 0.4.0 took 59 KB),
-  and results are compact JSON. `sea_finish` closes a ticket — note,
-  terminal status, claim released — in one call, for one ticket or many.
+  and results are compact JSON. `sea_finish` ends work on a ticket — an
+  outcome (`done` / `blocked` / `abandoned`), a note, an optional commit
+  sha, claim released — in one call, for one ticket or many.
 - A claim can be **bound to a git worktree**; removing the worktree
   (`sea-lite release-worktree`, a `WorktreeRemove` hook) releases it.
 - Every change is an event on a **hash chain** — the one
@@ -278,7 +279,7 @@ The agent's loop, in tool calls:
 sea_next  scope.paths=[src/handlers]   → { ticket, claim_token, expires_at }  (paths locked too)
 sea_scope_check paths=[...]            before touching a path you did not claim
 sea_update   (notes, tags)             fenced by claim_token; any call renews your leases
-sea_finish   note="what shipped"       resolved + claim and scope released, one call
+sea_finish   outcome=done note="…"     resolved + claim and scope released, one call
    — or —
 sea_release  note="where I stopped"
 ```
@@ -299,7 +300,7 @@ Also: `sea-lite list`, `show ID`, `stats --since 7d`, `rebuild`,
 | `sea_release` | Holder gives the ticket back (with a hand-off `note`). `force: true` for operators (`--role operator`), recorded as a force release. |
 | `sea_update` | Title/body/kind/priority/assignee, tags add/remove, append a note. Fenced; `expected_version` (OCC); `idempotency_key`; `dry_run`. |
 | `sea_transition` | Move status. Fenced. Rejections carry `legal_next`. `duplicate` needs `duplicate_of` and records a `duplicates` link. Terminal states release the claim (and scope) and ask for confirmation: `confirm: true`, or answer the `input_required` prompt. `note` appends a note in the same write. **Bulk**: `tickets: [{ticket_id, claim_token}, …]` instead of `ticket_id` + `claim_token` moves up to 50 tickets, each fenced by its own token, all or nothing (`batch_invalid` lists every failing ticket); one confirmation covers the set. |
-| `sea_finish` | Done, in one call: optional `note`, a terminal `status` (default `resolved`; or `wont_fix`, `dropped`, `merged`), claim and scope released. `tickets: [...]` closes several, all or nothing. Calling it is the confirmation (no prompt). |
+| `sea_finish` | End your work in one call. Required `outcome`: `done` → `resolved`, `blocked` → `blocked` (not terminal; resumable; already-blocked stays blocked), `abandoned` → `dropped`. Required `note` (what shipped or why; ≤ 1000 chars), optional `commit` (sha, 7–64 hex). The claim and scope are released in every case. The note is stored on the ticket as `done @ 3f2a9c1: …`, and the chain records `outcome` / `commit` on the status event and `finish: {outcome, commit, from, to}` on the note event, so `sea_history` shows why. `tickets: [...]` finishes several, each fenced by its own token, all or nothing. Calling it is the confirmation (no prompt). |
 | `sea_link` | `add` / `remove` a typed link, fenced on `from`. `parent_of` / `depends_on` / `blocks` stay acyclic across existing links. Remove tombstones. |
 | `sea_next` | Pick + claim the highest-priority unclaimed `triaged`/`in_progress` ticket assigned to me or unassigned whose predecessors are all terminal. Takes `scope.paths` like `sea_claim`. |
 | `sea_history` | Events for one ticket, or a `since_seq` feed of all sea events, with chain verification status. |
@@ -332,9 +333,13 @@ profiles:
 inputs (`actor_id`, `idempotency_key`, `expected_version`, `sea_next`'s
 `kind` / `tag` filters, operator-only `force`, …; they are still accepted),
 and publishes result schemas as field names and types only. The behaviour
-of every tool is identical in both. `serve --http --core` works too. For
-search, history, stats, links and edits use the CLI (`sea-lite list`,
-`show`, `stats`) or the full profile.
+of every tool is identical in both. `serve --http --core` works too.
+
+`core` leaves out `sea_create`, `sea_update`, `sea_link`, `sea_list`,
+`sea_history` and `sea_stats`, and its server instructions say so: to get
+them, run `serve` without `--core` (or with `--profile full` /
+`SEA_LITE_PROFILE=full`). The CLI (`sea-lite list`, `show`, `stats`)
+covers the read side either way.
 
 ### Templated batches
 
@@ -347,13 +352,21 @@ of the template's `ticket` and `links`, and in its `ref`:
 | `{i}` | the item's 1-based index |
 | `{value}` | the `for_each` value |
 | `{ref}` | this item's expanded `ref` |
-| `{prev}` | the previous item's `ref`; a link that names it is skipped for the first item |
+| `{prev}` | the expanded `ref` of the previous item of the **same template** (item i−1), not of the previous ticket in the batch; item 1 has none, so a link that names `{prev}` is skipped for item 1 (in ticket fields it stays literal there) |
 
 Anything else in braces is left as written. Expansion is deterministic
 (explicit `tickets` first, then each template's items in order), happens on
 the server before validation, and the batch caps (50 tickets, 100 links),
 cycle check and idempotency all apply to the expanded batch. `dry_run: true`
 returns the expanded plan without writing.
+
+Errors name exactly what failed. Each `batch_invalid` problem carries
+`where` (`tickets[2] (a)`, `links[4]`, `templates[0] item 3 (t03)`,
+`templates[0] item 3 (t03) links[1]`, `claims[0]`) plus the structured
+`template`, `item` (1-based), `ref` and `link` indexes, and its `message`
+starts with the same location. A `cycle` error gives the cycle as a path of
+refs (existing tickets by id) and `closed_by`, the link that closes it.
+Nothing is written when anything fails.
 
 An epic and a 20-step migration chain, every step a child of the epic and
 each depending on the one before (21 tickets, 39 links), in one call:

@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T14:47:28.433Z",
+  "capturedAt": "2026-11-01T15:38:29.490Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -105,7 +105,7 @@
             },
             "templates": {
               "items": {
-                "description": "One ticket (+ links) per for_each value. In every string: {i} = 1-based index, {value}, {ref} = this item's ref, {prev} = the previous item's ref.",
+                "description": "One ticket (+ links) per for_each value. In every string: {i} = 1-based index, {value}, {ref} = this item's expanded ref, {prev} = the expanded ref of item i-1 of this template (a link naming {prev} is skipped for item 1).",
                 "properties": {
                   "for_each": {
                     "anyOf": [
@@ -134,7 +134,7 @@
                   },
                   "links": {
                     "default": [],
-                    "description": "Per item, entries like `links`; one naming {prev} is skipped for the first item.",
+                    "description": "Per item, entries like `links`.",
                     "type": "array"
                   },
                   "ref": {
@@ -541,7 +541,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Done with a ticket: appends `note` (optional), sets a terminal status (default resolved) and releases your claim, in one write. `tickets` closes several (each with its own claim_token; all or none). Calling it is the confirmation.",
+        "description": "End your work on a ticket in one write: `outcome` done (→ resolved) | blocked (→ blocked, resumable) | abandoned (→ dropped), a required `note` (what shipped / why), optional `commit` sha; your claim is released and all of it is chained. `tickets` finishes several (each with its own claim_token; all or none). No confirmation prompt.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -550,6 +550,10 @@
             },
             "claim_token": {
               "description": "From sea_claim / sea_next.",
+              "type": "string"
+            },
+            "commit": {
+              "description": "Commit sha.",
               "type": "string"
             },
             "dry_run": {
@@ -562,19 +566,15 @@
               "type": "string"
             },
             "note": {
-              "description": "Hand-off note appended to each ticket.",
+              "description": "What shipped, or why not.",
               "type": "string"
             },
-            "reason": {
-              "type": "string"
-            },
-            "status": {
-              "default": "resolved",
+            "outcome": {
+              "description": "done → resolved; blocked → blocked (resumable); abandoned → dropped.",
               "enum": [
-                "resolved",
-                "wont_fix",
-                "dropped",
-                "merged"
+                "done",
+                "blocked",
+                "abandoned"
               ],
               "type": "string"
             },
@@ -611,11 +611,21 @@
               "type": "array"
             }
           },
+          "required": [
+            "outcome",
+            "note"
+          ],
           "type": "object"
         },
         "name": "sea_finish",
         "outputSchema": {
           "properties": {
+            "commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "dry_run": {
               "type": "boolean"
             },
@@ -626,16 +636,17 @@
               },
               "type": "array"
             },
-            "note_added": {
-              "type": "boolean"
+            "outcome": {
+              "type": "string"
             },
             "replayed": {
               "type": "boolean"
             }
           },
           "required": [
+            "outcome",
             "finished",
-            "note_added",
+            "commit",
             "replayed",
             "dry_run"
           ],
@@ -1829,5 +1840,5 @@
     "name": "sea-lite",
     "version": "0.4.0"
   },
-  "sha256": "4a765bc3dbb7769b0f4555ee22d89d63f4367c131e87db152dd56aed6bb791ea"
+  "sha256": "e76170654894db991824e15d0449cf131a068836406d468a6284b1c9b69534dc"
 }

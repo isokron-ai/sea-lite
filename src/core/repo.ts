@@ -140,14 +140,16 @@ export function notesFor(db: Db, id: string, limit = 20): NoteRow[] {
     .reverse() as NoteRow[];
 }
 
-export function addNote(ctx: Ctx, ticket_id: string, body: string): NoteRow {
+/** `extra` adds fields to the chained payload; `idempotency_key` (already namespaced) keys the event. */
+export function addNote(ctx: Ctx, ticket_id: string, body: string, extra: Record<string, unknown> = {}, idempotency_key?: string): NoteRow {
   const note_id = uuid();
   const created_at = ctx.now.toISOString();
   const r = ctx.chain.append({
     event_type: EVENT.ticket_note_added,
     actor_id: ctx.actor,
     occurred_at: ctx.now.toISOString(),
-    payload: { ticket_id, note_id, body, created_at },
+    payload: { ticket_id, note_id, body, created_at, ...extra },
+    ...(idempotency_key !== undefined ? { idempotency_key } : {}),
   });
   ctx.db
     .prepare(`INSERT INTO sea_notes (note_id, ticket_id, author, body, created_at, chain_seq) VALUES (?, ?, ?, ?, ?, ?)`)

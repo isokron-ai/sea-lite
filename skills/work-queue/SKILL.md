@@ -88,12 +88,13 @@ loop — move on.
 
 ## 3. Hand off
 
-- Done: `sea_finish { ticket_id, claim_token, note: "what shipped" }` —
-  note, `resolved`, claim and scope released in one call (`status:
-  "wont_fix"` / `"dropped"` / `"merged"` for the other endings;
-  `tickets: [...]` closes several). `sea_transition { to: "resolved",
-  confirm: true }` does the same without the note; for `duplicate` use
-  `sea_transition` with `duplicate_of`. A terminal status has no exit.
+- Finishing: `sea_finish { ticket_id, claim_token, outcome, note, commit? }`
+  in one call, claim and scope released. `outcome: "done"` → resolved;
+  `"blocked"` → blocked (resumable; link the blocker first, below);
+  `"abandoned"` → dropped. The note says what shipped or why not; pass the
+  commit sha when there is one. `tickets: [...]` finishes several. For
+  `duplicate` / `wont_fix` / `merged` use `sea_transition` (with
+  `duplicate_of` for a duplicate). A terminal status has no exit.
 - Blocked on something: add the link (`sea_link add from=<this>
   to=<blocker> link_type=depends_on`), set `blocked` with a `reason`, then
   `sea_release` with a `note`. `sea_next` will not hand the ticket out again

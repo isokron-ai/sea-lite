@@ -136,10 +136,10 @@ export const BatchTemplate = z
       .array(z.object(LinkEnds))
       .max(MAX_BATCH_LINKS)
       .default([])
-      .describe('Per item, entries like `links`; one naming {prev} is skipped for the first item.')
+      .describe('Per item, entries like `links`.')
       .meta({ [LEAN_AS]: '' }),
   })
-  .describe('One ticket (+ links) per for_each value. In every string: {i} = 1-based index, {value}, {ref} = this item\'s ref, {prev} = the previous item\'s ref.');
+  .describe('One ticket (+ links) per for_each value. In every string: {i} = 1-based index, {value}, {ref} = this item\'s expanded ref, {prev} = the expanded ref of item i-1 of this template (a link naming {prev} is skipped for item 1).');
 export type BatchTemplate = z.infer<typeof BatchTemplate>;
 
 export const ApplyShape = {
@@ -159,7 +159,35 @@ export const ApplyShape = {
 export const ApplyInput = z.object(ApplyShape);
 export type ApplyInput = z.infer<typeof ApplyInput>;
 /** A batch after template expansion: what the handler validates and writes. */
-export type ExpandedBatch = { tickets: BatchTicket[]; links: BatchLink[] };
+export type ExpandedBatch = { tickets: BatchTicket[]; links: BatchLink[]; origins?: BatchOrigins };
+
+/**
+ * Where an expanded ticket or link came from, so an error can name it:
+ * `tickets[2]`, `links[4]`, `templates[0] item 3 (t03)`, or
+ * `templates[0] item 3 (t03) links[1]`.
+ */
+export interface BatchOrigin {
+  where: string;
+  template?: number;
+  /** 1-based item of the template ({i}). */
+  item?: number;
+  /** The expanded ref of the ticket (or, for a template link, of its item). */
+  ref?: string;
+  /** Index in the list the link was written in (`links`, or the template's `links`). */
+  link?: number;
+}
+export interface BatchOrigins {
+  tickets: BatchOrigin[];
+  links: BatchOrigin[];
+}
+
+/** Origins for a batch written without templates. */
+export function plainOrigins(b: { tickets: { ref: string }[]; links: unknown[] }): BatchOrigins {
+  return {
+    tickets: b.tickets.map((t, k) => ({ where: `tickets[${k}] (${t.ref})`, ref: t.ref })),
+    links: b.links.map((_, k) => ({ where: `links[${k}]`, link: k })),
+  };
+}
 
 export const GetShape = {
   id: TicketId,
@@ -297,14 +325,28 @@ export const TransitionManyInput = z.object({
 });
 export type TransitionManyInput = z.infer<typeof TransitionManyInput>;
 
-export const FINISH_STATES = ['resolved', 'wont_fix', 'dropped', 'merged'] as const;
+/** sea_finish outcomes and the status each one sets. Every outcome releases the claim. */
+export const FINISH_OUTCOMES = ['done', 'blocked', 'abandoned'] as const;
+export type FinishOutcome = (typeof FINISH_OUTCOMES)[number];
+export const OUTCOME_STATUS = { done: 'resolved', blocked: 'blocked', abandoned: 'dropped' } as const;
+export const MAX_FINISH_NOTE_CHARS = 1000;
+
 export const FinishShape = {
   ticket_id: TicketId.optional(),
   claim_token: ClaimToken.optional(),
   tickets: BulkTickets.optional(),
-  status: z.enum(FINISH_STATES).default('resolved'),
-  note: Note.optional().describe('Hand-off note appended to each ticket.'),
-  reason: z.string().max(2000).optional(),
+  outcome: z.enum(FINISH_OUTCOMES).describe('done → resolved; blocked → blocked (resumable); abandoned → dropped.'),
+  note: z
+    .string()
+    .trim()
+    .min(1)
+    .max(MAX_FINISH_NOTE_CHARS)
+    .describe('What shipped, or why not.'),
+  commit: z
+    .string()
+    .regex(/^[0-9a-f]{7,64}$/i)
+    .optional()
+    .describe('Commit sha.'),
   idempotency_key: IdempotencyKey,
   dry_run: DryRun,
   actor_id: ActorId,

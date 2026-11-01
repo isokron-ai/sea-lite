@@ -10,6 +10,7 @@ import { SeaError } from './core/errors.js';
 import type { Ctx } from './core/repo.js';
 import { SEA_MIGRATIONS, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
 import * as claims from './handlers/claims.js';
+import * as finishH from './handlers/finish.js';
 import * as hist from './handlers/history.js';
 import * as links from './handlers/links.js';
 import * as statsH from './handlers/stats.js';
@@ -192,9 +193,9 @@ export class SeaLite {
   transitionMany(input: S.TransitionManyInput): tickets.TransitionManyResult {
     return tickets.transitionMany(this.ctx(input.actor_id), input);
   }
-  /** Close one or more held tickets: terminal status (default resolved), claim released, optional note. */
-  finish(input: S.FinishInput): tickets.FinishResult {
-    return tickets.finish(this.ctx(input.actor_id), input);
+  /** End work on held tickets: outcome done | blocked | abandoned, a note, optional commit; claims released. */
+  finish(input: S.FinishInput): finishH.FinishResult {
+    return finishH.finish(this.ctx(input.actor_id), input);
   }
   claim(input: S.ClaimInput): claims.ClaimResult {
     return claims.claim(this.ctx(input.actor_id), input);

@@ -23,7 +23,9 @@ import {
   BatchTicket,
   MAX_BATCH_LINKS,
   MAX_BATCH_TICKETS,
+  plainOrigins,
   type ApplyInput,
+  type BatchOrigin,
   type BatchTemplate,
   type ExpandedBatch,
 } from './schemas.js';
@@ -54,7 +56,7 @@ function values(t: BatchTemplate): (string | number)[] {
   return typeof t.for_each === 'number' ? Array.from({ length: t.for_each }, (_, k) => k + 1) : t.for_each;
 }
 
-type Problem = { code: string; message: string; at?: string };
+type Problem = { code: string; message: string; at?: string } & Partial<BatchOrigin>;
 
 function reject(problems: Problem[]): never {
   throw new SeaError('batch_invalid', `batch rejected: ${problems.length} problem(s); nothing was written`, { problems });
@@ -65,18 +67,22 @@ export function expandBatch(input: Pick<ApplyInput, 'tickets' | 'links' | 'templ
   const templates = input.templates ?? [];
   if (templates.length === 0) {
     if (input.tickets.length === 0) reject([{ code: 'empty_batch', message: 'a batch needs at least one ticket (in tickets or templates)' }]);
-    return { tickets: input.tickets, links: input.links };
+    return { tickets: input.tickets, links: input.links, origins: plainOrigins(input) };
   }
   const problems: Problem[] = [];
   const tickets: BatchTicket[] = [...input.tickets];
   const links: BatchLink[] = [...input.links];
+  const origins = plainOrigins(input);
+  const perTemplate: { template: number; tickets: number; links: number }[] = [];
   templates.forEach((t, ti) => {
+    const counted = { template: ti, tickets: 0, links: 0 };
+    perTemplate.push(counted);
     if (t.ref.includes('{ref}') || t.ref.includes('{prev}')) {
-      problems.push({ code: 'bad_template', message: `templates[${ti}].ref may use {i} and {value}, not {ref} or {prev}`, at: t.ref });
+      problems.push({ code: 'bad_template', message: `templates[${ti}].ref may use {i} and {value}, not {ref} or {prev}`, at: t.ref, where: `templates[${ti}].ref`, template: ti });
       return;
     }
     if (!t.ref.includes('{i}') && !t.ref.includes('{value}')) {
-      problems.push({ code: 'bad_template', message: `templates[${ti}].ref "${t.ref}" must contain {i} or {value} so each item gets its own ref`, at: t.ref });
+      problems.push({ code: 'bad_template', message: `templates[${ti}].ref "${t.ref}" must contain {i} or {value} so each item gets its own ref`, at: t.ref, where: `templates[${ti}].ref`, template: ti });
       return;
     }
     let prev: string | undefined;
@@ -84,27 +90,41 @@ export function expandBatch(input: Pick<ApplyInput, 'tickets' | 'links' | 'templ
       const base: Vars = { i: String(k + 1), value: String(value) };
       const ref = fill(t.ref, base);
       const v: Vars = { ...base, ref, ...(prev !== undefined ? { prev } : {}) };
+      const item = `templates[${ti}] item ${k + 1} (${ref})`;
       tickets.push({ ...fillAll(t.ticket, v), ref });
-      for (const l of t.links) {
-        if (prev === undefined && mentionsPrev(l)) continue;
+      origins.tickets.push({ where: item, template: ti, item: k + 1, ref });
+      counted.tickets++;
+      t.links.forEach((l, li) => {
+        if (prev === undefined && mentionsPrev(l)) return;
         links.push(fillAll(l, v));
-      }
+        origins.links.push({ where: `${item} links[${li}]`, template: ti, item: k + 1, ref, link: li });
+        counted.links++;
+      });
       prev = ref;
     });
   });
   if (problems.length > 0) reject(problems);
   if (tickets.length === 0) reject([{ code: 'empty_batch', message: 'a batch needs at least one ticket (in tickets or templates)' }]);
+  const counts = (what: 'tickets' | 'links') =>
+    [`${what} ${what === 'tickets' ? input.tickets.length : input.links.length}`, ...perTemplate.map((c) => `templates[${c.template}] ${c[what]}`)].join(', ');
   if (tickets.length > MAX_BATCH_TICKETS) {
-    problems.push({ code: 'too_many_tickets', message: `templates expand to ${tickets.length} tickets; a batch holds at most ${MAX_BATCH_TICKETS}` });
+    problems.push({ code: 'too_many_tickets', message: `the batch expands to ${tickets.length} tickets (${counts('tickets')}); at most ${MAX_BATCH_TICKETS}` });
   }
   if (links.length > MAX_BATCH_LINKS) {
-    problems.push({ code: 'too_many_links', message: `templates expand to ${links.length} links; a batch holds at most ${MAX_BATCH_LINKS}` });
+    problems.push({ code: 'too_many_links', message: `the batch expands to ${links.length} links (${counts('links')}); at most ${MAX_BATCH_LINKS}` });
   }
   if (problems.length > 0) reject(problems);
   // Substituted strings must still satisfy the plain-batch field rules (title length, ref length, …).
   const parsed = z.object({ tickets: z.array(BatchTicket), links: z.array(BatchLink) }).safeParse({ tickets, links });
   if (!parsed.success) {
-    reject(parsed.error.issues.map((i) => ({ code: 'invalid_expansion', message: `${i.path.join('.')}: ${i.message}`, at: i.path.join('.') })));
+    reject(
+      parsed.error.issues.map((i) => {
+        const [list, idx, ...field] = i.path as (string | number)[];
+        const o = (list === 'tickets' ? origins.tickets : origins.links)[idx as number];
+        const where = `${o?.where ?? `${String(list)}[${String(idx)}]`}${field.length > 0 ? ` ${field.join('.')}` : ''}`;
+        return { code: 'invalid_expansion', message: `${where}: ${i.message}`, at: i.path.join('.'), ...o, where };
+      }),
+    );
   }
-  return parsed.data;
+  return { ...parsed.data, origins };
 }

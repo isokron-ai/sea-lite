@@ -21,22 +21,40 @@ agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
   descriptions; `actor_id`, `idempotency_key`, `expected_version`,
   `sea_next`'s filters, operator-only `force` and a few more are not
   advertised (still accepted), and result schemas are field names and types
-  only. `tools/list` ~11.7 KB. The full profile stays the default and is
-  unchanged in tools and behaviour.
+  only. `tools/list` ~11.7 KB. Its server instructions name the six tools it
+  leaves out (`sea_create`, `sea_update`, `sea_link`, `sea_list`,
+  `sea_history`, `sea_stats`) and how to get them (`serve` without
+  `--core`, or `SEA_LITE_PROFILE=full`). The full profile stays the default.
 - **Templates in `sea_apply`**: `templates: [{for_each, ref, ticket,
   links}]` repeats one ticket and its links per value (`for_each` is an
   array of strings/numbers or a count n). `{i}` (1-based), `{value}`,
-  `{ref}` (this item) and `{prev}` (the previous item; a link naming it is
-  skipped for the first item) are substituted in every string, so a 20-step
-  chain is written once. Expansion is server-side, deterministic and happens
+  `{ref}` (this item's expanded ref) and `{prev}` (the expanded ref of the
+  previous item of the same template, item i−1; a link naming it is skipped
+  for item 1) are substituted in every string, so a 20-step chain is
+  written once. Expansion is server-side, deterministic and happens
   before validation: the 50-ticket / 100-link caps, the cycle check,
   `dry_run` and `idempotency_key` all see the expanded batch. New
   `batch_invalid` problem codes: `bad_template`, `too_many_tickets`,
   `too_many_links`, `invalid_expansion`, `empty_batch`.
-- **`sea_finish`**: done in one call — optional `note`, a terminal `status`
-  (default `resolved`; `wont_fix`, `dropped`, `merged`), claim and scope
-  released. `tickets: [...]` closes several. No confirmation round trip:
-  calling it is the confirmation. Store API `finish()`.
+- **`sea_apply` errors name exactly what failed.** Every `batch_invalid`
+  problem has `where` (`tickets[2] (a)`, `links[4]`, `templates[0] item 3
+  (t03)`, `templates[0] item 3 (t03) links[1]`, `claims[0]`) and the
+  structured `template` / `item` (1-based) / `ref` / `link` indexes, and its
+  message starts with that location; a duplicate ref or link names the
+  first occurrence too; the cap errors give each part's expanded count. A
+  `cycle` error gives the path by refs and `closed_by`, the link that closes
+  it. Still all or nothing.
+- **`sea_finish`**: end your work in one call, claim and scope released.
+  Required `outcome`: `done` → `resolved`; `blocked` → `blocked` (not
+  terminal, resumable; an already-blocked ticket stays blocked); `abandoned`
+  → `dropped`. Required `note` (non-empty, ≤ 1000 chars); optional `commit`
+  (sha, 7–64 hex). Recorded on the chain — `outcome` and `commit` on the
+  status_set event, `finish: {outcome, commit, from, to}` on the note event —
+  and on the ticket as the note `done @ 3f2a9c1: …`, so `sea_get` and
+  `sea_history` show why. `tickets: [...]` finishes several, each fenced by
+  its own token, all or nothing. No confirmation round trip: calling it is
+  the confirmation. With `idempotency_key`, item k's note is keyed `<key>#k`
+  and a repeat replays. Store API `finish()`.
 - **Bulk `sea_transition`**: `tickets: [{ticket_id, claim_token,
   expected_version?}, …]` (≤ 50) instead of `ticket_id` + `claim_token`.
   Each ticket is fenced by its own token; every ticket is checked first and

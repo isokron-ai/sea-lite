@@ -102,8 +102,10 @@ and `sea_link` is stored on the chain event as `sea:<key>` (kronicle-lite's
 the key up; on a hit it returns a result reconstructed from the stored
 payload with `replayed: true` and writes nothing. Reusing a key for a
 different operation is an `invalid_input` error, not a silent replay.
-A bulk `sea_transition` / `sea_finish` keys item k as `<key>#k`, one
-`sea_ticket.status_set` event each. A templated `sea_apply` is keyed like
+A bulk `sea_transition` keys item k as `<key>#k`, one
+`sea_ticket.status_set` event each; `sea_finish` keys item k's finish note
+(`sea_ticket.note_added` with `finish: {outcome, commit, from, to}`) as
+`<key>#k`. A templated `sea_apply` is keyed like
 any batch: the key replays the expanded batch it first wrote (templates are
 expanded before anything is chained, so no event records a template).
 

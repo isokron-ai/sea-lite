@@ -165,7 +165,7 @@ describe('MCP server (in-process transport, 2026-07-28 era)', () => {
     await call('sea_update', { ticket_id: a.ticket.id, claim_token: token, note: 'n', dry_run: true });
     await call('sea_transition', { ticket_id: a.ticket.id, claim_token: token, to: 'in_progress', dry_run: true });
     await call('sea_transition', { tickets: [{ ticket_id: a.ticket.id, claim_token: token }], to: 'in_progress', dry_run: true });
-    await call('sea_finish', { ticket_id: a.ticket.id, claim_token: token, dry_run: true });
+    await call('sea_finish', { ticket_id: a.ticket.id, claim_token: token, outcome: 'done', note: 'n', dry_run: true });
     const got = await call<{ ticket: { claim: { holder: string } }; legal_next: string[] }>('sea_get', { id: a.ticket.id });
     expect(got.ticket.claim.holder).toBe('agent-1');
     const full = await call<{ tickets: { body?: string }[] }>('sea_list', { view: 'full', include_terminal: true });
@@ -178,7 +178,7 @@ describe('MCP server (in-process transport, 2026-07-28 era)', () => {
     expect(rel.ticket.claim).toBeNull();
     const nx = await call<{ ticket: { id: string }; claim_token: string }>('sea_next', {});
     await call('sea_transition', { ticket_id: nx.ticket.id, claim_token: nx.claim_token, to: 'in_progress' });
-    await call('sea_finish', { ticket_id: nx.ticket.id, claim_token: nx.claim_token, note: 'done' });
+    await call('sea_finish', { ticket_id: nx.ticket.id, claim_token: nx.claim_token, outcome: 'done', note: 'done' });
     const feed = await call<{ mode: string; truncated: boolean }>('sea_history', { since_seq: 0, limit: 2, verify: false });
     expect(feed).toMatchObject({ mode: 'feed', truncated: true });
   });

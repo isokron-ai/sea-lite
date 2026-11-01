@@ -171,8 +171,9 @@ export const TransitionManyOutput = z.object({
 export const TransitionOutput = z.union([TransitionOneOutput, TransitionManyOutput]);
 
 export const FinishOutput = z.object({
+  outcome: z.enum(['done', 'blocked', 'abandoned']),
   finished: z.array(MovedOut),
-  note_added: z.boolean(),
+  commit: z.string().nullable(),
   replayed: z.boolean(),
   dry_run: z.boolean(),
 });

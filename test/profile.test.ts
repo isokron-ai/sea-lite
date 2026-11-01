@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { serveHttp } from '../src/http.js';
 import { leanInputSchema, leanOutputSchema, omitProperties } from '../src/model/publish.js';
-import { CORE_TOOLS, MAX_INSTRUCTIONS_CHARS } from '../src/server.js';
+import { CORE_TOOLS, createServer, MAX_INSTRUCTIONS_CHARS } from '../src/server.js';
 import { SeaLite } from '../src/store.js';
 import { claimedTicket } from './helpers.js';
 import { assertStrictOutput, connectInMemory, parse, TOOLS } from './mcp-helpers.js';
@@ -54,7 +54,26 @@ describe('profiles', () => {
     }
     expect(core.instructions).toMatch(/sea_finish/);
     expect(core.instructions.length).toBeLessThanOrEqual(MAX_INSTRUCTIONS_CHARS);
+    // Core says what it leaves out and how to get it.
+    const omitted = TOOLS.filter((t) => !(CORE_TOOLS as readonly string[]).includes(t));
+    expect(omitted.sort()).toEqual(['sea_create', 'sea_history', 'sea_link', 'sea_list', 'sea_stats', 'sea_update']);
+    for (const t of omitted) expect(core.instructions, t).toContain(t);
+    expect(core.instructions).toMatch(/serve without --core/);
+    expect(core.instructions).toMatch(/SEA_LITE_PROFILE=full/);
+    expect(full.instructions).not.toMatch(/SEA_LITE_PROFILE/);
     expect(full.instructions).toMatch(/sea_finish/);
+  });
+
+  it('instructions stay within budget for the longest actor and a session in both profiles', () => {
+    const store = new SeaLite({ memory: true, actor: 'x'.repeat(200), session: 'f'.repeat(64) });
+    closers.push(() => store.close());
+    for (const profile of ['core', 'full'] as const) expect(() => createServer(store, { profile })).not.toThrow();
+  });
+
+  it('documents {prev} as the expanded ref of the previous item of the same template', async () => {
+    const { tools } = await listed('core');
+    const apply = tools.find((t) => t.name === 'sea_apply')!;
+    expect(JSON.stringify(apply.inputSchema)).toContain('{prev} = the expanded ref of item i-1 of this template');
   });
 
   it('publishes lean schemas: no $schema, no string length noise, nested result objects as field lists', async () => {
@@ -109,7 +128,7 @@ describe('profiles', () => {
       const n = parse<{ ticket: { id: string }; claim_token: string }>(await client.callTool({ name: 'sea_next', arguments: { scope: { paths: ['src'] } } }));
       expect(n.ticket.id).toBe(created[want]);
       await client.callTool({ name: 'sea_transition', arguments: { ticket_id: n.ticket.id, claim_token: n.claim_token, to: 'in_progress' } });
-      const f = await client.callTool({ name: 'sea_finish', arguments: { ticket_id: n.ticket.id, claim_token: n.claim_token, note: `${want} done` } });
+      const f = await client.callTool({ name: 'sea_finish', arguments: { ticket_id: n.ticket.id, claim_token: n.claim_token, outcome: 'done', note: `${want} done` } });
       await assertStrictOutput('sea_finish', f);
     }
     expect(store.get({ id: created['s2']! }).ticket.status).toBe('resolved');
@@ -207,7 +226,7 @@ describe('serve --core over stdio and HTTP', () => {
     closers.push(() => client.close());
     expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual([...CORE_TOOLS].sort());
     const t = claimedTicket(store, 'h');
-    const f = await client.callTool({ name: 'sea_finish', arguments: { ticket_id: t.id, claim_token: t.token } });
+    const f = await client.callTool({ name: 'sea_finish', arguments: { ticket_id: t.id, claim_token: t.token, outcome: 'abandoned', note: 'not needed' } });
     await assertStrictOutput('sea_finish', f);
   });
 });

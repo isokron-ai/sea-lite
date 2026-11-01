@@ -167,12 +167,12 @@ const READ = { readOnlyHint: true, idempotentHint: true, openWorldHint: false } 
 function instructionsFor(profile: Profile, who: string, role: string): string {
   const text =
     profile === 'core'
-      ? 'Fenced work queue for parallel agents. Loop: sea_next (scope.paths = files you will edit) → work → sea_finish (note). ' +
-        'Writes need the claim_token from sea_next/sea_claim. Leases renew while you call sea-lite tools; sea_release (note) to hand ' +
-        'back. Other holders\' scopes never overlap yours; sea_scope_check before editing a path you did not claim. Plan with sea_apply ' +
-        `(templates for repeated tickets). You are "${who}" (role ${role}).`
+      ? 'Fenced work queue for parallel agents. Loop: sea_next (scope.paths = files to edit) → work → sea_finish (outcome, ' +
+        'note). Writes need the claim_token from sea_next/sea_claim; leases renew on any sea-lite call. sea_scope_check ' +
+        'before editing a path you did not claim. Plan with sea_apply (templates). Core profile: no sea_create, sea_update, ' +
+        `sea_link, sea_list, sea_history, sea_stats: serve without --core (SEA_LITE_PROFILE=full) has them. You are "${who}" (role ${role}).`
       : 'Fenced work queue for parallel agents. Loop: sea_next (scope: the paths you will edit) → work → sea_update notes → ' +
-        'sea_finish (note). Writes need the claim_token from sea_claim/sea_next. Leases renew while you keep calling sea-lite ' +
+        'sea_finish (outcome, note). Writes need the claim_token from sea_claim/sea_next. Leases renew while you keep calling sea-lite ' +
         'tools; sea_release when you stop. Scopes of other holders (other actors, or this actor in another session) never ' +
         `overlap; sea_scope_check before editing a path you did not claim. You are "${who}" (role ${role}).`;
   if (text.length > MAX_INSTRUCTIONS_CHARS) {
@@ -324,7 +324,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       core:
         'Set status (claim_token): idea → triaged → in_progress → resolved, or parked | blocked | needs_decision. Terminal ' +
         'states (no exit; release the claim) need confirm: true. `note` adds a note; `tickets` moves several. Errors carry legal_next.',
-      coreOmit: ['dry_run', 'duplicate_of'],
+      coreOmit: ['dry_run', 'duplicate_of', 'reason'],
       input: TransitionToolInput,
       output: TransitionOutput,
       annotations: DESTRUCTIVE,
@@ -345,9 +345,10 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     {
       title: 'Finish tickets',
       description:
-        'Done with a ticket: appends `note` (optional), sets a terminal status (default resolved) and releases your claim, in ' +
-        'one write. `tickets` closes several (each with its own claim_token; all or none). Calling it is the confirmation.',
-      core: 'Done: optional `note`, terminal status (default resolved), claim released, one write. `tickets` closes several, all or none.',
+        'End your work on a ticket in one write: `outcome` done (→ resolved) | blocked (→ blocked, resumable) | abandoned ' +
+        '(→ dropped), a required `note` (what shipped / why), optional `commit` sha; your claim is released and all of it is ' +
+        'chained. `tickets` finishes several (each with its own claim_token; all or none). No confirmation prompt.',
+      core: 'End work in one write: outcome, note, optional commit; claim released. `tickets`: several.',
       coreOmit: ['dry_run', 'reason'],
       input: FinishInput,
       output: FinishOutput,
@@ -397,6 +398,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       title: 'Extend a claim lease',
       description: 'Extend your lease to now + extend_by_seconds (default: its lease; max 3600; never shortens). Any sea-lite call renews your claims anyway.',
       core: 'Extend your lease (any sea-lite call also renews it).',
+      coreOmit: ['extend_by_seconds'],
       input: RefreshInput,
       output: RefreshOutput,
       annotations: { ...WRITE, idempotentHint: true },

@@ -126,7 +126,8 @@ describe('template expansion (pure)', () => {
     const long = 'x'.repeat(490);
     const p = problemsOf(() => expandBatch(plan({ templates: [{ for_each: ['v'.repeat(20)], ref: 'r{i}', ticket: { title: `${long}{value}` } }] })));
     expect(p[0]!.code).toBe('invalid_expansion');
-    expect(p[0]!.message).toMatch(/tickets\.0\.title/);
+    expect(p[0]).toMatchObject({ where: 'templates[0] item 1 (r1) title', template: 0, item: 1, ref: 'r1' });
+    expect(p[0]!.message).toMatch(/^templates\[0\] item 1 \(r1\) title: /);
   });
 
   it('an empty batch (no tickets, no templates) is rejected', () => {
@@ -197,6 +198,112 @@ describe('sea_apply with templates (store)', () => {
     );
     expect(r.links).toHaveLength(4);
     expect(linksOf(store, held.id)).toHaveLength(2);
+  });
+});
+
+describe('sea_apply errors name exactly what failed', () => {
+  type P = { code: string; message: string; where?: string; template?: number; item?: number; ref?: string; link?: number };
+  const problems = (fn: () => unknown) => problemsOf(fn) as P[];
+
+  it('plain batch: duplicate refs by ticket index and ref, bad links by link index', () => {
+    const { store } = fresh();
+    const p = problems(() =>
+      store.apply(
+        plan({
+          tickets: [{ ref: 'a', title: 'A' }, { ref: 'b', title: 'B' }, { ref: 'a', title: 'A again' }],
+          links: [
+            { from_ref: 'a', to_ref: 'b', link_type: 'depends_on' },
+            { from_ref: 'a', to_ref: 'zz', link_type: 'depends_on' },
+            { from_ref: 'b', to_ref: 'b', link_type: 'relates_to' },
+            { from_ref: 'a', to_ref: 'b', link_type: 'depends_on' },
+            { to_ref: 'a', link_type: 'blocks' },
+          ],
+        }),
+      ),
+    );
+    expect(p.map((x) => [x.code, x.where])).toEqual([
+      ['duplicate_ref', 'tickets[2] (a)'],
+      ['foreign_ref', 'links[1]'],
+      ['self_loop', 'links[2]'],
+      ['duplicate_link', 'links[3]'],
+      ['bad_endpoint', 'links[4]'],
+    ]);
+    expect(p[0]!.message).toBe('tickets[2] (a): ref "a" is already used by tickets[0] (a)');
+    expect(p[1]).toMatchObject({ link: 1, at: 'zz' });
+    expect(p[3]!.message).toMatch(/already given by links\[0\]/);
+  });
+
+  it('templates: the template index, the expanded item (1-based) and its ref, and the template link index', () => {
+    const { store } = fresh();
+    const p = problems(() =>
+      store.apply(
+        plan({
+          tickets: [{ ref: 'epic', title: 'E' }],
+          templates: [
+            { for_each: 2, ref: 'a{i}', ticket: { title: 'a{i}' } },
+            {
+              for_each: ['x', 'y', 'z'],
+              ref: 's{value}',
+              ticket: { title: 's{value}' },
+              links: [
+                { from_ref: 'epic', to_ref: '{ref}', link_type: 'parent_of' },
+                { from_ref: '{ref}', to_ref: 'missing-{i}', link_type: 'depends_on' },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    expect(p.map((x) => x.where)).toEqual(['templates[1] item 1 (sx) links[1]', 'templates[1] item 2 (sy) links[1]', 'templates[1] item 3 (sz) links[1]']);
+    expect(p[1]).toMatchObject({ code: 'foreign_ref', template: 1, item: 2, ref: 'sy', link: 1, at: 'missing-2' });
+    // A template ref colliding with a plain ticket's ref names both.
+    const dup = problems(() => store.apply(plan({ tickets: [{ ref: 't2', title: 'x' }], templates: [{ for_each: 3, ref: 't{i}', ticket: { title: 't{i}' } }] })));
+    expect(dup).toHaveLength(1);
+    expect(dup[0]!.message).toBe('templates[0] item 2 (t2): ref "t2" is already used by tickets[0] (t2)');
+  });
+
+  it('caps name how many each part expanded to', () => {
+    const { store } = fresh();
+    const p = problems(() => store.apply(plan({ tickets: [{ ref: 'x', title: 'x' }], templates: [{ for_each: 30, ref: 'a{i}', ticket: { title: 'a' } }, { for_each: 30, ref: 'b{i}', ticket: { title: 'b' } }] })));
+    expect(p[0]!.message).toBe('the batch expands to 61 tickets (tickets 1, templates[0] 30, templates[1] 30); at most 50');
+  });
+
+  it('cycles: the path by refs and the link that closes it, by where it was written', () => {
+    const { store } = fresh();
+    let err: SeaError | undefined;
+    try {
+      store.apply(plan({ ...chain20, links: [{ from_ref: 't01', to_ref: 't20', link_type: 'depends_on' }] }));
+    } catch (e) {
+      err = e as SeaError;
+    }
+    expect(err?.code).toBe('cycle');
+    const d = err!.details as { path: string[]; closed_by: P };
+    expect(d.path[0]).toMatch(/^t\d\d$/);
+    expect(d.path).toContain('t01');
+    expect(d.path).toContain('t20');
+    expect(d.path.every((x) => /^t\d\d$/.test(x))).toBe(true);
+    expect(d.closed_by.where).toMatch(/^links\[0\]$|^templates\[0\] item \d+ \(t\d\d\) links\[1\]$/);
+    expect(err!.message).toMatch(/closed by /);
+  });
+
+  it('existing-ticket endpoints: unknown ids and missing fences name the link or claim', () => {
+    const { store } = fresh();
+    const held = claimedTicket(store);
+    const p = problems(() =>
+      store.apply(
+        plan({
+          templates: [{ for_each: 2, ref: 'c{i}', ticket: { title: 'c{i}' }, links: [{ from_ref: '{ref}', to_id: 'deadbeefdead', link_type: 'depends_on' }] }],
+          claims: [{ ticket_id: 'feedfacefeed', claim_token: held.token }],
+        }),
+      ),
+    );
+    expect(p.map((x) => [x.code, x.where])).toEqual([
+      ['unknown_ticket', 'templates[0] item 1 (c1) links[0]'],
+      ['unknown_ticket', 'templates[0] item 2 (c2) links[0]'],
+      ['unknown_ticket', 'claims[0]'],
+    ]);
+    const f = problems(() => store.apply(plan({ templates: [{ for_each: 1, ref: 'c{i}', ticket: { title: 'c' }, links: [{ from_id: held.id, to_ref: '{ref}', link_type: 'relates_to' }] }] })));
+    expect(f[0]).toMatchObject({ code: 'fence_missing', where: 'templates[0] item 1 (c1) links[0]' });
   });
 });
 
