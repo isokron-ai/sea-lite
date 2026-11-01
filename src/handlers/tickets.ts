@@ -42,6 +42,7 @@ import { legalNextStates, validateTransition } from '../model/lifecycle.js';
 import { plainOrigins, type ApplyInput, type BatchOrigin, type CreateInput, type ExpandedBatch, type FencedItem, type GetInput, type ListInput, type TransitionInput, type TransitionManyInput, type UpdateInput } from '../model/schemas.js';
 import { expandBatch } from '../model/templates.js';
 import { findPossibleDuplicates, type PossibleDuplicate } from './dedup.js';
+import { idForHash, priorFor, requestHash } from '../core/idem.js';
 
 // ───────────────────────────── create ─────────────────────────────
 
@@ -106,7 +107,7 @@ function insertTicket(
     assignee: string | undefined;
     status: TicketStatus;
   },
-  extra: { batch_id?: string; ref?: string } = {},
+  extra: { batch_id?: string; ref?: string; request_hash?: string } = {},
   idempotency_key?: string,
 ): { row: TicketRow; seq: number } {
   const id = uuid();
@@ -201,13 +202,20 @@ export function placeClaim(
 
 export function create(ctx: Ctx, input: CreateInput): CreateResult {
   const key = idemKey(input.idempotency_key);
+  const hash = requestHash('sea_create', {
+    title: input.title,
+    body: input.body,
+    kind: input.kind,
+    priority: input.priority,
+    tags: input.tags,
+    assignee: input.assignee,
+    status: input.status,
+    claim_seconds: input.claim_seconds,
+  });
   return tx(ctx.db, () => {
-    if (key !== undefined) {
-      const prior = ctx.chain.findByIdempotencyKey(key);
+    {
+      const prior = priorFor(ctx, input.idempotency_key, key, [EVENT.ticket_created], hash);
       if (prior) {
-        if (prior.event_type !== EVENT.ticket_created) {
-          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
-        }
         return {
           ticket: ticketFromCreatedPayload(prior.payload as unknown as CreatedPayload, prior.seq),
           claim_token: null,
@@ -262,7 +270,7 @@ export function create(ctx: Ctx, input: CreateInput): CreateResult {
         assignee: input.assignee,
         status: input.status,
       },
-      {},
+      key !== undefined ? { request_hash: hash } : {},
       key,
     );
     let claim_token: string | null = null;
@@ -465,18 +473,22 @@ function existingDagEdges(ctx: Ctx): DirectedEdge[] {
 
 export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
   const key = idemKey(input.idempotency_key);
+  // Expansion is pure: hash the expanded batch, so the same templates (or the same plan written out) hash the same.
+  const expanded = expandBatch(input);
   return tx(ctx.db, () => {
-    if (key !== undefined) {
-      const prior = ctx.chain.findByIdempotencyKey(key);
+    const hash = requestHash('sea_apply', {
+      tickets: expanded.tickets,
+      links: expanded.links.map((l) => ({ ...l, ...(l.from_id !== undefined ? { from_id: idForHash(ctx, l.from_id) } : {}), ...(l.to_id !== undefined ? { to_id: idForHash(ctx, l.to_id) } : {}) })),
+      claims: (input.claims ?? []).map((c) => idForHash(ctx, c.ticket_id)).sort(),
+    });
+    {
+      const prior = priorFor(ctx, input.idempotency_key, key, [EVENT.batch_applied], hash);
       if (prior) {
-        if (prior.event_type !== EVENT.batch_applied) {
-          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
-        }
         const p = prior.payload as unknown as BatchPayload;
         return { batch_id: p.batch_id, tickets: p.tickets, links: p.links, head: ctx.chain.head(), replayed: true, dry_run: false };
       }
     }
-    const plan = { ...expandBatch(input), claims: input.claims };
+    const plan = { ...expanded, claims: input.claims };
     validateBatch(plan);
     const touchesExisting = plan.links.some((l) => l.from_id !== undefined || l.to_id !== undefined);
     const resolved = touchesExisting ? validateExisting(ctx, plan) : new Map<string, string>();
@@ -535,7 +547,7 @@ export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
       event_type: EVENT.batch_applied,
       actor_id: ctx.actor,
       occurred_at: ctx.now.toISOString(),
-      payload: { ...payload, ticket_count: tickets.length, link_count: links.length } as unknown as Record<string, unknown>,
+      payload: { ...payload, ticket_count: tickets.length, link_count: links.length, ...(key !== undefined ? { request_hash: hash } : {}) } as unknown as Record<string, unknown>,
       ...(key !== undefined ? { idempotency_key: key } : {}),
     });
     return { batch_id, tickets, links, head: ctx.chain.head(), replayed: false, dry_run: false };
@@ -611,12 +623,21 @@ export interface UpdateResult {
 export function update(ctx: Ctx, input: UpdateInput): UpdateResult {
   const key = idemKey(input.idempotency_key);
   return tx(ctx.db, () => {
-    if (key !== undefined) {
-      const prior = ctx.chain.findByIdempotencyKey(key);
+    const hash = requestHash('sea_update', {
+      ticket_id: idForHash(ctx, input.ticket_id),
+      title: input.title,
+      body: input.body,
+      kind: input.kind,
+      priority: input.priority,
+      add_tags: input.add_tags,
+      remove_tags: input.remove_tags,
+      assignee: input.assignee,
+      note: input.note,
+      expected_version: input.expected_version,
+    });
+    {
+      const prior = priorFor(ctx, input.idempotency_key, key, [EVENT.ticket_updated], hash);
       if (prior) {
-        if (prior.event_type !== EVENT.ticket_updated) {
-          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
-        }
         const p = prior.payload as { ticket_id: string; changes: Record<string, unknown>; row_version: number };
         return {
           ticket: null,
@@ -676,7 +697,7 @@ export function update(ctx: Ctx, input: UpdateInput): UpdateResult {
         event_type: EVENT.ticket_updated,
         actor_id: ctx.actor,
     occurred_at: ctx.now.toISOString(),
-        payload: { ticket_id: id, changes, tags, row_version, updated_at },
+        payload: { ticket_id: id, changes, tags, row_version, updated_at, ...(key !== undefined ? { request_hash: hash } : {}) },
         ...(key !== undefined ? { idempotency_key: key } : {}),
       });
       ctx.db
@@ -726,16 +747,27 @@ export interface TransitionResult {
   dry_run: boolean;
 }
 
-/** `payloadExtra` adds fields to the chained status_set payload (sea_finish records its outcome and commit there). */
-export function transition(ctx: Ctx, input: TransitionInput, payloadExtra: Record<string, unknown> = {}): TransitionResult {
+/**
+ * `payloadExtra` adds fields to the chained status_set payload (sea_finish
+ * records its outcome and commit there). `requestHashOverride`: a bulk call
+ * binds every item's key to the whole request.
+ */
+export function transition(ctx: Ctx, input: TransitionInput, payloadExtra: Record<string, unknown> = {}, requestHashOverride?: string): TransitionResult {
   const key = idemKey(input.idempotency_key);
   return tx(ctx.db, () => {
-    if (key !== undefined) {
-      const prior = ctx.chain.findByIdempotencyKey(key);
+    const hash =
+      requestHashOverride ??
+      requestHash('sea_transition', {
+        ticket_id: idForHash(ctx, input.ticket_id),
+        to: input.to,
+        reason: input.reason,
+        duplicate_of: input.duplicate_of !== undefined ? idForHash(ctx, input.duplicate_of) : undefined,
+        note: input.note,
+        expected_version: input.expected_version,
+      });
+    {
+      const prior = priorFor(ctx, input.idempotency_key, key, [EVENT.ticket_status_set], hash);
       if (prior) {
-        if (prior.event_type !== EVENT.ticket_status_set) {
-          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
-        }
         const p = prior.payload as {
           ticket_id: string;
           from: TicketStatus;
@@ -820,6 +852,7 @@ export function transition(ctx: Ctx, input: TransitionInput, payloadExtra: Recor
         claim_auto_released: willRelease,
         claim_token_hash: willRelease ? row.claim_token_hash : null,
         ...payloadExtra,
+        ...(key !== undefined ? { request_hash: hash } : {}),
       },
       ...(key !== undefined ? { idempotency_key: key } : {}),
     });
@@ -1026,12 +1059,23 @@ export function transitionMany(ctx: Ctx, input: TransitionManyInput): Transition
         ...(input.idempotency_key !== undefined ? { idempotency_key: `${input.idempotency_key}#${k}` } : {}),
       };
     };
+    // Every item's key (<key>#k) is bound to the whole request: a reused key with other tickets fails up front.
+    const hash = requestHash('sea_transition[]', {
+      tickets: input.tickets.map((t) => ({ ticket_id: idForHash(ctx, t.ticket_id), expected_version: t.expected_version })),
+      to: input.to,
+      reason: input.reason,
+      duplicate_of: input.duplicate_of !== undefined ? idForHash(ctx, input.duplicate_of) : undefined,
+      note: input.note,
+    });
+    if (input.idempotency_key !== undefined) {
+      input.tickets.forEach((_, k) => priorFor(ctx, input.idempotency_key, idemKey(`${input.idempotency_key}#${k}`), [EVENT.ticket_status_set], hash));
+    }
     const problems: { ticket_id: string; error: string; message: string; details?: Record<string, unknown> }[] = [];
     const previews: TransitionResult[] = [];
     const seen = new Set<string>();
     input.tickets.forEach((t, k) => {
       try {
-        const p = transition(ctx, one(k, true));
+        const p = transition(ctx, one(k, true), {}, hash);
         if (seen.has(p.ticket_id)) throw new SeaError('invalid_input', `ticket ${p.ticket_id} appears more than once`, { ticket_id: p.ticket_id });
         seen.add(p.ticket_id);
         previews.push(p);
@@ -1056,7 +1100,7 @@ export function transitionMany(ctx: Ctx, input: TransitionManyInput): Transition
         dry_run: input.dry_run,
       };
     }
-    const done = input.tickets.map((_, k) => transition(ctx, one(k, false)));
+    const done = input.tickets.map((_, k) => transition(ctx, one(k, false), {}, hash));
     return { results: done.map((r) => view(r, titleOf(r.ticket_id))), count: done.length, head: ctx.chain.head(), replayed: false, dry_run: false };
   });
 }

@@ -49,7 +49,9 @@ describe('sea_create', () => {
   it('idempotency_key replays the original result without a second write', () => {
     const { store } = fresh();
     const a = store.create({ ...base, title: 'Once', idempotency_key: 'k1' });
-    const b = store.create({ ...base, title: 'Once but different', idempotency_key: 'k1' });
+    // A different request under the same key is refused (0.4.0 replayed it), and writes nothing.
+    expect(codeOf(() => store.create({ ...base, title: 'Once but different', idempotency_key: 'k1' }))).toBe('invalid_input');
+    const b = store.create({ ...base, title: 'Once', idempotency_key: 'k1' });
     expect(b.replayed).toBe(true);
     expect(b.ticket.id).toBe(a.ticket.id);
     expect(b.ticket.title).toBe('Once');
@@ -201,7 +203,8 @@ describe('sea_update', () => {
     const { store } = fresh();
     const { id, token } = claimedTicket(store);
     const a = store.update({ ticket_id: id, claim_token: token, body: 'first', idempotency_key: 'u1', dry_run: false });
-    const b = store.update({ ticket_id: id, claim_token: token, body: 'second', idempotency_key: 'u1', dry_run: false });
+    expect(codeOf(() => store.update({ ticket_id: id, claim_token: token, body: 'second', idempotency_key: 'u1', dry_run: false }))).toBe('invalid_input');
+    const b = store.update({ ticket_id: id, claim_token: token, body: 'first', idempotency_key: 'u1', dry_run: false });
     expect(b.replayed).toBe(true);
     expect(b.changed).toEqual(['body']);
     expect(b.row_version).toBe(a.row_version);
@@ -269,7 +272,8 @@ describe('sea_transition', () => {
     expect(codeOf(() => store.transition({ ticket_id: id, claim_token: token, to: 'in_progress', actor_id: 'bob', dry_run: false }))).toBe('fence_foreign_holder');
     expect(codeOf(() => store.transition({ ticket_id: id, claim_token: token, to: 'in_progress', expected_version: 9, dry_run: false }))).toBe('version_conflict');
     const a = store.transition({ ticket_id: id, claim_token: token, to: 'in_progress', idempotency_key: 't1', dry_run: false });
-    const b = store.transition({ ticket_id: id, claim_token: token, to: 'parked', idempotency_key: 't1', dry_run: false });
+    expect(codeOf(() => store.transition({ ticket_id: id, claim_token: token, to: 'parked', idempotency_key: 't1', dry_run: false }))).toBe('invalid_input');
+    const b = store.transition({ ticket_id: id, claim_token: token, to: 'in_progress', idempotency_key: 't1', dry_run: false });
     expect(b.replayed).toBe(true);
     expect(b.to).toBe('in_progress');
     expect(b.from).toBe(a.from);
