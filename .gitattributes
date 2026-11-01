@@ -1,0 +1,3 @@
+# LF everywhere so the catalog snapshot, docs and the hook script check out
+# byte-identical on Windows (catalog:check compares bytes).
+* text=auto eol=lf

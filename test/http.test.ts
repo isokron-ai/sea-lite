@@ -66,7 +66,7 @@ describe('tokens and the actors file', () => {
       if (POSIX) expect(statSync(a.file).mode & 0o777).toBe(0o600);
       expect(loadOrCreateBearer(dir)).toEqual({ token: a.token, created: false, file: a.file });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -88,7 +88,7 @@ describe('tokens and the actors file', () => {
       ]);
       expect(() => addActorToken(file, 'alice')).toThrow(/already has a token/);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 

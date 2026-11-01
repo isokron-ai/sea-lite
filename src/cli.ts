@@ -267,6 +267,8 @@ async function main(argv: string[]): Promise<number> {
       // As given (made absolute) and, when it still exists, its realpath: a claim bound under either spelling is released.
       const abs = resolve(raw);
       const spellings = [abs];
+      // An absolute path in another platform's form (a POSIX path given on Windows) is kept as given too.
+      if (/^([A-Za-z]:[\\/]|[\\/])/.test(raw) && raw !== abs) spellings.push(raw);
       try {
         const real = realpathSync(abs);
         if (real !== abs) spellings.push(real);

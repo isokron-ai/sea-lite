@@ -18,21 +18,24 @@
 set -u
 
 input="$(cat)"
-file="$(printf '%s' "$input" | node -e '
+root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# Node does the path work so Windows paths (C:\repo\src\x.ts, mixed
+# separators, drive-letter case) relativize the same way POSIX ones do.
+# Prints the repo-relative path with forward slashes, or nothing when the
+# event is not a file edit or the file is outside the repo.
+rel="$(printf '%s' "$input" | node -e '
+  const path = require("path"); const root = process.argv[1];
   let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     try {
-      const e = JSON.parse(s); const t = e.tool_input || {};
-      process.stdout.write(t.file_path || t.notebook_path || "");
-    } catch { process.stdout.write(""); }
-  });')"
-[ -z "$file" ] && exit 0  # not a file edit; nothing to check
-
-root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-case "$file" in
-  "$root"/*) rel="${file#"$root"/}" ;;
-  /*)        exit 0 ;;              # outside the repo: not ours to fence
-  *)         rel="$file" ;;
-esac
+      const t = JSON.parse(s).tool_input || {};
+      const f = t.file_path || t.notebook_path || "";
+      if (!f) return;
+      const rel = path.relative(root, path.resolve(root, f));
+      if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return; // outside the repo: not ours to fence
+      process.stdout.write(rel.split(path.sep).join("/"));
+    } catch { /* not JSON: nothing to check */ }
+  });' "$root")"
+[ -z "$rel" ] && exit 0
 
 bin="${SEA_LITE_BIN:-npx -y sea-lite}"
 out="$($bin scope-check --paths "$rel" ${SEA_LITE_ACTOR:+--actor "$SEA_LITE_ACTOR"} 2>&1)"

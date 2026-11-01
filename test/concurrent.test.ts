@@ -33,7 +33,7 @@ describe('concurrent processes', () => {
     dir = mkdtempSync(join(tmpdir(), 'sea-lite-conc-'));
   });
   afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('exactly one of two processes wins a contested claim', async () => {

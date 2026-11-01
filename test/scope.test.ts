@@ -374,7 +374,7 @@ describe('scope over MCP and the CLI', () => {
     dir = mkdtempSync(join(tmpdir(), 'sea-lite-scope-'));
   });
   afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('round-trips scope through sea_claim / sea_next / sea_get / sea_scope_check with structuredContent', async () => {

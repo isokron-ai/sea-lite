@@ -198,3 +198,19 @@ describe('worktree-bound claims', () => {
     }
   });
 });
+
+describe('Windows path spellings', () => {
+  it('backslash scope paths lock and conflict exactly like forward-slash ones', () => {
+    const { store } = fresh();
+    const a = triaged(store, 'a');
+    const b = triaged(store, 'b', 'bob');
+    expect(store.claim({ ticket_ids: [a], scope: { paths: ['src\\handlers\\', 'docs\\*.md'], worktree: 'D:\\wt\\a' } })).toMatchObject({
+      scope: { paths: ['docs/*.md', 'src/handlers'] },
+      worktree: 'd:/wt/a',
+    });
+    expect(codeOf(() => store.claim({ ticket_ids: [b], scope: { paths: ['src/handlers/claims.ts'] }, actor_id: 'bob' }))).toBe('scope_conflict');
+    expect(store.scopeCheck({ paths: ['docs\\README.md'], actor_id: 'bob' }).ok).toBe(false);
+    expect(store.scopeCheck({ paths: ['lib\\x.ts'], actor_id: 'bob' }).ok).toBe(true);
+    store.close();
+  });
+});

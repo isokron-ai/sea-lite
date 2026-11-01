@@ -220,7 +220,7 @@ describe('MCP server (stdio, built CLI)', () => {
 
   afterAll(async () => {
     await client.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('speaks MCP 2026-07-28 over stdio against a file-backed store and shares it with kronicle-lite', async () => {
@@ -250,7 +250,7 @@ describe('MCP server (stdio, 2025-era SDK v1 client — handshake backward compa
     dir = mkdtempSync(join(tmpdir(), 'sea-lite-v1-'));
   });
   afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('a v1 SDK client (initialize handshake, protocol 2025-06-18) lists tools, calls them and reads the resource', async () => {
