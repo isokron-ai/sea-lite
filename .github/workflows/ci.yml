@@ -18,3 +18,7 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # The tool catalog is a reviewed artifact: any byte of tools/list,
+      # prompts/list or resources/templates/list that differs from
+      # .mcp-catalog/sea-lite.json fails the job (npm run catalog:snapshot to refresh).
+      - run: npm run catalog:check

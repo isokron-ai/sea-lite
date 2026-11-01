@@ -1,0 +1,9 @@
+{
+  "snapshotDir": ".mcp-catalog",
+  "servers": [
+    {
+      "name": "sea-lite",
+      "command": ["node", "dist/cli.js", "serve", "--actor", "catalog", "--data-dir", "node_modules/.cache/sea-lite-catalog"]
+    }
+  ]
+}
