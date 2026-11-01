@@ -3,7 +3,16 @@
 Things deliberately left out so far, roughly in the order they are likely
 to land. Open an issue if one matters to you.
 
-## Landed in 0.4.0 (unreleased)
+## Landed in 0.5.0
+
+- `serve --core` (9 tools, 11.7 KB; full catalog 59 → 32 KB).
+- Compact `sea_apply` results and templates (`for_each`, `{i}`, `{value}`,
+  `{prev}`); errors name the failing item, link or cycle.
+- Bulk transitions; `sea_finish` (outcome + note + release in one call).
+- Idempotency keys bound to their request; scope paths resolved through
+  symlinks; kronicle-lite ^0.7.0 (concurrent first start).
+
+## Landed in 0.4.0
 
 - Per-session identity: one actor label in two sessions is two holders;
   the session registry joins hooks to their server.
@@ -32,6 +41,15 @@ to land. Open an issue if one matters to you.
   Claude Code edit-hook example).
 
 ## Next
+
+*Top of the queue (2026-11-01):*
+
+- **Wait for a lock instead of sleep-polling** (built on branch `wait`) — `sea_claim` / `sea_next`
+  take `wait_seconds`; the call returns when the scope frees up or the wait
+  ends. Gate: Track B T3 wall time (sea-lite 2.6× slower than beads today).
+- **Claimed-path check after Bash edits** — with cc-anchor, paths changed by
+  a Bash call (`sed -i`, redirects) inside another session's claim are
+  flagged immediately, not at commit.
 
 - **Scope-aware dispatch** — `sea_next` today refuses a dispatch whose
   scope conflicts. A `scope_mode: skip` that walks on to the next eligible

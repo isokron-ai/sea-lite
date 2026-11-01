@@ -4,13 +4,16 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased]
+## [0.6.0] — 2026-11-01
 
-Lean on context and fewer calls to plan and close work. Measured by
-agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
-59.3 KB → 31.5 KB (full) / 11.7 KB (`--core`); S14 (1 epic + 20 tickets,
-39 links) `sea_apply` ~4.8k → ~1.6k tokens (13.4 KB → 1.0 KB returned),
-~0.4k with a template (617 B written); S3a–d and S13 verdicts unchanged.
+Wait for a claim instead of polling for it. Measured by agent-memory-bench
+Track A S15 (Track B T3's conflict pattern: two agents, four tickets whose
+scopes all overlap on CHANGELOG.md; time-compressed, 3 runs per mode):
+sleep-and-retry vs `wait_seconds` — wall 9.07 s → 8.78 s, tool calls
+15 → 10, model turns 20 → 10, tickets done by A / B 4 / 0 (B gave up in 3/3
+runs) → 2 / 2 (0/3), release→next-claim gap 0.255 s → 0.154 s. The work
+serializes on the shared file either way, so wall time barely moves; the
+gains are fairness and half the turns. S3a–d verdicts unchanged.
 
 ### Added
 
@@ -22,13 +25,37 @@ agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
   holder, ticket and expiry (CLI exit 1); a cancelled request ends it with
   `wait_cancelled`. `sea_next` also waits while nothing is free but someone
   else holds work that could free up; an empty queue still answers at once.
-  No lock is held and the store is not polled hard: retries happen only on
-  a change — another process's commit (SQLite `data_version`, 20–250 ms
-  backoff), this process's commit (an in-process notifier, immediate) — or
-  at the blocking lease's expiry. Progress notifications every 5 s when the
-  client sends a progressToken (see README "Client timeouts"). `--core`
-  stops advertising `lease_seconds` on `sea_claim` / `sea_next` (still
-  accepted) to stay within 12 KB with `wait_seconds` added.
+  Refusals waiting cannot fix (unknown ticket, bad input) fail at once.
+- No lock is held and the store is not polled hard: a waiter retries only
+  on a change — another process's commit (SQLite `PRAGMA data_version`,
+  20–250 ms backoff), this process's commit (an in-process notifier poked by
+  every write transaction, immediate) — or at the blocking lease's expiry.
+  A release in another process is picked up within about 250 ms; a lapsed
+  lease 20–35 ms after its expiry (stress: kill -9 of the holder).
+- MCP: the waiting handlers are async, end with the request's cancellation,
+  and send a progress notification every 5 s naming the holder when the
+  client sends a progressToken. Clients enforce their own request timeout
+  (the TypeScript SDK's default is 60 s unless it resets on progress): keep
+  `wait_seconds` below it (README "Client timeouts").
+
+### Changed
+
+- `--core` no longer advertises `lease_seconds` on `sea_claim` /
+  `sea_next` (still accepted; leases default to 900 s and renew on
+  activity), so `tools/list` stays within 12 KB with `wait_seconds` added.
+
+## [0.5.0] — 2026-11-01
+
+
+- Depends on kronicle-lite ^0.7.0 (was ^0.2.0): picks up the atomic first-start fix (signing key and SQLite schema), so several `sea-lite serve` processes starting at once on a fresh data directory no longer crash.
+
+Lean on context and fewer calls to plan and close work. Measured by
+agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
+59.3 KB → 31.5 KB (full) / 11.7 KB (`--core`); S14 (1 epic + 20 tickets,
+39 links) `sea_apply` ~4.8k → ~1.6k tokens (13.4 KB → 1.0 KB returned),
+~0.4k with a template (617 B written); S3a–d and S13 verdicts unchanged.
+
+### Added
 
 - **`serve --core`** (also `--profile core`, `SEA_LITE_PROFILE=core`,
   `serve --http --core`): the nine tools an agent uses day to day —
@@ -81,6 +108,24 @@ agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
 - `sea_transition` takes `note` (appended in the same transaction).
 
 ### Fixed
+
+- **Scope paths through symlinks name the files they point at.** A relative
+  path through a link (`hlink/claims.ts` or `flink`, linking into a claimed
+  `src/handlers`) passed `scope-check` and could be claimed by another
+  session, so two live claims covered the same files; the same path given
+  absolute was caught. Every claim path (`sea_claim`, `sea_next`, CLI
+  `claim` / `next`) and every checked path (`sea_scope_check`,
+  `scope-check`, its `--hook`, `precommit`) is now resolved through the
+  realpath of its longest existing prefix (the literal part before any
+  glob) against the repository root, and kept in its repo-relative form for
+  display. A link that resolves outside the repository is `invalid_input`
+  (`reason: "outside_repo"`). The stdio server takes the root from
+  `CLAUDE_PROJECT_DIR` or its working directory; `serve --http` and library
+  use without `root` keep paths lexical. Uses the platform realpath
+  (canonical case on Windows) and `/` separators on every OS.
+- **`sea-lite scope-check -- PATH`** checks the paths after `--` (they were
+  dropped and the command exited 2); `--` ends the options for every
+  command, so a path may start with `-`.
 
 - **A reused `idempotency_key` with a different request is refused, never
   replayed.** In 0.4.0 a second `sea_apply` (or `sea_create`, `sea_update`,

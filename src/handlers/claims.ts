@@ -117,7 +117,7 @@ export function assertScopeFree(ctx: Ctx, scope: Scope, excludeIds: ReadonlySet<
 
 export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
   const lease = clampLease(input.lease_seconds);
-  const { scope, worktree } = resolveClaimScope(input.scope);
+  const { scope, worktree } = resolveClaimScope(input.scope, ctx.root);
   return tx(ctx.db, () => {
     // Resolve, de-duplicate, and lock in one order so two processes claiming
     // overlapping sets cannot deadlock on each other's partial progress.
@@ -167,7 +167,7 @@ export interface ScopeCheckResult {
  * the answer is honest).
  */
 export function scopeCheck(ctx: Ctx, input: ScopeCheckInput): ScopeCheckResult {
-  const paths = normalizeScope(input.paths);
+  const paths = normalizeScope(input.paths, ctx.root);
   return tx(ctx.db, () => {
     const swept = sweepAllExpired(ctx);
     const conflicts = findScopeConflicts(ctx, paths);
@@ -288,7 +288,7 @@ export interface NextResult {
  */
 export function next(ctx: Ctx, input: NextInput): NextResult {
   const lease = clampLease(input.lease_seconds);
-  const { scope, worktree } = resolveClaimScope(input.scope);
+  const { scope, worktree } = resolveClaimScope(input.scope, ctx.root);
   return tx(ctx.db, () => {
     sweepAllExpired(ctx);
     // The scope is what the caller will touch regardless of which ticket comes

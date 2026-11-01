@@ -22,6 +22,9 @@
  * genuinely ambiguous.
  */
 
+import { lstatSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative, sep } from 'node:path';
+
 import picomatch from 'picomatch';
 
 import { SeaError } from './errors.js';
@@ -69,14 +72,84 @@ export function normalizeScopePath(raw: string): string {
   return p;
 }
 
-/** Normalize, dedupe and sort a scope's paths. Sorted so the chain payload is canonical. */
-export function normalizeScope(paths: readonly string[]): string[] {
+/**
+ * Normalize, dedupe and sort a scope's paths. Sorted so the chain payload is
+ * canonical. With the repository `root` known (stdio server, CLI, hooks),
+ * every entry is also resolved through symlinks (see canonicalScopePath), so
+ * `hlink/claims.ts` and `src/handlers/claims.ts` are the same path to every
+ * claim and every check.
+ */
+export function normalizeScope(paths: readonly string[], root: string | null = null): string[] {
   if (paths.length === 0) throw new SeaError('invalid_input', 'scope.paths must not be empty');
   if (paths.length > MAX_SCOPE_PATHS) throw new SeaError('invalid_input', `scope.paths may hold at most ${MAX_SCOPE_PATHS} entries`, { max: MAX_SCOPE_PATHS });
   const out = new Set<string>();
-  for (const raw of paths) out.add(normalizeScopePath(raw));
+  for (const raw of paths) {
+    const p = normalizeScopePath(raw);
+    out.add(root !== null ? canonicalScopePath(root, p, raw) : p);
+  }
   if (out.has(WHOLE_REPO)) return [WHOLE_REPO];
   return [...out].sort();
+}
+
+const realRoots = new Map<string, string>();
+function realRoot(root: string): string {
+  let r = realRoots.get(root);
+  if (r === undefined) {
+    try {
+      r = realpathSync.native(root);
+    } catch {
+      r = root;
+    }
+    realRoots.set(root, r);
+  }
+  return r;
+}
+
+/**
+ * A normalized repo-relative entry, resolved through symlinks: the longest
+ * prefix of its literal (non-glob) segments that exists on disk is replaced
+ * by its realpath, made repo-relative again; the rest is kept as written (a
+ * path that does not exist yet cannot contain a link). A link that resolves
+ * outside the repository is invalid_input (`reason: "outside_repo"`): it
+ * would name files no scope in this project can lock. Uses the platform's
+ * realpath (`realpathSync.native`, canonical case on Windows) and returns
+ * `/`-separated paths on every OS.
+ */
+export function canonicalScopePath(root: string, entry: string, raw: string = entry): string {
+  if (entry === WHOLE_REPO) return entry;
+  const dirMarked = entry.endsWith('/');
+  const segs = (dirMarked ? entry.slice(0, -1) : entry).split('/');
+  let literal = segs.findIndex((x) => isGlobEntry(x));
+  if (literal === -1) literal = segs.length;
+  const base = realRoot(root);
+  for (let i = literal; i > 0; i--) {
+    const candidate = join(base, ...segs.slice(0, i));
+    try {
+      lstatSync(candidate);
+    } catch {
+      continue; // does not exist: try a shorter prefix
+    }
+    let real: string;
+    try {
+      real = realpathSync.native(candidate);
+    } catch {
+      // A dangling link: it points nowhere; keep the path as written.
+      return entry;
+    }
+    const rel = relative(base, real);
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      throw new SeaError('invalid_input', `scope path "${raw}" resolves outside the repository through a symlink (${real})`, {
+        path: raw,
+        reason: 'outside_repo',
+        resolved: real,
+      });
+    }
+    const head = rel === '' ? [] : rel.split(sep);
+    const out = [...head, ...segs.slice(i)].join('/');
+    if (out === '') return WHOLE_REPO;
+    return dirMarked ? `${out}/` : out;
+  }
+  return entry;
 }
 
 interface Parsed {
@@ -243,7 +316,10 @@ export function sameWorktree(a: string, b: string): boolean {
  * The scope argument of sea_claim / sea_next, normalized: the paths it locks
  * (or null) and the worktree it binds to (or null). At least one is required.
  */
-export function resolveClaimScope(input: { paths?: readonly string[] | undefined; worktree?: string | undefined } | undefined): {
+export function resolveClaimScope(
+  input: { paths?: readonly string[] | undefined; worktree?: string | undefined } | undefined,
+  root: string | null = null,
+): {
   scope: Scope | null;
   worktree: string | null;
 } {
@@ -251,7 +327,7 @@ export function resolveClaimScope(input: { paths?: readonly string[] | undefined
   const hasPaths = input.paths !== undefined && input.paths.length > 0;
   if (!hasPaths && input.worktree === undefined) throw new SeaError('invalid_input', 'scope needs paths, a worktree, or both');
   return {
-    scope: hasPaths ? { paths: normalizeScope(input.paths!) } : null,
+    scope: hasPaths ? { paths: normalizeScope(input.paths!, root) } : null,
     worktree: input.worktree !== undefined ? normalizeWorktreePath(input.worktree) : null,
   };
 }

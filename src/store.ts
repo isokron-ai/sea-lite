@@ -41,6 +41,13 @@ export interface SeaLiteOptions {
    * list / next / scope checks. Null/omitted: every project (pre-0.4).
    */
   project?: string | null;
+  /**
+   * Repository root on this machine. When set, scope paths (claims, sea_next,
+   * scope checks) are resolved through symlinks against it, so a link into a
+   * claimed directory names the claimed files. `sea-lite serve` (stdio) and
+   * the CLI set it; HTTP and library use leave it null (paths stay lexical).
+   */
+  root?: string | null;
   /** Self-asserted role; `operator` unlocks force release. */
   role?: Role;
   /** Enabled lifecycle tracks. Default ['work']. */
@@ -85,6 +92,8 @@ export class SeaLite {
   readonly actor: string;
   readonly session: string | null;
   readonly project: string | null;
+  /** Repository root for symlink-resolving scope paths, or null (see SeaLiteOptions.root). */
+  readonly root: string | null;
   readonly role: Role;
   readonly lifecycle: LifecycleConfig;
   /** Set on a hook's view (CLI scope-check / precommit): every claim of `session` is its own. */
@@ -106,6 +115,7 @@ export class SeaLite {
     this.actor = opts.actor ?? process.env['SEA_LITE_ACTOR'] ?? DEFAULT_ACTOR;
     this.session = opts.session ?? null;
     this.project = opts.project ?? null;
+    this.root = opts.root ?? null;
     this.sessionWide = false;
     this.role = opts.role ?? parseRole(process.env['SEA_LITE_ROLE']);
     this.lifecycle = { tracks: opts.tracks ?? parseTracks(process.env['SEA_LITE_TRACKS']) };
@@ -131,6 +141,7 @@ export class SeaLite {
       actor,
       session: more.session !== undefined ? more.session : this.session,
       project: more.project !== undefined ? more.project : this.project,
+      root: this.root,
       sessionWide: more.sessionWide ?? this.sessionWide,
       role,
       lifecycle: this.lifecycle,
@@ -149,6 +160,7 @@ export class SeaLite {
       session: this.session,
       sessionWide: this.sessionWide,
       project: this.project,
+      root: this.root,
       role: this.role,
       lifecycle: this.lifecycle,
       now: this.clock(),

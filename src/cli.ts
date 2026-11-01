@@ -78,6 +78,11 @@ function parseArgs(argv: string[]): Args {
   const flags: Record<string, string | true> = {};
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
+    // `--` ends the options: everything after it is a positional (a path may start with `-`).
+    if (a === '--') {
+      positional.push(...rest.slice(i + 1));
+      break;
+    }
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       if (eq > 2) {
@@ -180,8 +185,13 @@ interface Opened {
  * a hook speaks for every agent of its session (scope-check, precommit,
  * heartbeat when no --actor was given).
  */
-function openAs(flags: Args['flags'], project: string | null, opts: { sessionWide?: boolean } = {}): Opened {
+/**
+ * `root`: the repository scope paths are resolved against through symlinks
+ * (core/scope.ts canonicalScopePath); default: the repository of the cwd.
+ */
+function openAs(flags: Args['flags'], project: string | null, opts: { sessionWide?: boolean; root?: string | null } = {}): Opened {
   const dataDir = dataDirOf(flags);
+  const root = opts.root !== undefined ? opts.root : (findRepo(process.cwd())?.root ?? null);
   const identity = resolveIdentity({ dataDir, actor: str(flags['actor']), session: str(flags['session']) });
   const role = str(flags['role']);
   const tracks = str(flags['tracks']);
@@ -190,6 +200,7 @@ function openAs(flags: Args['flags'], project: string | null, opts: { sessionWid
     actor: identity.actor,
     session: identity.session,
     project,
+    root,
     ...(role !== undefined ? { role: parseRole(role) } : {}),
     ...(tracks !== undefined ? { tracks: parseTracks(tracks) } : {}),
   });
@@ -385,7 +396,7 @@ async function main(argv: string[]): Promise<number> {
     case 'next': {
       const rawPaths = list(flags['paths']);
       const rel = rawPaths.length > 0 ? repoRelative(rawPaths, flags) : { paths: [], project: projectOf(flags), root: null };
-      const { store, identity, dataDir } = openAs(flags, rel.project);
+      const { store, identity, dataDir } = openAs(flags, rel.project, { root: rel.root });
       const lease = num(flags['lease'], 'lease');
       const wait = num(flags['wait'], 'wait');
       const worktree = str(flags['worktree']);
@@ -664,7 +675,9 @@ async function serveCmd(flags: Args['flags']): Promise<number> {
   const claudeSession = process.env['CLAUDE_CODE_SESSION_ID'] && process.env['CLAUDE_CODE_SESSION_ID'] !== '' ? process.env['CLAUDE_CODE_SESSION_ID'] : null;
   const session = str(flags['session']) ?? sessionKeyFromEnv() ?? newInstanceSession();
   const project = resolveProject(str(flags['project']));
-  const store = new SeaLite({ ...common, session, project });
+  // Scope paths are resolved through symlinks against the repository the agent works in.
+  const projectDir = process.env['CLAUDE_PROJECT_DIR'] && process.env['CLAUDE_PROJECT_DIR'] !== '' ? process.env['CLAUDE_PROJECT_DIR'] : process.cwd();
+  const store = new SeaLite({ ...common, session, project, root: findRepo(projectDir)?.root ?? null });
   const reg = registerInstance(store.kronicle.dataDir ?? dataDir, { actor, session, claude_session: claudeSession, project });
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     process.once(sig, () => {
@@ -800,7 +813,7 @@ function scopeCheckHook(flags: Args['flags']): number {
   if (str(flags['session']) === undefined && typeof p.session_id === 'string' && p.session_id !== '') hookFlags['session'] = p.session_id;
   try {
     const rel = repoRelative([abs], hookFlags);
-    const { store, identity } = openAs(hookFlags, rel.project, { sessionWide: true });
+    const { store, identity } = openAs(hookFlags, rel.project, { sessionWide: true, root: rel.root });
     const r = store.scopeCheck({ paths: rel.paths });
     if (r.ok) return 0;
     process.stderr.write(
@@ -860,7 +873,7 @@ function scopeCheckCmd(positional: string[], flags: Args['flags']): number {
     const raw = [...(fromFlag ? fromFlag.split(',') : []), ...positional].map((p) => p.trim()).filter((p) => p.length > 0);
     if (raw.length === 0) throw new SeaError('invalid_input', 'scope-check needs --paths a,b or positional paths');
     const rel = repoRelative(raw, flags);
-    const { store, identity } = openAs(flags, rel.project, { sessionWide: true });
+    const { store, identity } = openAs(flags, rel.project, { sessionWide: true, root: rel.root });
     const r = store.scopeCheck({ paths: rel.paths });
     const result = {
       schema: SCOPE_CHECK_SCHEMA,
@@ -921,7 +934,7 @@ function precommitCmd(flags: Args['flags']): number {
   const files = staged.out.split('\0').filter((f) => f.length > 0 && !f.startsWith('!'));
   if (files.length === 0) return 0;
   const project = str(flags['project']) !== undefined ? resolveProject(str(flags['project'])) : projectKeyFor(repo.root);
-  const { store, identity } = openAs(flags, project, { sessionWide: true });
+  const { store, identity } = openAs(flags, project, { sessionWide: true, root: repo.root });
   const conflicts = new Map<string, ScopeConflict[]>();
   for (let i = 0; i < files.length; i += MAX_SCOPE_PATHS) {
     const chunk = files.slice(i, i + MAX_SCOPE_PATHS);
