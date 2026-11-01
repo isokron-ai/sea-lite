@@ -63,5 +63,7 @@ export {
 } from './core/scope.js';
 export type { LinkResult } from './handlers/links.js';
 export type { HistoryResult, HistoryEntry } from './handlers/history.js';
+export { runDoctor, renderDoctor, type DoctorReport, type DoctorCheck, type DoctorOptions, type CheckStatus } from './doctor.js';
+export { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
 export { parseSince, type StatsResult, type ActorStats } from './handlers/stats.js';
 export { findPossibleDuplicates, titleMatchExpression, type PossibleDuplicate } from './handlers/dedup.js';

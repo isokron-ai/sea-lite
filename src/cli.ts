@@ -11,6 +11,7 @@
  *   sea-lite verify  [--data-dir DIR]        chain verify + sea rows whose chain_seq is missing
  *   sea-lite scope-check --paths a,b [--actor ID] [--json]   exit 1 if another actor's live scope overlaps
  *   sea-lite stats   [--since 24h|7d|ISO] [--for ACTOR] [--json]   per-actor claim accounting from the chain
+ *   sea-lite doctor  [--json] [--cwd DIR] [--actors-file F]          read-only health checks; exit 0 ok, 1 on a failure
  */
 
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
@@ -31,6 +32,7 @@ import {
   serveHttp,
   type ActorToken,
 } from './http.js';
+import { renderDoctor, runDoctor } from './doctor.js';
 import type { ActorStats, StatsResult } from './handlers/stats.js';
 import { createServer } from './server.js';
 import { parseRole, parseTracks, SeaLite } from './store.js';
@@ -107,6 +109,9 @@ Usage:
   sea-lite stats   [--since 24h|7d|ISO] [--for ACTOR] [--json]
                                         per actor: claims taken/released/expired/force-released, lease time,
                                         transitions — derived from the chain (read-only)
+  sea-lite doctor  [--data-dir DIR] [--json] [--cwd DIR] [--actors-file F]
+                                        read-only health checks (node, perms, db, schema, chain, claims,
+                                        HTTP token files, catalog); exit 0 healthy, 1 on any failure
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite (shared with kronicle-lite).
 Env: SEA_LITE_ACTOR, SEA_LITE_ROLE, SEA_LITE_TRACKS.
@@ -249,6 +254,17 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       store.close();
+      return r.ok ? 0 : 1;
+    }
+    case 'doctor': {
+      const cwd = str(flags['cwd']);
+      const actorsFile = str(flags['actors-file']);
+      const r = await runDoctor({
+        dataDir: dataDirOf(flags),
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(actorsFile !== undefined ? { actorsFile } : {}),
+      });
+      process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderDoctor(r));
       return r.ok ? 0 : 1;
     }
     case 'stats': {
