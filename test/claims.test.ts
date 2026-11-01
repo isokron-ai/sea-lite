@@ -19,7 +19,7 @@ describe('sea_claim', () => {
     expect(row.claim_token_hash).not.toBe(token);
     expect(row.claim_actor).toBe('alice');
     const got = store.get({ id });
-    expect(got.ticket.claim).toEqual({ holder: 'alice', expires_at: expect.any(String), write_count: 0, scope: null });
+    expect(got.ticket.claim).toEqual({ holder: 'alice', expires_at: expect.any(String), write_count: 0, scope: null, worktree: null });
     expect(JSON.stringify(got)).not.toContain(token);
     expect(JSON.stringify(got)).not.toContain(row.claim_token_hash);
     const claimed = [...store.chain.iterate()].find((e) => e.event_type === EVENT.ticket_claimed)!;

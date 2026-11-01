@@ -6,11 +6,15 @@
  *
  * v2 (0.2.0): `sea_tickets.claim_scope` — JSON array of the paths a live claim
  * locks (see core/scope.ts). Added with ALTER TABLE on older stores.
+ *
+ * v3 (0.3.0): `sea_tickets.claim_worktree` — the absolute worktree path a
+ * live claim is bound to (`scope.worktree`), so `release-worktree` can free
+ * it when the worktree is removed. Added with ALTER TABLE on older stores.
  */
 
 import { ALL_STATES, LINK_STATES, LINK_TYPES, PRIORITIES, sqlIn, TICKET_KINDS } from '../model/enums.js';
 
-export const SEA_SCHEMA_VERSION = 2;
+export const SEA_SCHEMA_VERSION = 3;
 export const SEA_SCHEMA_META_KEY = 'sea_schema_version';
 
 export const SEA_TABLES = ['sea_tickets_fts', 'sea_notes', 'sea_links', 'sea_tickets'] as const;
@@ -35,6 +39,7 @@ CREATE TABLE IF NOT EXISTS sea_tickets (
   claim_expires_at  TEXT,
   claim_write_count INTEGER NOT NULL DEFAULT 0,
   claim_scope       TEXT,
+  claim_worktree    TEXT,
   created_seq       INTEGER NOT NULL,
   last_seq          INTEGER NOT NULL
 );
@@ -97,6 +102,7 @@ END;
  */
 export const SEA_MIGRATIONS: readonly { version: number; table: string; column: string; sql: string }[] = [
   { version: 2, table: 'sea_tickets', column: 'claim_scope', sql: `ALTER TABLE sea_tickets ADD COLUMN claim_scope TEXT` },
+  { version: 3, table: 'sea_tickets', column: 'claim_worktree', sql: `ALTER TABLE sea_tickets ADD COLUMN claim_worktree TEXT` },
 ];
 
 export const SEA_DROP_SQL = `

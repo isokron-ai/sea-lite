@@ -157,6 +157,10 @@ export class SeaLite {
   scopeCheck(input: S.ScopeCheckInput): claims.ScopeCheckResult {
     return claims.scopeCheck(this.ctx(input.actor_id), input);
   }
+  /** Release every live claim bound to a worktree (CLI `release-worktree`, for a WorktreeRemove hook). */
+  releaseWorktree(input: { worktree: string | readonly string[]; reason?: string; actor_id?: string }): claims.ReleaseWorktreeResult {
+    return claims.releaseWorktree(this.ctx(input.actor_id), input);
+  }
   stats(input: S.StatsInput): statsH.StatsResult {
     return statsH.stats(this.ctx(input.actor_id), input);
   }

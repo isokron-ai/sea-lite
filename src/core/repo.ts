@@ -80,7 +80,7 @@ export function sweepExpired(ctx: Ctx, row: TicketRow): TicketRow {
   ctx.db
     .prepare(
       `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL,
-         claim_write_count = 0, claim_scope = NULL, last_seq = ? WHERE id = ?`,
+         claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL, last_seq = ? WHERE id = ?`,
     )
     .run(r.event.seq, row.id);
   return mustGetRow(ctx.db, row.id);

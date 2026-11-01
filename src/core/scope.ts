@@ -190,6 +190,72 @@ export function findOverlaps(requested: readonly string[], held: readonly string
   return pairs;
 }
 
+export const MAX_WORKTREE_CHARS = 1024;
+
+/** Drive-letter (`c:/…`) or UNC (`//host/share/…`) path: compared case-insensitively. */
+function isWindowsPath(p: string): boolean {
+  return /^[a-z]:\//.test(p) || p.startsWith('//');
+}
+
+/**
+ * Normalize an absolute worktree path so the same directory always yields
+ * the same string, whatever the client's platform: backslashes become `/`,
+ * `.` / `..` / repeated separators are resolved, a trailing separator is
+ * dropped, and a drive letter is lower-cased (`C:\\repo\\wt-1\\` →
+ * `c:/repo/wt-1`). Purely lexical — no filesystem access, no symlink
+ * resolution (the path may be gone by the time a hook releases it).
+ */
+export function normalizeWorktreePath(raw: string): string {
+  let p = raw.trim();
+  if (p.includes('\0')) throw new SeaError('invalid_input', 'worktree path contains a NUL byte');
+  if (p.length > MAX_WORKTREE_CHARS) throw new SeaError('invalid_input', `worktree path longer than ${MAX_WORKTREE_CHARS} characters`);
+  p = p.replace(/\\/g, '/');
+  let prefix: string;
+  const drive = /^([A-Za-z]):(\/|$)/.exec(p);
+  if (drive) {
+    prefix = drive[1]!.toLowerCase() + ':/';
+    p = p.slice(drive[0].length);
+  } else if (p.startsWith('//')) {
+    prefix = '//';
+    p = p.slice(2);
+  } else if (p.startsWith('/')) {
+    prefix = '/';
+    p = p.slice(1);
+  } else {
+    throw new SeaError('invalid_input', `worktree "${raw}" must be an absolute path`, { worktree: raw });
+  }
+  const out: string[] = [];
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') out.pop();
+    else out.push(seg);
+  }
+  if (prefix === '//' && out.length < 2) throw new SeaError('invalid_input', `worktree "${raw}": a UNC path needs //host/share`, { worktree: raw });
+  return prefix + out.join('/');
+}
+
+/** Two normalized worktree paths name the same directory (case-insensitive on Windows-style paths). */
+export function sameWorktree(a: string, b: string): boolean {
+  return isWindowsPath(a) && isWindowsPath(b) ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/**
+ * The scope argument of sea_claim / sea_next, normalized: the paths it locks
+ * (or null) and the worktree it binds to (or null). At least one is required.
+ */
+export function resolveClaimScope(input: { paths?: readonly string[] | undefined; worktree?: string | undefined } | undefined): {
+  scope: Scope | null;
+  worktree: string | null;
+} {
+  if (input === undefined) return { scope: null, worktree: null };
+  const hasPaths = input.paths !== undefined && input.paths.length > 0;
+  if (!hasPaths && input.worktree === undefined) throw new SeaError('invalid_input', 'scope needs paths, a worktree, or both');
+  return {
+    scope: hasPaths ? { paths: normalizeScope(input.paths!) } : null,
+    worktree: input.worktree !== undefined ? normalizeWorktreePath(input.worktree) : null,
+  };
+}
+
 export function parseScopeJson(json: string | null): Scope | null {
   if (json === null) return null;
   try {

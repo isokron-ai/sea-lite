@@ -136,7 +136,7 @@ describe('scoped claims', () => {
     const id = triaged(store, 'A');
     const r = store.claim({ ticket_ids: [id], scope: { paths: ['src/handlers/', './docs'] } });
     expect(r.scope).toEqual({ paths: ['docs', 'src/handlers'] });
-    expect(store.get({ id }).ticket.claim).toEqual({ holder: 'alice', expires_at: expect.any(String), write_count: 0, scope: { paths: ['docs', 'src/handlers'] } });
+    expect(store.get({ id }).ticket.claim).toEqual({ holder: 'alice', expires_at: expect.any(String), write_count: 0, scope: { paths: ['docs', 'src/handlers'] }, worktree: null });
     const listed = store.list({ include_terminal: false, claimed: 'mine', limit: 10, view: 'compact' });
     expect(listed.tickets[0]!.claim?.scope).toEqual({ paths: ['docs', 'src/handlers'] });
     const ev = [...store.chain.iterate()].find((e) => e.event_type === EVENT.ticket_claimed)!;

@@ -23,7 +23,10 @@ line:
   (`src/**/*.ts`) when a directory is shared. `.` is the whole repo — claim
   it only for a repo-wide change, because it blocks everyone.
 - **Worktree = scope.** If you work in a git worktree or a sub-package,
-  that directory is your scope; claim it as such.
+  that directory is your scope; claim it as such. In a git worktree, also
+  pass its absolute path as `scope.worktree`: the claim is then bound to
+  the worktree and is released when the worktree is removed
+  (`sea-lite release-worktree`, wired as a WorktreeRemove hook).
 - Pass it with the claim: `sea_next { scope: { paths: [...] } }` or
   `sea_claim { ticket_ids, scope }`. A `scope_conflict` error names the
   holder, their ticket, the overlapping paths and when their lease lapses.

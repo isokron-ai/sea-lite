@@ -11,6 +11,17 @@
           }
         ]
       }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y sea-lite release-worktree --hook",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }

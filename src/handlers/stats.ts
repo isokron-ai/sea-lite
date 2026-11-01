@@ -150,7 +150,7 @@ export function stats(ctx: Ctx, input: StatsInput): StatsResult {
           const s = get(holder);
           if (p['rotated'] === true) s.claims_rotated++;
           else s.claims_taken++;
-          if (p['scope'] !== null && p['scope'] !== undefined) s.scoped_claims++;
+          if ((p['scope'] !== null && p['scope'] !== undefined) || typeof p['worktree'] === 'string') s.scoped_claims++;
         }
         break;
       }

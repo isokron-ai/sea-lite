@@ -23,6 +23,7 @@ export const ClaimViewOut = z
     expires_at: z.string(),
     write_count: z.number(),
     scope: ScopeOut.nullable(),
+    worktree: z.string().nullable().describe('Absolute worktree path the claim is bound to.'),
   })
   .describe('Who holds the ticket and until when. Never the token.');
 
@@ -101,8 +102,8 @@ export const ApplyOutput = z.object({
   links: z.array(
     z.object({
       link_id: z.string(),
-      from_ref: z.string(),
-      to_ref: z.string(),
+      from_ref: z.string().nullable().describe('null when from is an existing ticket.'),
+      to_ref: z.string().nullable().describe('null when to is an existing ticket.'),
       from_id: z.string(),
       to_id: z.string(),
       link_type: z.string(),
@@ -151,6 +152,7 @@ export const ClaimOutput = z.object({
   claims: z.array(z.object({ ticket_id: z.string(), claim_token: z.string(), expires_at: z.string(), rotated: z.boolean() })),
   lease_seconds: z.number(),
   scope: ScopeOut.nullable(),
+  worktree: z.string().nullable(),
   head: HeadOut,
 });
 

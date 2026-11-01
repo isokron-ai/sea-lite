@@ -35,7 +35,7 @@ import {
   type TicketRow,
 } from '../core/types.js';
 import { detectCycle, type DirectedEdge } from '../model/cycle-check.js';
-import { isTerminalStatus, PRIORITY_RANK, TERMINAL_STATES, sqlIn, type TicketStatus } from '../model/enums.js';
+import { DAG_LINK_TYPES, isTerminalStatus, PRIORITY_RANK, TERMINAL_STATES, sqlIn, type TicketStatus } from '../model/enums.js';
 import { legalNextStates, validateTransition } from '../model/lifecycle.js';
 import type { ApplyInput, CreateInput, GetInput, ListInput, TransitionInput, UpdateInput } from '../model/schemas.js';
 import { findPossibleDuplicates, type PossibleDuplicate } from './dedup.js';
@@ -157,6 +157,7 @@ export function placeClaim(
   lease_seconds: number,
   extra: Record<string, unknown> = {},
   scope: Scope | null = null,
+  worktree: string | null = null,
 ): { token: string; expires_at: string; seq: number } {
   const token = newClaimToken();
   const token_hash = hashToken(token);
@@ -174,15 +175,17 @@ export function placeClaim(
       lease_seconds,
       rotated,
       scope,
+      // Present only on worktree-bound claims, so unbound payloads are unchanged.
+      ...(worktree !== null ? { worktree } : {}),
       ...extra,
     },
   });
   ctx.db
     .prepare(
       `UPDATE sea_tickets SET claim_token_hash = ?, claim_actor = ?, claim_expires_at = ?, claim_write_count = 0, claim_scope = ?,
-         last_seq = ? WHERE id = ?`,
+         claim_worktree = ?, last_seq = ? WHERE id = ?`,
     )
-    .run(token_hash, ctx.actor, expires_at, scope ? JSON.stringify(scope.paths) : null, r.event.seq, row.id);
+    .run(token_hash, ctx.actor, expires_at, scope ? JSON.stringify(scope.paths) : null, worktree, r.event.seq, row.id);
   return { token, expires_at, seq: r.event.seq };
 }
 
@@ -272,10 +275,20 @@ export function create(ctx: Ctx, input: CreateInput): CreateResult {
 
 // ───────────────────────────── apply (batch) ─────────────────────────────
 
+export interface ApplyLink {
+  link_id: string;
+  /** Batch ref of the from ticket, or null when from is an existing ticket. */
+  from_ref: string | null;
+  to_ref: string | null;
+  from_id: string;
+  to_id: string;
+  link_type: string;
+}
+
 export interface ApplyResult {
   batch_id: string | null;
   tickets: { ref: string; ticket_id: string; title: string }[];
-  links: { link_id: string; from_ref: string; to_ref: string; from_id: string; to_id: string; link_type: string }[];
+  links: ApplyLink[];
   head: ChainHead;
   replayed: boolean;
   dry_run: boolean;
@@ -284,49 +297,137 @@ export interface ApplyResult {
 interface BatchPayload {
   batch_id: string;
   tickets: { ref: string; ticket_id: string; title: string }[];
-  links: { link_id: string; from_ref: string; to_ref: string; from_id: string; to_id: string; link_type: string }[];
+  links: ApplyLink[];
 }
 
-export function validateBatch(input: ApplyInput): void {
+type Problem = { code: string; message: string; at?: string | undefined };
+
+/** Graph key for a batch endpoint: refs and existing ids live in separate namespaces. */
+const refNode = (ref: string) => `ref:${ref}`;
+const endpoint = (ref: string | undefined, id: string | undefined): string => (ref !== undefined ? refNode(ref) : `id:${id}`);
+
+/**
+ * The pure, batch-local barrier: refs, endpoint shape, self-loops, duplicate
+ * links, and cycles among the batch's own edges. Existing-ticket endpoints
+ * (`from_id` / `to_id`) are checked against the store in `apply`.
+ */
+export function validateBatch(input: Pick<ApplyInput, 'tickets' | 'links'>): void {
   const refs = new Set<string>();
-  const problems: { code: string; message: string; at?: string }[] = [];
+  const problems: Problem[] = [];
   for (const t of input.tickets) {
     if (refs.has(t.ref)) problems.push({ code: 'duplicate_ref', message: `ref "${t.ref}" appears more than once`, at: t.ref });
     refs.add(t.ref);
   }
   const seenLinks = new Set<string>();
   for (const l of input.links) {
-    if (!refs.has(l.from_ref)) {
-      problems.push({
-        code: 'foreign_ref',
-        message: `link from_ref "${l.from_ref}" is not a ticket in this batch (links to existing tickets: use sea_link after apply)`,
-        at: l.from_ref,
-      });
+    for (const [side, ref, id] of [
+      ['from', l.from_ref, l.from_id],
+      ['to', l.to_ref, l.to_id],
+    ] as const) {
+      if ((ref === undefined) === (id === undefined)) {
+        problems.push({ code: 'bad_endpoint', message: `link ${side}: give exactly one of ${side}_ref (a ticket in this batch) or ${side}_id (an existing ticket)` });
+      } else if (ref !== undefined && !refs.has(ref)) {
+        problems.push({
+          code: 'foreign_ref',
+          message: `link ${side}_ref "${ref}" is not a ticket in this batch (for an existing ticket use ${side}_id)`,
+          at: ref,
+        });
+      }
     }
-    if (!refs.has(l.to_ref)) {
-      problems.push({
-        code: 'foreign_ref',
-        message: `link to_ref "${l.to_ref}" is not a ticket in this batch (links to existing tickets: use sea_link after apply)`,
-        at: l.to_ref,
-      });
-    }
-    if (l.from_ref === l.to_ref) problems.push({ code: 'self_loop', message: `link ${l.link_type} from "${l.from_ref}" to itself`, at: l.from_ref });
-    const k = `${l.from_ref}|${l.to_ref}|${l.link_type}`;
+    const from = endpoint(l.from_ref, l.from_id);
+    const to = endpoint(l.to_ref, l.to_id);
+    if (from === to) problems.push({ code: 'self_loop', message: `link ${l.link_type} from "${l.from_ref ?? l.from_id}" to itself`, at: l.from_ref ?? l.from_id });
+    const k = `${from}|${to}|${l.link_type}`;
     if (seenLinks.has(k)) problems.push({ code: 'duplicate_link', message: `link ${k.replace(/\|/g, ' ')} appears more than once` });
     seenLinks.add(k);
   }
   if (problems.length > 0) {
     throw new SeaError('batch_invalid', `batch rejected: ${problems.length} problem(s); nothing was written`, { problems });
   }
-  const edges: DirectedEdge[] = input.links.map((l) => ({ from: l.from_ref, to: l.to_ref, linkType: l.link_type }));
-  // New tickets have no existing edges, so the barrier is batch-local.
+  const edges: DirectedEdge[] = input.links.map((l) => ({ from: endpoint(l.from_ref, l.from_id), to: endpoint(l.to_ref, l.to_id), linkType: l.link_type }));
   const cycle = detectCycle([], edges);
-  if (cycle) {
-    throw new SeaError('cycle', `batch would create a cycle: ${cycle.path.join(' → ')} via ${cycle.via.linkType}`, {
-      path: cycle.path,
-      via: cycle.via,
-    });
+  if (cycle) throw cycleError(cycle.path, cycle.via);
+}
+
+function cycleError(path: readonly string[], via: DirectedEdge): SeaError {
+  const show = (n: string) => n.replace(/^(ref|id):/, '');
+  return new SeaError('cycle', `batch would create a cycle: ${path.map(show).join(' → ')} via ${via.linkType}`, {
+    path: path.map(show),
+    via: { from: show(via.from), to: show(via.to), linkType: via.linkType },
+  });
+}
+
+/**
+ * Resolve and check the existing-ticket endpoints inside the write
+ * transaction: every id resolves; every existing `from` is fenced by a claim
+ * token in `claims`; no link duplicates an active one; and the union of
+ * existing DAG edges and the batch's edges stays acyclic. Returns id → full id.
+ */
+function validateExisting(ctx: Ctx, input: ApplyInput): Map<string, string> {
+  const resolved = new Map<string, string>();
+  const problems: Problem[] = [];
+  const resolveOne = (raw: string): string | null => {
+    if (resolved.has(raw)) return resolved.get(raw)!;
+    try {
+      const id = resolveId(ctx.db, raw);
+      resolved.set(raw, id);
+      return id;
+    } catch (e) {
+      problems.push({ code: 'unknown_ticket', message: e instanceof Error ? e.message : String(e), at: raw });
+      return null;
+    }
+  };
+  const fromIds = new Set<string>();
+  for (const l of input.links) {
+    if (l.from_id !== undefined) {
+      const id = resolveOne(l.from_id);
+      if (id !== null) fromIds.add(id);
+    }
+    if (l.to_id !== undefined) resolveOne(l.to_id);
   }
+  const tokens = new Map<string, string>();
+  for (const c of input.claims ?? []) {
+    const id = resolveOne(c.ticket_id);
+    if (id !== null) tokens.set(id, c.claim_token);
+  }
+  if (problems.length > 0) throw new SeaError('batch_invalid', `batch rejected: ${problems.length} problem(s); nothing was written`, { problems });
+
+  for (const id of [...fromIds].sort()) {
+    const token = tokens.get(id);
+    if (token === undefined) {
+      problems.push({ code: 'fence_missing', message: `links from existing ticket ${id} need its claim_token in claims`, at: id });
+      continue;
+    }
+    // Fence failures (foreign holder, expired, wrong token) keep their own error codes.
+    validateFence(sweepExpired(ctx, mustGetRow(ctx.db, id)), token, ctx.actor, ctx.now);
+  }
+  for (const l of input.links) {
+    if (l.from_id === undefined || l.to_id === undefined) continue;
+    const from = resolved.get(l.from_id)!;
+    const to = resolved.get(l.to_id)!;
+    if (from === to) problems.push({ code: 'self_loop', message: `link ${l.link_type} from ${from} to itself`, at: from });
+    const dup = ctx.db
+      .prepare(`SELECT link_id FROM sea_links WHERE state = 'active' AND from_id = ? AND to_id = ? AND link_type = ?`)
+      .get(from, to, l.link_type) as { link_id: string } | undefined;
+    if (dup) problems.push({ code: 'link_exists', message: `active ${l.link_type} link ${from} → ${to} already exists (${dup.link_id})`, at: dup.link_id });
+  }
+  if (problems.length > 0) throw new SeaError('batch_invalid', `batch rejected: ${problems.length} problem(s); nothing was written`, { problems });
+
+  // Cycle check over union(existing DAG edges, batch edges). Existing tickets are keyed by full id.
+  const node = (ref: string | undefined, id: string | undefined) => (ref !== undefined ? refNode(ref) : `id:${resolved.get(id!)!}`);
+  const existing = existingDagEdges(ctx).map((e) => ({ from: `id:${e.from}`, to: `id:${e.to}`, linkType: e.linkType }));
+  const batch = input.links.map((l) => ({ from: node(l.from_ref, l.from_id), to: node(l.to_ref, l.to_id), linkType: l.link_type }));
+  const cycle = detectCycle(existing, batch);
+  if (cycle) throw cycleError(cycle.path, cycle.via);
+  return resolved;
+}
+
+function existingDagEdges(ctx: Ctx): DirectedEdge[] {
+  return (
+    ctx.db
+      .prepare(`SELECT from_id, to_id, link_type FROM sea_links WHERE state = 'active' AND link_type IN (${sqlIn([...DAG_LINK_TYPES])})`)
+      .all() as { from_id: string; to_id: string; link_type: string }[]
+  ).map((e) => ({ from: e.from_id, to: e.to_id, linkType: e.link_type }));
 }
 
 export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
@@ -343,16 +444,18 @@ export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
       }
     }
     validateBatch(input);
+    const touchesExisting = input.links.some((l) => l.from_id !== undefined || l.to_id !== undefined);
+    const resolved = touchesExisting ? validateExisting(ctx, input) : new Map<string, string>();
     if (input.dry_run) {
       return {
         batch_id: null,
         tickets: input.tickets.map((t) => ({ ref: t.ref, ticket_id: '(dry_run)', title: t.title })),
         links: input.links.map((l) => ({
           link_id: '(dry_run)',
-          from_ref: l.from_ref,
-          to_ref: l.to_ref,
-          from_id: '(dry_run)',
-          to_id: '(dry_run)',
+          from_ref: l.from_ref ?? null,
+          to_ref: l.to_ref ?? null,
+          from_id: l.from_id !== undefined ? resolved.get(l.from_id)! : '(dry_run)',
+          to_id: l.to_id !== undefined ? resolved.get(l.to_id)! : '(dry_run)',
           link_type: l.link_type,
         })),
         head: ctx.chain.head(),
@@ -372,18 +475,32 @@ export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
       byRef.set(t.ref, row.id);
       tickets.push({ ref: t.ref, ticket_id: row.id, title: row.title });
     }
-    const links: BatchPayload['links'] = [];
+    const links: ApplyLink[] = [];
     for (const l of input.links) {
-      const from_id = byRef.get(l.from_ref)!;
-      const to_id = byRef.get(l.to_ref)!;
-      const link_id = insertLink(ctx, from_id, to_id, l.link_type, { batch_id });
-      links.push({ link_id, from_ref: l.from_ref, to_ref: l.to_ref, from_id, to_id, link_type: l.link_type });
+      const from_id = l.from_ref !== undefined ? byRef.get(l.from_ref)! : resolved.get(l.from_id!)!;
+      const to_id = l.to_ref !== undefined ? byRef.get(l.to_ref)! : resolved.get(l.to_id!)!;
+      let link_id: string;
+      if (l.from_ref !== undefined) {
+        link_id = insertLink(ctx, from_id, to_id, l.link_type, { batch_id });
+      } else {
+        // A link out of an existing ticket edits that ticket, as sea_link does: bump its row_version (on the payload, for rebuild).
+        const from = mustGetRow(ctx.db, from_id);
+        link_id = insertLink(ctx, from_id, to_id, l.link_type, { batch_id, from_row_version: from.row_version + 1 });
+        const seq = (ctx.db.prepare(`SELECT chain_seq FROM sea_links WHERE link_id = ?`).get(link_id) as { chain_seq: number }).chain_seq;
+        ctx.db
+          .prepare(
+            `UPDATE sea_tickets SET row_version = row_version + 1, updated_at = ?, claim_write_count = claim_write_count + 1, last_seq = ?
+              WHERE id = ?`,
+          )
+          .run(ctx.now.toISOString(), seq, from_id);
+      }
+      links.push({ link_id, from_ref: l.from_ref ?? null, to_ref: l.to_ref ?? null, from_id, to_id, link_type: l.link_type });
     }
     const payload: BatchPayload = { batch_id, tickets, links };
     ctx.chain.append({
       event_type: EVENT.batch_applied,
       actor_id: ctx.actor,
-    occurred_at: ctx.now.toISOString(),
+      occurred_at: ctx.now.toISOString(),
       payload: { ...payload, ticket_count: tickets.length, link_count: links.length } as unknown as Record<string, unknown>,
       ...(key !== undefined ? { idempotency_key: key } : {}),
     });
@@ -653,7 +770,7 @@ export function transition(ctx: Ctx, input: TransitionInput): TransitionResult {
     if (willRelease) {
       ctx.db
         .prepare(
-          `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL
+          `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL
              WHERE id = ?`,
         )
         .run(id);

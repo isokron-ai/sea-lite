@@ -7,7 +7,7 @@
 import { z } from 'zod';
 
 import { MAX_LEASE_SECONDS } from '../core/fence.js';
-import { MAX_SCOPE_PATH_CHARS, MAX_SCOPE_PATHS } from '../core/scope.js';
+import { MAX_SCOPE_PATH_CHARS, MAX_SCOPE_PATHS, MAX_WORKTREE_CHARS } from '../core/scope.js';
 import { ALL_STATES, LINK_TYPES, PRIORITIES, TICKET_KINDS } from './enums.js';
 
 export const TicketId = z
@@ -61,9 +61,16 @@ export const ScopeSchema = z
       .array(z.string().min(1).max(MAX_SCOPE_PATH_CHARS))
       .min(1)
       .max(MAX_SCOPE_PATHS)
+      .optional()
       .describe('Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.'),
+    worktree: z
+      .string()
+      .min(1)
+      .max(MAX_WORKTREE_CHARS)
+      .optional()
+      .describe('Absolute path of the git worktree you work in. Binds the claim to it: `sea-lite release-worktree <path>` frees it when the worktree is removed.'),
   })
-  .describe('The files you are going to touch. Refused with scope_conflict if any path overlaps a live claim held by another actor.');
+  .describe('The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by another actor.');
 
 export const NewTicketFields = {
   title: z.string().min(1).max(500),
@@ -94,14 +101,22 @@ export const BatchTicket = z.object({
   status: z.enum(['idea', 'triaged']).default('idea'),
 });
 export const BatchLink = z.object({
-  from_ref: z.string().min(1).max(64),
-  to_ref: z.string().min(1).max(64),
+  from_ref: z.string().min(1).max(64).optional().describe('A ticket in this batch. Exactly one of from_ref / from_id.'),
+  from_id: TicketId.optional().describe('An existing ticket; needs its claim_token in `claims` (links are fenced on from).'),
+  to_ref: z.string().min(1).max(64).optional().describe('A ticket in this batch. Exactly one of to_ref / to_id.'),
+  to_id: TicketId.optional().describe('An existing ticket (not fenced).'),
   link_type: LinkTypeSchema,
 });
+export type BatchLink = z.infer<typeof BatchLink>;
 
 export const ApplyShape = {
   tickets: z.array(BatchTicket).min(1).max(50),
   links: z.array(BatchLink).max(100).default([]),
+  claims: z
+    .array(z.object({ ticket_id: TicketId, claim_token: ClaimToken }))
+    .max(50)
+    .optional()
+    .describe('Claim tokens for existing tickets used as from_id (one per ticket).'),
   idempotency_key: IdempotencyKey,
   dry_run: DryRun,
   actor_id: ActorId,

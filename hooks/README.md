@@ -57,6 +57,35 @@ Claim the path (sea_claim / sea_next with scope.paths), wait for the lease to la
 
 Paths outside the repo and tool calls without a file are let through.
 
+## Worktree removal: release the claims bound to it
+
+A claim can be bound to a git worktree (`scope: { worktree: "/abs/path" }`
+on `sea_claim` / `sea_next`). When the worktree goes away, the claims bound
+to it should too — otherwise its tickets and paths stay locked until the
+leases lapse. `settings.example.json` wires that as a `WorktreeRemove`
+hook:
+
+```json
+{ "hooks": { "WorktreeRemove": [ { "hooks": [ { "type": "command", "command": "npx -y sea-lite release-worktree --hook" } ] } ] } }
+```
+
+`--hook` reads the hook's JSON from stdin and takes `worktree_path` from
+it. If your client's event carries the path under another name, or you
+remove worktrees from a script, pass it positionally instead:
+
+```sh
+git worktree remove ../wt-auth && npx -y sea-lite release-worktree ../wt-auth
+```
+
+Every live claim bound to that directory is released, whoever holds it —
+the binding the holder declared is the authority, no claim token is needed.
+Each release is chained as `sea_ticket.claim_released` with
+`via: release_worktree`, the hook's `--actor` as `actor_id` and the holder
+as `claim_actor`. Paths are compared lexically after normalization
+(backslashes, `..`, trailing slash, drive-letter case), plus the realpath
+when the directory still exists. `sea-lite doctor` warns about live claims
+bound to a worktree that no longer exists.
+
 ## The CLI subcommand
 
 ```

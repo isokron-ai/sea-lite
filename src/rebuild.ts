@@ -90,8 +90,8 @@ export function applySeaEvent(db: Db, ev: ChainEvent): boolean {
       const scopeJson = scope && typeof scope === 'object' && Array.isArray(scope.paths) ? JSON.stringify(scope.paths) : null;
       db.prepare(
         `UPDATE sea_tickets SET claim_token_hash = ?, claim_actor = ?, claim_expires_at = ?, claim_write_count = 0, claim_scope = ?,
-          last_seq = ? WHERE id = ?`,
-      ).run(s(p['claim_token_hash']), s(p['claim_actor']) ?? ev.actor_id, s(p['expires_at']), scopeJson, ev.seq, s(p['ticket_id']));
+          claim_worktree = ?, last_seq = ? WHERE id = ?`,
+      ).run(s(p['claim_token_hash']), s(p['claim_actor']) ?? ev.actor_id, s(p['expires_at']), scopeJson, s(p['worktree']), ev.seq, s(p['ticket_id']));
       return true;
     }
     case EVENT.ticket_claim_released:
@@ -144,11 +144,11 @@ export function applySeaEvent(db: Db, ev: ChainEvent): boolean {
 function clearClaim(db: Db, id: string, seq: number | null): void {
   if (seq === null) {
     db.prepare(
-      `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL WHERE id = ?`,
+      `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL WHERE id = ?`,
     ).run(id);
   } else {
     db.prepare(
-      `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL,
+      `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL,
          last_seq = ? WHERE id = ?`,
     ).run(seq, id);
   }

@@ -46,11 +46,15 @@ export { EVENT, SEA_EVENT_TYPES, SEA_EVENT_PREFIXES, IDEMPOTENCY_PREFIX, isSeaEv
 export type { Ticket, TicketCompact, TicketRow, LinkRow, LinkView, NoteRow, ClaimView } from './core/types.js';
 export type { Ctx } from './core/repo.js';
 export type { CreateResult, ApplyResult, UpdateResult, TransitionResult, GetResult, ListResult, LinkWithPeer } from './handlers/tickets.js';
-export type { ClaimResult, RefreshResult, ReleaseResult, NextResult, ScopeCheckResult, ScopeConflict } from './handlers/claims.js';
+export type { ClaimResult, RefreshResult, ReleaseResult, NextResult, ScopeCheckResult, ScopeConflict, ReleaseWorktreeResult } from './handlers/claims.js';
 export { findScopeConflicts, assertScopeFree } from './handlers/claims.js';
 export {
   normalizeScope,
   normalizeScopePath,
+  normalizeWorktreePath,
+  sameWorktree,
+  resolveClaimScope,
+  MAX_WORKTREE_CHARS,
   entriesOverlap,
   findOverlaps,
   isGlobEntry,

@@ -189,10 +189,10 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     {
       title: 'Create a batch of tickets and links atomically',
       description:
-        'Author 1–50 tickets and up to 100 links between them in one all-or-nothing write. Each ticket carries a batch-local ' +
-        '`ref`; links point at refs. Rejected as a whole on duplicate refs, links to refs outside the batch, self-loops, ' +
-        'duplicate links, or a parent_of/depends_on/blocks cycle — the error lists every problem. `dry_run` validates only. ' +
-        'Use this to lay down an epic with its children and dependency edges in one shot.',
+        'Author 1–50 tickets and up to 100 links in one all-or-nothing write. Each ticket carries a batch-local `ref`; a link ' +
+        'end is a ref or an existing ticket (`from_id` / `to_id`; a from_id needs its claim_token in `claims`). Rejected as a ' +
+        'whole on duplicate refs, unknown refs or ids, self-loops, duplicate links, or a parent_of/depends_on/blocks cycle ' +
+        'across existing links — the error lists every problem. `dry_run` validates only.',
       inputSchema: ApplyInput,
       outputSchema: ApplyOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

@@ -11,7 +11,16 @@ import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
 import { clampLease, expiryFrom, hasLiveClaim, MAX_LEASE_SECONDS, validateFence } from '../core/fence.js';
 import { addNote, mustGetRow, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
-import { findOverlaps, normalizeScope, parseScopeJson, type OverlapPair, type Scope } from '../core/scope.js';
+import {
+  findOverlaps,
+  normalizeScope,
+  normalizeWorktreePath,
+  parseScopeJson,
+  resolveClaimScope,
+  sameWorktree,
+  type OverlapPair,
+  type Scope,
+} from '../core/scope.js';
 import { rowToTicket, type NoteRow, type Ticket, type TicketRow } from '../core/types.js';
 import { NEXT_ELIGIBLE_STATES, PRIORITY_RANK, sqlIn, TERMINAL_STATES } from '../model/enums.js';
 import type { ClaimInput, NextInput, RefreshInput, ReleaseInput, ScopeCheckInput } from '../model/schemas.js';
@@ -22,6 +31,8 @@ export interface ClaimResult {
   lease_seconds: number;
   /** The normalized scope every claim in the set carries, or null. */
   scope: Scope | null;
+  /** The worktree every claim in the set is bound to, or null. */
+  worktree: string | null;
   head: ChainHead;
 }
 
@@ -81,7 +92,7 @@ export function assertScopeFree(ctx: Ctx, scope: Scope, excludeIds: ReadonlySet<
 
 export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
   const lease = clampLease(input.lease_seconds);
-  const scope: Scope | null = input.scope ? { paths: normalizeScope(input.scope.paths) } : null;
+  const { scope, worktree } = resolveClaimScope(input.scope);
   return tx(ctx.db, () => {
     // Resolve, de-duplicate, and lock in one order so two processes claiming
     // overlapping sets cannot deadlock on each other's partial progress.
@@ -106,10 +117,10 @@ export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
     const claims: ClaimResult['claims'] = [];
     for (const row of rows) {
       const rotated = row.claim_token_hash !== null && row.claim_actor === ctx.actor;
-      const c = placeClaim(ctx, row, lease, ids.length > 1 ? { set: ids } : {}, scope);
+      const c = placeClaim(ctx, row, lease, ids.length > 1 ? { set: ids } : {}, scope, worktree);
       claims.push({ ticket_id: row.id, claim_token: c.token, expires_at: c.expires_at, rotated });
     }
-    return { claims, lease_seconds: lease, scope, head: ctx.chain.head() };
+    return { claims, lease_seconds: lease, scope, worktree, head: ctx.chain.head() };
   });
 }
 
@@ -226,7 +237,7 @@ function clearClaim(ctx: Ctx, id: string, seq: number): void {
   ctx.db
     .prepare(
       `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0,
-         claim_scope = NULL, last_seq = ? WHERE id = ?`,
+         claim_scope = NULL, claim_worktree = NULL, last_seq = ? WHERE id = ?`,
     )
     .run(seq, id);
 }
@@ -249,7 +260,7 @@ export interface NextResult {
  */
 export function next(ctx: Ctx, input: NextInput): NextResult {
   const lease = clampLease(input.lease_seconds);
-  const scope: Scope | null = input.scope ? { paths: normalizeScope(input.scope.paths) } : null;
+  const { scope, worktree } = resolveClaimScope(input.scope);
   return tx(ctx.db, () => {
     sweepAllExpired(ctx);
     // The scope is what the caller will touch regardless of which ticket comes
@@ -284,7 +295,7 @@ export function next(ctx: Ctx, input: NextInput): NextResult {
       | TicketRow
       | undefined;
     if (!row) return { ticket: null, claim_token: null, expires_at: null, reason: 'nothing_eligible', considered, head: ctx.chain.head() };
-    const c = placeClaim(ctx, row, lease, { via: 'sea_next' }, scope);
+    const c = placeClaim(ctx, row, lease, { via: 'sea_next' }, scope, worktree);
     return {
       ticket: rowToTicket(mustGetRow(ctx.db, row.id)),
       claim_token: c.token,
@@ -293,5 +304,62 @@ export function next(ctx: Ctx, input: NextInput): NextResult {
       considered,
       head: ctx.chain.head(),
     };
+  });
+}
+
+export interface ReleaseWorktreeResult {
+  /** The worktree, normalized. */
+  worktree: string;
+  released: { ticket_id: string; holder: string; scope: Scope | null }[];
+  /** Bound claims whose lease had already lapsed: recorded as expired, not released. */
+  expired: { ticket_id: string; holder: string }[];
+  head: ChainHead;
+}
+
+/**
+ * Release every live claim bound to a worktree (for a WorktreeRemove hook):
+ * the worktree is gone, so whoever held the claims cannot continue there.
+ * No claim token is needed — the binding the holder declared is the
+ * authority — and each release is chained as `sea_ticket.claim_released`
+ * with `via: release_worktree`, the caller as actor_id and the holder as
+ * claim_actor. `worktree` may list several spellings of one directory (as
+ * given, realpath); a claim matching any of them is released.
+ */
+export function releaseWorktree(ctx: Ctx, input: { worktree: string | readonly string[]; reason?: string }): ReleaseWorktreeResult {
+  const candidates = (typeof input.worktree === 'string' ? [input.worktree] : [...input.worktree]).map(normalizeWorktreePath);
+  if (candidates.length === 0) throw new SeaError('invalid_input', 'release-worktree needs a path');
+  return tx(ctx.db, () => {
+    const rows = ctx.db
+      .prepare(`SELECT * FROM sea_tickets WHERE claim_worktree IS NOT NULL AND claim_token_hash IS NOT NULL ORDER BY id`)
+      .all() as TicketRow[];
+    const released: ReleaseWorktreeResult['released'] = [];
+    const expired: ReleaseWorktreeResult['expired'] = [];
+    for (const r of rows) {
+      if (!candidates.some((c) => sameWorktree(c, r.claim_worktree!))) continue;
+      const row = sweepExpired(ctx, r);
+      if (row.claim_token_hash === null) {
+        expired.push({ ticket_id: r.id, holder: r.claim_actor ?? '' });
+        continue;
+      }
+      const scope = parseScopeJson(row.claim_scope);
+      const ev = ctx.chain.append({
+        event_type: EVENT.ticket_claim_released,
+        actor_id: ctx.actor,
+        occurred_at: ctx.now.toISOString(),
+        payload: {
+          ticket_id: row.id,
+          claim_token_hash: row.claim_token_hash,
+          claim_actor: row.claim_actor,
+          scope,
+          reason: input.reason ?? 'worktree removed',
+          write_count: row.claim_write_count,
+          worktree: row.claim_worktree,
+          via: 'release_worktree',
+        },
+      });
+      clearClaim(ctx, row.id, ev.event.seq);
+      released.push({ ticket_id: row.id, holder: row.claim_actor ?? '', scope });
+    }
+    return { worktree: candidates[0]!, released, expired, head: ctx.chain.head() };
   });
 }

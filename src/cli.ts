@@ -12,12 +12,13 @@
  *   sea-lite scope-check --paths a,b [--actor ID] [--json]   exit 1 if another actor's live scope overlaps
  *   sea-lite stats   [--since 24h|7d|ISO] [--for ACTOR] [--json]   per-actor claim accounting from the chain
  *   sea-lite doctor  [--json] [--cwd DIR] [--actors-file F]          read-only health checks; exit 0 ok, 1 on a failure
+ *   sea-lite release-worktree [PATH | --hook] [--actor ID] [--json]  release claims bound to a removed worktree
  */
 
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { defaultDataDir } from 'kronicle-lite';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 import { SeaError } from './core/errors.js';
 import type { TicketCompact, Ticket } from './core/types.js';
@@ -109,6 +110,9 @@ Usage:
   sea-lite stats   [--since 24h|7d|ISO] [--for ACTOR] [--json]
                                         per actor: claims taken/released/expired/force-released, lease time,
                                         transitions — derived from the chain (read-only)
+  sea-lite release-worktree [PATH | --hook] [--actor ID] [--reason R] [--json]
+                                        release every live claim bound to that worktree (scope.worktree);
+                                        --hook reads worktree_path from a hook's JSON on stdin
   sea-lite doctor  [--data-dir DIR] [--json] [--cwd DIR] [--actors-file F]
                                         read-only health checks (node, perms, db, schema, chain, claims,
                                         HTTP token files, catalog); exit 0 healthy, 1 on any failure
@@ -256,6 +260,31 @@ async function main(argv: string[]): Promise<number> {
       store.close();
       return r.ok ? 0 : 1;
     }
+    case 'release-worktree': {
+      let raw = positional[0];
+      if (raw === undefined && flags['hook'] === true) raw = worktreeFromHookInput(readFileSync(0, 'utf8'));
+      if (raw === undefined) throw new SeaError('invalid_input', 'release-worktree needs a PATH (or --hook with the hook JSON on stdin)');
+      // As given (made absolute) and, when it still exists, its realpath: a claim bound under either spelling is released.
+      const abs = resolve(raw);
+      const spellings = [abs];
+      try {
+        const real = realpathSync(abs);
+        if (real !== abs) spellings.push(real);
+      } catch {
+        // already removed: the lexical path is all there is
+      }
+      const store = openStore(flags);
+      const reason = str(flags['reason']);
+      const r = store.releaseWorktree({ worktree: spellings, ...(reason !== undefined ? { reason } : {}) });
+      if (flags['json'] === true) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      else {
+        for (const x of r.released) process.stdout.write(`released ${x.ticket_id.slice(0, 8)} (held by ${x.holder})\n`);
+        for (const x of r.expired) process.stdout.write(`expired  ${x.ticket_id.slice(0, 8)} (lease of ${x.holder} had lapsed)\n`);
+        process.stdout.write(`${r.released.length} claim(s) released for worktree ${r.worktree}\n`);
+      }
+      store.close();
+      return 0;
+    }
     case 'doctor': {
       const cwd = str(flags['cwd']);
       const actorsFile = str(flags['actors-file']);
@@ -291,6 +320,19 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 2;
   }
+}
+
+/** The worktree path from a hook's JSON input (`worktree_path`, or `path`). */
+function worktreeFromHookInput(text: string): string | undefined {
+  let j: unknown;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    throw new SeaError('invalid_input', 'release-worktree --hook: stdin is not JSON');
+  }
+  const o = (j ?? {}) as Record<string, unknown>;
+  for (const k of ['worktree_path', 'worktreePath', 'path']) if (typeof o[k] === 'string' && o[k] !== '') return o[k];
+  throw new SeaError('invalid_input', 'release-worktree --hook: no worktree_path in the hook input');
 }
 
 function fmtDuration(seconds: number): string {

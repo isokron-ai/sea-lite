@@ -21,6 +21,7 @@ export interface TicketRow {
   claim_expires_at: string | null;
   claim_write_count: number;
   claim_scope: string | null; // JSON array of normalized paths, or NULL
+  claim_worktree: string | null; // normalized absolute worktree path, or NULL
   created_seq: number;
   last_seq: number;
 }
@@ -55,6 +56,8 @@ export interface ClaimView {
   write_count: number;
   /** Paths the holder locked with the claim, or null for an unscoped claim. */
   scope: Scope | null;
+  /** Worktree the claim is bound to, or null. */
+  worktree: string | null;
 }
 
 /** What tools return. The token hash never leaves the row/chain. */
@@ -126,7 +129,13 @@ export function rowToTicket(r: TicketRow): Ticket {
     row_version: r.row_version,
     claim:
       r.claim_token_hash !== null && r.claim_actor !== null && r.claim_expires_at !== null
-        ? { holder: r.claim_actor, expires_at: r.claim_expires_at, write_count: r.claim_write_count, scope: parseScopeJson(r.claim_scope) }
+        ? {
+            holder: r.claim_actor,
+            expires_at: r.claim_expires_at,
+            write_count: r.claim_write_count,
+            scope: parseScopeJson(r.claim_scope),
+            worktree: r.claim_worktree ?? null,
+          }
         : null,
     created_seq: r.created_seq,
     last_seq: r.last_seq,

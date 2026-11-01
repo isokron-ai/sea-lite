@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T01:23:24.774Z",
+  "capturedAt": "2026-11-01T01:32:46.307Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -20,7 +20,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Author 1–50 tickets and up to 100 links between them in one all-or-nothing write. Each ticket carries a batch-local `ref`; links point at refs. Rejected as a whole on duplicate refs, links to refs outside the batch, self-loops, duplicate links, or a parent_of/depends_on/blocks cycle — the error lists every problem. `dry_run` validates only. Use this to lay down an epic with its children and dependency edges in one shot.",
+        "description": "Author 1–50 tickets and up to 100 links in one all-or-nothing write. Each ticket carries a batch-local `ref`; a link end is a ref or an existing ticket (`from_id` / `to_id`; a from_id needs its claim_token in `claims`). Rejected as a whole on duplicate refs, unknown refs or ids, self-loops, duplicate links, or a parent_of/depends_on/blocks cycle across existing links — the error lists every problem. `dry_run` validates only.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -29,6 +29,33 @@
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
+            },
+            "claims": {
+              "description": "Claim tokens for existing tickets used as from_id (one per ticket).",
+              "items": {
+                "properties": {
+                  "claim_token": {
+                    "description": "The claim token returned by sea_claim or sea_next.",
+                    "maxLength": 64,
+                    "minLength": 64,
+                    "pattern": "^[0-9a-f]+$",
+                    "type": "string"
+                  },
+                  "ticket_id": {
+                    "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
+                    "maxLength": 36,
+                    "minLength": 8,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "ticket_id",
+                  "claim_token"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "type": "array"
             },
             "dry_run": {
               "default": false,
@@ -45,7 +72,14 @@
               "default": [],
               "items": {
                 "properties": {
+                  "from_id": {
+                    "description": "An existing ticket; needs its claim_token in `claims` (links are fenced on from).",
+                    "maxLength": 36,
+                    "minLength": 8,
+                    "type": "string"
+                  },
                   "from_ref": {
+                    "description": "A ticket in this batch. Exactly one of from_ref / from_id.",
                     "maxLength": 64,
                     "minLength": 1,
                     "type": "string"
@@ -67,15 +101,20 @@
                     ],
                     "type": "string"
                   },
+                  "to_id": {
+                    "description": "An existing ticket (not fenced).",
+                    "maxLength": 36,
+                    "minLength": 8,
+                    "type": "string"
+                  },
                   "to_ref": {
+                    "description": "A ticket in this batch. Exactly one of to_ref / to_id.",
                     "maxLength": 64,
                     "minLength": 1,
                     "type": "string"
                   }
                 },
                 "required": [
-                  "from_ref",
-                  "to_ref",
                   "link_type"
                 ],
                 "type": "object"
@@ -214,7 +253,11 @@
                     "type": "string"
                   },
                   "from_ref": {
-                    "type": "string"
+                    "description": "null when from is an existing ticket.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "link_id": {
                     "type": "string"
@@ -226,7 +269,11 @@
                     "type": "string"
                   },
                   "to_ref": {
-                    "type": "string"
+                    "description": "null when to is an existing ticket.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -304,7 +351,7 @@
               "type": "integer"
             },
             "scope": {
-              "description": "The files you are going to touch. Refused with scope_conflict if any path overlaps a live claim held by another actor.",
+              "description": "The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by another actor.",
               "properties": {
                 "paths": {
                   "description": "Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.",
@@ -316,11 +363,14 @@
                   "maxItems": 64,
                   "minItems": 1,
                   "type": "array"
+                },
+                "worktree": {
+                  "description": "Absolute path of the git worktree you work in. Binds the claim to it: `sea-lite release-worktree <path>` frees it when the worktree is removed.",
+                  "maxLength": 1024,
+                  "minLength": 1,
+                  "type": "string"
                 }
               },
-              "required": [
-                "paths"
-              ],
               "type": "object"
             },
             "ticket_ids": {
@@ -415,12 +465,19 @@
                   "type": "null"
                 }
               ]
+            },
+            "worktree": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "claims",
             "lease_seconds",
             "scope",
+            "worktree",
             "head"
           ],
           "type": "object"
@@ -667,6 +724,13 @@
                             }
                           ]
                         },
+                        "worktree": {
+                          "description": "Absolute worktree path the claim is bound to.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "write_count": {
                           "type": "number"
                         }
@@ -675,7 +739,8 @@
                         "holder",
                         "expires_at",
                         "write_count",
-                        "scope"
+                        "scope",
+                        "worktree"
                       ],
                       "type": "object"
                     },
@@ -1054,6 +1119,13 @@
                             }
                           ]
                         },
+                        "worktree": {
+                          "description": "Absolute worktree path the claim is bound to.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "write_count": {
                           "type": "number"
                         }
@@ -1062,7 +1134,8 @@
                         "holder",
                         "expires_at",
                         "write_count",
-                        "scope"
+                        "scope",
+                        "worktree"
                       ],
                       "type": "object"
                     },
@@ -1807,6 +1880,13 @@
                                   }
                                 ]
                               },
+                              "worktree": {
+                                "description": "Absolute worktree path the claim is bound to.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
                               "write_count": {
                                 "type": "number"
                               }
@@ -1815,7 +1895,8 @@
                               "holder",
                               "expires_at",
                               "write_count",
-                              "scope"
+                              "scope",
+                              "worktree"
                             ],
                             "type": "object"
                           },
@@ -1953,6 +2034,13 @@
                                   }
                                 ]
                               },
+                              "worktree": {
+                                "description": "Absolute worktree path the claim is bound to.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
                               "write_count": {
                                 "type": "number"
                               }
@@ -1961,7 +2049,8 @@
                               "holder",
                               "expires_at",
                               "write_count",
-                              "scope"
+                              "scope",
+                              "worktree"
                             ],
                             "type": "object"
                           },
@@ -2146,7 +2235,7 @@
               "type": "integer"
             },
             "scope": {
-              "description": "The files you are going to touch. Refused with scope_conflict if any path overlaps a live claim held by another actor.",
+              "description": "The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by another actor.",
               "properties": {
                 "paths": {
                   "description": "Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.",
@@ -2158,11 +2247,14 @@
                   "maxItems": 64,
                   "minItems": 1,
                   "type": "array"
+                },
+                "worktree": {
+                  "description": "Absolute path of the git worktree you work in. Binds the claim to it: `sea-lite release-worktree <path>` frees it when the worktree is removed.",
+                  "maxLength": 1024,
+                  "minLength": 1,
+                  "type": "string"
                 }
               },
-              "required": [
-                "paths"
-              ],
               "type": "object"
             },
             "tag": {
@@ -2271,6 +2363,13 @@
                                 }
                               ]
                             },
+                            "worktree": {
+                              "description": "Absolute worktree path the claim is bound to.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
                             "write_count": {
                               "type": "number"
                             }
@@ -2279,7 +2378,8 @@
                             "holder",
                             "expires_at",
                             "write_count",
-                            "scope"
+                            "scope",
+                            "worktree"
                           ],
                           "type": "object"
                         },
@@ -2666,6 +2766,13 @@
                             }
                           ]
                         },
+                        "worktree": {
+                          "description": "Absolute worktree path the claim is bound to.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "write_count": {
                           "type": "number"
                         }
@@ -2674,7 +2781,8 @@
                         "holder",
                         "expires_at",
                         "write_count",
-                        "scope"
+                        "scope",
+                        "worktree"
                       ],
                       "type": "object"
                     },
@@ -3365,6 +3473,13 @@
                                 }
                               ]
                             },
+                            "worktree": {
+                              "description": "Absolute worktree path the claim is bound to.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
                             "write_count": {
                               "type": "number"
                             }
@@ -3373,7 +3488,8 @@
                             "holder",
                             "expires_at",
                             "write_count",
-                            "scope"
+                            "scope",
+                            "worktree"
                           ],
                           "type": "object"
                         },
@@ -3785,6 +3901,13 @@
                                 }
                               ]
                             },
+                            "worktree": {
+                              "description": "Absolute worktree path the claim is bound to.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
                             "write_count": {
                               "type": "number"
                             }
@@ -3793,7 +3916,8 @@
                             "holder",
                             "expires_at",
                             "write_count",
-                            "scope"
+                            "scope",
+                            "worktree"
                           ],
                           "type": "object"
                         },
@@ -3939,5 +4063,5 @@
     "name": "sea-lite",
     "version": "0.2.0"
   },
-  "sha256": "7974adc6f0db8aa73f7594c955ed1741738d5c328dcb4afd9a5741d19f7cc2c7"
+  "sha256": "208a8092cda637a719790e6bfcab79040337c73949df47b0a77b5abaa0aab2ea"
 }
