@@ -57,7 +57,9 @@ claims it (and your paths) in one step.
 - Got `{ ticket: null, reason: "nothing_eligible" }`: the queue has nothing
   you may take right now (everything is claimed, blocked by open
   predecessors, assigned to someone else, or still `idea`). Say so; do not
-  invent work. If you know of work, `sea_create` it with `status: triaged`.
+  invent work. If you know of work, `sea_create` it with `status: triaged`;
+  several tickets at once go in one `sea_apply` (use `templates` for
+  repeated steps instead of writing each ticket out).
 
 To take a specific ticket instead, `sea_claim` with its id and your scope.
 If it is held, the error names the holder and the expiry; do not retry in a
@@ -69,11 +71,13 @@ loop — move on.
 - Move it to `in_progress` with `sea_transition` as soon as you start.
 - Leave notes with `sea_update { note }` at meaningful points: what you
   found, what you decided, what is left. Notes are how the next agent (or
-  you after a compaction) picks up.
+  you after a compaction) picks up. (Under `serve --core` there is no
+  `sea_update`: `note` on `sea_transition`, `sea_finish` or `sea_release`.)
 - Pass `expected_version` on writes when you are acting on something you
   read a while ago; a `version_conflict` means re-read first.
 - Leases (default 900 s) renew while you keep calling sea-lite tools (and
-  through the PostToolUse heartbeat when the hooks are installed). Before a
+  through the PostToolUse heartbeat when the hooks are installed —
+  cc-anchor's heartbeat hook is the recommended one). Before a
   single step that may run longer than the lease with no tool call (a long
   build), `sea_refresh` or claim with a longer `lease_seconds` (≤ 3600). A
   lapsed lease means the ticket is free for anyone, and your old token is
@@ -84,10 +88,12 @@ loop — move on.
 
 ## 3. Hand off
 
-- Done: `sea_transition { to: "resolved", confirm: true }` (or `wont_fix` /
-  `duplicate` with `duplicate_of` / `dropped`). A terminal status has no
-  exit and releases your claim and scope, so the server asks you to confirm
-  it: pass `confirm: true`, or answer the prompt if your client shows one.
+- Done: `sea_finish { ticket_id, claim_token, note: "what shipped" }` —
+  note, `resolved`, claim and scope released in one call (`status:
+  "wont_fix"` / `"dropped"` / `"merged"` for the other endings;
+  `tickets: [...]` closes several). `sea_transition { to: "resolved",
+  confirm: true }` does the same without the note; for `duplicate` use
+  `sea_transition` with `duplicate_of`. A terminal status has no exit.
 - Blocked on something: add the link (`sea_link add from=<this>
   to=<blocker> link_type=depends_on`), set `blocked` with a `reason`, then
   `sea_release` with a `note`. `sea_next` will not hand the ticket out again

@@ -4,6 +4,82 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased]
+
+Lean on context and fewer calls to plan and close work. Measured by
+agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
+59.3 KB → 31.5 KB (full) / 11.7 KB (`--core`); S14 (1 epic + 20 tickets,
+39 links) `sea_apply` ~4.8k → ~1.6k tokens (13.4 KB → 1.0 KB returned),
+~0.4k with a template (617 B written); S3a–d and S13 verdicts unchanged.
+
+### Added
+
+- **`serve --core`** (also `--profile core`, `SEA_LITE_PROFILE=core`,
+  `serve --http --core`): the nine tools an agent uses day to day —
+  `sea_next`, `sea_claim`, `sea_get`, `sea_scope_check`, `sea_apply`,
+  `sea_transition`, `sea_finish`, `sea_release`, `sea_refresh` — with short
+  descriptions; `actor_id`, `idempotency_key`, `expected_version`,
+  `sea_next`'s filters, operator-only `force` and a few more are not
+  advertised (still accepted), and result schemas are field names and types
+  only. `tools/list` ~11.7 KB. The full profile stays the default and is
+  unchanged in tools and behaviour.
+- **Templates in `sea_apply`**: `templates: [{for_each, ref, ticket,
+  links}]` repeats one ticket and its links per value (`for_each` is an
+  array of strings/numbers or a count n). `{i}` (1-based), `{value}`,
+  `{ref}` (this item) and `{prev}` (the previous item; a link naming it is
+  skipped for the first item) are substituted in every string, so a 20-step
+  chain is written once. Expansion is server-side, deterministic and happens
+  before validation: the 50-ticket / 100-link caps, the cycle check,
+  `dry_run` and `idempotency_key` all see the expanded batch. New
+  `batch_invalid` problem codes: `bad_template`, `too_many_tickets`,
+  `too_many_links`, `invalid_expansion`, `empty_batch`.
+- **`sea_finish`**: done in one call — optional `note`, a terminal `status`
+  (default `resolved`; `wont_fix`, `dropped`, `merged`), claim and scope
+  released. `tickets: [...]` closes several. No confirmation round trip:
+  calling it is the confirmation. Store API `finish()`.
+- **Bulk `sea_transition`**: `tickets: [{ticket_id, claim_token,
+  expected_version?}, …]` (≤ 50) instead of `ticket_id` + `claim_token`.
+  Each ticket is fenced by its own token; every ticket is checked first and
+  if any fails nothing is written (`batch_invalid` lists each failing ticket
+  with its own error). One confirmation covers a terminal move of the set.
+  With `idempotency_key`, item k replays under `<key>#k`. Store API
+  `transitionMany()`.
+- `sea_transition` takes `note` (appended in the same transaction).
+
+### Changed
+
+- **`sea_apply` returns `{created: {ref: id}, links: n, idempotent_replay}`
+  by default** (~1 KB for a 21-ticket plan; 0.4.0 echoed every ticket and
+  link id, 13.4 KB). `verbose: true` returns the 0.4.0 result; `dry_run`
+  returns `{…, dry_run: true, plan: {tickets: [{ref, title}], links: ["from
+  link_type to", …]}}`, the expanded plan. `tickets` may now be empty when
+  `templates` supply the tickets.
+- **Lean `tools/list`** in every profile (59.3 KB → 31.5 KB for the full
+  fifteen tools): descriptions rewritten shorter, no `$schema`, no string
+  length / pattern constraints and no safe-integer bounds in the published
+  input schemas; result schemas publish the top-level fields in full and
+  nested objects as a field list (`{id,kind,title,…}`), enums as their base
+  type, and a two-shape result as one merged object. The server still
+  validates every argument and every result against the full zod schemas,
+  and the tests check each tool's result against the strict contract
+  (`additionalProperties: false`) with the SDK's own validator.
+- Tool results (and the `sea://tickets/{id}` resource) are compact JSON
+  text instead of pretty-printed; `structuredContent` is unchanged.
+- `sea_transition`'s published input lists `ticket_id` / `claim_token` as
+  optional (one of them or `tickets` is required; checked server-side). The
+  store's `transition()` signature is unchanged.
+- The catalog fingerprint is re-pinned (`CATALOG_FINGERPRINT`).
+
+### Documentation
+
+- README: profiles, templated batches (with an example), `sea_finish`,
+  bulk transitions; the tool table and the agent loop updated.
+- Heartbeat: sea-lite keeps renewing a holder's leases on every sea-lite
+  call (unchanged). For long stretches without one, cc-anchor's PostToolUse
+  heartbeat hook is the recommended keep-alive (README, hooks/README.md,
+  the work-queue skill); `sea-lite heartbeat --hook` remains for setups
+  without cc-anchor. Wire one, not both.
+
 ## [0.4.0] — 2026-11-01
 
 Fixes the adoption-audit blockers: the default Claude Code setup had no

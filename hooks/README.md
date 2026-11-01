@@ -25,6 +25,14 @@ holders). See the README's "Identity" section.
      keeps its lease;
    - `WorktreeRemove` → `sea-lite release-worktree --hook`.
 
+**Heartbeat: cc-anchor's is recommended.** sea-lite's own lease renewal
+(every sea-lite tool call by the holder, plus `sea-lite heartbeat --hook`
+above) stays in place, but if you run the cc-anchor plugin, let its
+PostToolUse heartbeat keep your claims alive instead of wiring
+`heartbeat --hook` yourself: it renews in the background on every tool call,
+rate-limited, and cc-anchor is making it the default wherever sea-lite is
+configured. Do not wire both; one heartbeat is enough.
+
 No `SEA_LITE_ACTOR` juggling: the hook takes `session_id` from its input
 and finds the identity this session's sea-lite server claims under (the
 server registers itself in `<data dir>/sessions/`; after `/clear`, when

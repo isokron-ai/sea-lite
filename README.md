@@ -41,6 +41,13 @@ sea-lite is a small MCP server where tickets are **fenced**:
 - `sea_apply` lays down up to 50 tickets and 100 links in **one all-or-nothing
   write**, so an epic with its children and dependency edges lands as a unit
   or not at all — and its links may point at tickets that already exist.
+  **Templates** let the model write a 20-ticket chain once
+  (`for_each` + `{i}` / `{value}` / `{ref}` / `{prev}`); the server expands
+  it deterministically. The result is a ref → id map, not an echo.
+- **Lean on context**: `serve --core` publishes the nine day-to-day tools in
+  ~12 KB of `tools/list` (the full fifteen take ~32 KB; 0.4.0 took 59 KB),
+  and results are compact JSON. `sea_finish` closes a ticket — note,
+  terminal status, claim released — in one call, for one ticket or many.
 - A claim can be **bound to a git worktree**; removing the worktree
   (`sea-lite release-worktree`, a `WorktreeRemove` hook) releases it.
 - Every change is an event on a **hash chain** — the one
@@ -73,8 +80,11 @@ own session (see [Identity](#identity-who-holds-a-claim)).
 ### Claude Code
 
 ```sh
-claude mcp add sea-lite -- npx -y sea-lite serve --actor claude
+claude mcp add sea-lite -- npx -y sea-lite serve --core --actor claude
 ```
+
+`--core` serves the tools an agent uses day to day (see
+[Profiles](#profiles-core-and-full)); drop it for all fifteen.
 
 Each Claude Code session's server picks up `CLAUDE_CODE_SESSION_ID` and
 `CLAUDE_PROJECT_DIR`, so two sessions in one repo are two holders and
@@ -87,6 +97,16 @@ else's scope is blocked before it happens, and add the git guard:
 ```sh
 npx sea-lite precommit --install     # .git/hooks/pre-commit
 ```
+
+**Heartbeat.** sea-lite renews a holder's leases on every sea-lite tool call
+it makes, which covers an agent that keeps using the queue. A long stretch of
+plain edits and test runs makes no sea-lite call, so also wire a
+`PostToolUse` heartbeat: **cc-anchor's heartbeat hook is the recommended
+one** (it renews your claims as you work, rate-limited, in the background),
+or `sea-lite heartbeat --hook` from `hooks/README.md`. Measured
+(agent-memory-bench S13, lease 5 s, task 12 s): without a hook the lease
+lapses mid-task and the holder learns it only at its next fenced write; with
+cc-anchor's heartbeat the claim held 3/3.
 
 ### Cursor
 
@@ -124,6 +144,9 @@ default_tools_approval_mode = "writes"   # prompt only on write tools
 
 [mcp_servers.sea_lite.tools.sea_transition]
 approval_mode = "prompt"                 # terminal states are irreversible
+
+[mcp_servers.sea_lite.tools.sea_finish]
+approval_mode = "prompt"                 # closes tickets (terminal, no exit)
 ```
 
 Codex reads the server `instructions`; the loop is in them.
@@ -153,7 +176,8 @@ tools, and Copilot code review only loads tools whose
 
 Once a server is configured Copilot calls its tools without asking, so add
 the write tools (`sea_create`, `sea_apply`, `sea_claim`, `sea_next`,
-`sea_update`, `sea_transition`, `sea_link`, `sea_refresh`, `sea_release`)
+`sea_update`, `sea_transition`, `sea_finish`, `sea_link`, `sea_refresh`,
+`sea_release`)
 only if you want the agent taking and closing tickets on its own. Secrets
 and variables for the `env` block must be named `COPILOT_MCP_*`.
 
@@ -254,7 +278,7 @@ The agent's loop, in tool calls:
 sea_next  scope.paths=[src/handlers]   → { ticket, claim_token, expires_at }  (paths locked too)
 sea_scope_check paths=[...]            before touching a path you did not claim
 sea_update   (notes, tags)             fenced by claim_token; any call renews your leases
-sea_transition to=resolved confirm     terminal states release the claim and the scope
+sea_finish   note="what shipped"       resolved + claim and scope released, one call
    — or —
 sea_release  note="where I stopped"
 ```
@@ -267,14 +291,15 @@ Also: `sea-lite list`, `show ID`, `stats --since 7d`, `rebuild`,
 | Tool | What it does |
 | --- | --- |
 | `sea_create` | One ticket (`idea`, or `triaged` to make it dispatchable). Returns `possible_duplicates` (exact + full-text title match) but never blocks. `claim_seconds` claims it in the same call. |
-| `sea_apply` | 1–50 tickets + ≤ 100 links, all-or-nothing. A link end is a batch `ref` or an existing ticket (`from_id` fenced by its token in `claims`; `to_id` unfenced). Rejects duplicate refs, unknown refs/ids, self-loops, duplicate links and cycles (over existing links too) with a list of every problem. `dry_run`. |
+| `sea_apply` | 1–50 tickets + ≤ 100 links, all-or-nothing. A link end is a batch `ref` or an existing ticket (`from_id` fenced by its token in `claims`; `to_id` unfenced). `templates` expand server-side into tickets and links (see [Templated batches](#templated-batches)); the caps count the expanded batch. Rejects duplicate refs, unknown refs/ids, self-loops, duplicate links and cycles (over existing links too) with a list of every problem. Returns `{created: {ref: id}, links: n, idempotent_replay}`; `verbose: true` returns every ticket and link id (the 0.4.0 result). `dry_run` returns the expanded plan. |
 | `sea_get` | Ticket by id or ≥ 8-char prefix: fields, `row_version`, claim holder/expiry (never the token), active links with peer title/status, notes, `legal_next`. |
 | `sea_list` | Filters (status, kind, priority, assignee `me`/`none`, tag, claimed `any`/`yes`/`no`/`mine`), FTS5 `query`, cursor paging, `compact`/`full`. This project's tickets (plus legacy ones without a project) unless `project` names another or `*`. |
 | `sea_claim` | Lease one or a set of tickets (all-or-nothing, locked in id order). Returns a token per ticket. Re-claiming your own ticket rotates the token. `scope.paths` locks the paths you will edit for the lease; `scope_conflict` if they overlap someone else's live scope. `scope.worktree` binds the claim to a git worktree. |
 | `sea_refresh` | Extend a lease to now + N (default: the claim's own lease, ≤ 3600); never shortens; holder-only. Not chained. Rarely needed: any sea-lite call by the holder renews its claims. |
 | `sea_release` | Holder gives the ticket back (with a hand-off `note`). `force: true` for operators (`--role operator`), recorded as a force release. |
 | `sea_update` | Title/body/kind/priority/assignee, tags add/remove, append a note. Fenced; `expected_version` (OCC); `idempotency_key`; `dry_run`. |
-| `sea_transition` | Move status. Fenced. Rejections carry `legal_next`. `duplicate` needs `duplicate_of` and records a `duplicates` link. Terminal states release the claim (and scope) and ask for confirmation: `confirm: true`, or answer the `input_required` prompt. |
+| `sea_transition` | Move status. Fenced. Rejections carry `legal_next`. `duplicate` needs `duplicate_of` and records a `duplicates` link. Terminal states release the claim (and scope) and ask for confirmation: `confirm: true`, or answer the `input_required` prompt. `note` appends a note in the same write. **Bulk**: `tickets: [{ticket_id, claim_token}, …]` instead of `ticket_id` + `claim_token` moves up to 50 tickets, each fenced by its own token, all or nothing (`batch_invalid` lists every failing ticket); one confirmation covers the set. |
+| `sea_finish` | Done, in one call: optional `note`, a terminal `status` (default `resolved`; or `wont_fix`, `dropped`, `merged`), claim and scope released. `tickets: [...]` closes several, all or nothing. Calling it is the confirmation (no prompt). |
 | `sea_link` | `add` / `remove` a typed link, fenced on `from`. `parent_of` / `depends_on` / `blocks` stay acyclic across existing links. Remove tombstones. |
 | `sea_next` | Pick + claim the highest-priority unclaimed `triaged`/`in_progress` ticket assigned to me or unassigned whose predecessors are all terminal. Takes `scope.paths` like `sea_claim`. |
 | `sea_history` | Events for one ticket, or a `since_seq` feed of all sea events, with chain verification status. |
@@ -284,11 +309,74 @@ Also: `sea-lite list`, `show ID`, `stats --since 7d`, `rebuild`,
 Plus a `sea://tickets/{id}` resource (same shape as `sea_get`).
 
 Every tool publishes an `outputSchema` and returns the same JSON as
-`structuredContent` and as text. Every error is `{ error: <code>, message,
+`structuredContent` and as compact text. The published schemas are lean
+(top-level result fields in full, nested objects as a field list such as
+`{id,kind,title,…}`, no `$schema` or string-length noise); the server still
+validates every argument and every result against the full schemas. Every error is `{ error: <code>, message,
 details }` with a closed code set (`fence_invalid`, `fence_foreign_holder`,
 `fence_expired`, `already_claimed`, `scope_conflict`, `version_conflict`,
 `illegal_transition`, `cycle`, `batch_invalid`, `confirmation_required`,
 `confirmation_declined`, …) so an agent can branch on it.
+
+### Profiles: core and full
+
+`tools/list` is paid for in every session's context, so `serve` has two
+profiles:
+
+| Profile | Tools | `tools/list` |
+| --- | --- | --- |
+| `full` (default) | all fifteen | ~32 KB |
+| `core` (`--core`, `--profile core`, `SEA_LITE_PROFILE=core`) | `sea_next`, `sea_claim`, `sea_get`, `sea_scope_check`, `sea_apply`, `sea_transition`, `sea_finish`, `sea_release`, `sea_refresh` | ~12 KB |
+
+`core` also gives shorter descriptions, does not advertise rarely-needed
+inputs (`actor_id`, `idempotency_key`, `expected_version`, `sea_next`'s
+`kind` / `tag` filters, operator-only `force`, …; they are still accepted),
+and publishes result schemas as field names and types only. The behaviour
+of every tool is identical in both. `serve --http --core` works too. For
+search, history, stats, links and edits use the CLI (`sea-lite list`,
+`show`, `stats`) or the full profile.
+
+### Templated batches
+
+A template repeats one ticket, and its links, for each value of `for_each`
+(an array of strings/numbers, or a count `n` meaning 1..n). In every string
+of the template's `ticket` and `links`, and in its `ref`:
+
+| Placeholder | Becomes |
+| --- | --- |
+| `{i}` | the item's 1-based index |
+| `{value}` | the `for_each` value |
+| `{ref}` | this item's expanded `ref` |
+| `{prev}` | the previous item's `ref`; a link that names it is skipped for the first item |
+
+Anything else in braces is left as written. Expansion is deterministic
+(explicit `tickets` first, then each template's items in order), happens on
+the server before validation, and the batch caps (50 tickets, 100 links),
+cycle check and idempotency all apply to the expanded batch. `dry_run: true`
+returns the expanded plan without writing.
+
+An epic and a 20-step migration chain, every step a child of the epic and
+each depending on the one before (21 tickets, 39 links), in one call:
+
+```json
+{
+  "tickets": [{ "ref": "epic", "title": "Retire the v1 API", "kind": "epic" }],
+  "templates": [{
+    "for_each": ["users", "orders", "invoices", "…17 more"],
+    "ref": "m{i}",
+    "ticket": { "title": "Migrate endpoint /{value} to v2", "status": "triaged" },
+    "links": [
+      { "from_ref": "epic", "to_ref": "{ref}", "link_type": "parent_of" },
+      { "from_ref": "{ref}", "to_ref": "{prev}", "link_type": "depends_on" }
+    ]
+  }],
+  "idempotency_key": "retire-v1-plan"
+}
+```
+
+Result: `{"created":{"epic":"…","m1":"…",…,"m20":"…"},"links":39,"idempotent_replay":false}`.
+Re-sending it with the same `idempotency_key` replays that result
+(`idempotent_replay: true`) instead of creating 21 more tickets.
 
 ## Scopes: locking the files, not just the ticket
 

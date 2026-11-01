@@ -32,7 +32,9 @@ without an event, or an event whose hash does not recompute, is detectable.
 
 **Atomic batches.** `sea_apply` validates the whole batch (refs, self-loops,
 duplicates, cycles) before writing anything, then writes everything or
-nothing. A half-written epic is not a state the file can be in.
+nothing. A half-written epic is not a state the file can be in. Templates
+are expanded first, so the same checks and caps apply to what they expand
+to. Bulk transitions and `sea_finish` are all-or-nothing the same way.
 
 ## Identity
 
