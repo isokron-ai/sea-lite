@@ -69,6 +69,24 @@ agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
 
 ### Fixed
 
+- **Scope paths through symlinks name the files they point at.** A relative
+  path through a link (`hlink/claims.ts` or `flink`, linking into a claimed
+  `src/handlers`) passed `scope-check` and could be claimed by another
+  session, so two live claims covered the same files; the same path given
+  absolute was caught. Every claim path (`sea_claim`, `sea_next`, CLI
+  `claim` / `next`) and every checked path (`sea_scope_check`,
+  `scope-check`, its `--hook`, `precommit`) is now resolved through the
+  realpath of its longest existing prefix (the literal part before any
+  glob) against the repository root, and kept in its repo-relative form for
+  display. A link that resolves outside the repository is `invalid_input`
+  (`reason: "outside_repo"`). The stdio server takes the root from
+  `CLAUDE_PROJECT_DIR` or its working directory; `serve --http` and library
+  use without `root` keep paths lexical. Uses the platform realpath
+  (canonical case on Windows) and `/` separators on every OS.
+- **`sea-lite scope-check -- PATH`** checks the paths after `--` (they were
+  dropped and the command exited 2); `--` ends the options for every
+  command, so a path may start with `-`.
+
 - **A reused `idempotency_key` with a different request is refused, never
   replayed.** In 0.4.0 a second `sea_apply` (or `sea_create`, `sea_update`,
   `sea_transition`, `sea_link`) under a key already used returned the first

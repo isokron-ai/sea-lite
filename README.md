@@ -417,6 +417,14 @@ sea_claim { ticket_ids: [id], scope: { paths: ["src/handlers", "docs/*.md"] } }
   entry of the other (`src` ↔ `src/**/*.ts`, `docs/x.md` ↔ `docs/*.md`;
   not `src` ↔ `src2`, not `*.ts` ↔ `*.md`). The full rule is in
   `docs/MODEL.md`.
+- Paths are resolved **through symlinks** (stdio `serve`, the CLI, the
+  hooks and the pre-commit guard know the repository): the longest existing
+  prefix of an entry (the literal part before any glob) is replaced by its
+  realpath, made repo-relative again. `hlink/claims.ts`, where `hlink → src/handlers`,
+  is `src/handlers/claims.ts` to every claim and every check, and results
+  show that form. A link that resolves outside the repository is refused
+  (`invalid_input`, `reason: "outside_repo"`). `serve --http` serves many
+  machines and keeps paths as written.
 - Overlap with **someone else's** live, unexpired scope — another actor,
   or the same actor in another session — is refused with `scope_conflict`
   listing every holder, ticket, overlapping pair and expiry. Your own

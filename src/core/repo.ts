@@ -35,6 +35,8 @@ export interface Ctx {
   readonly sessionWide?: boolean;
   /** Project key (core/project.ts), or null for every project (pre-0.4 behaviour). */
   readonly project: string | null;
+  /** Repository root: scope paths are resolved through symlinks against it (core/scope.ts). Null: lexical only. */
+  readonly root?: string | null;
   readonly role: Role;
   readonly lifecycle: LifecycleConfig;
   readonly now: Date;
