@@ -33,6 +33,15 @@ to land. Open an issue if one matters to you.
 
 ## Next
 
+*Top of the queue (2026-11-01):*
+
+- **Wait for a lock instead of sleep-polling** — `sea_claim` / `sea_next`
+  take `wait_seconds`; the call returns when the scope frees up or the wait
+  ends. Gate: Track B T3 wall time (sea-lite 2.6× slower than beads today).
+- **Claimed-path check after Bash edits** — with cc-anchor, paths changed by
+  a Bash call (`sed -i`, redirects) inside another session's claim are
+  flagged immediately, not at commit.
+
 - **Scope-aware dispatch** — `sea_next` today refuses a dispatch whose
   scope conflicts. A `scope_mode: skip` that walks on to the next eligible
   ticket whose *ticket-declared* paths (a new `paths` field on tickets,
