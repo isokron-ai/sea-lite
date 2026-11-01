@@ -8,7 +8,7 @@ import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kro
 
 import { SeaError } from './core/errors.js';
 import type { Ctx } from './core/repo.js';
-import { SEA_MIGRATIONS, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
+import { SEA_MIGRATIONS, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
 import * as claims from './handlers/claims.js';
 import * as hist from './handlers/history.js';
 import * as links from './handlers/links.js';
@@ -28,6 +28,17 @@ export interface SeaLiteOptions {
   kronicle?: KronicleLite;
   /** Default actor for calls that do not pass actor_id. */
   actor?: string;
+  /**
+   * The session this store acts for (core/identity.ts). Null/omitted for
+   * library use: claims then carry no session and ownership is by actor, as
+   * before 0.4.0. `sea-lite serve` always sets one.
+   */
+  session?: string | null;
+  /**
+   * Project key (core/project.ts) stamped on new tickets and used to filter
+   * list / next / scope checks. Null/omitted: every project (pre-0.4).
+   */
+  project?: string | null;
   /** Self-asserted role; `operator` unlocks force release. */
   role?: Role;
   /** Enabled lifecycle tracks. Default ['work']. */
@@ -37,6 +48,9 @@ export interface SeaLiteOptions {
 }
 
 export const DEFAULT_ACTOR = 'local-agent';
+
+/** Minimum gap between two activity-driven lease renewals for one actor. */
+export const TOUCH_INTERVAL_MS = 30_000;
 
 export function parseTracks(raw: string | undefined): readonly Track[] {
   if (raw === undefined || raw.trim() === '') return DEFAULT_LIFECYCLE.tracks;
@@ -60,8 +74,12 @@ export class SeaLite {
   readonly db: Db;
   readonly chain: Chain;
   readonly actor: string;
+  readonly session: string | null;
+  readonly project: string | null;
   readonly role: Role;
   readonly lifecycle: LifecycleConfig;
+  /** Set on a hook's view (CLI scope-check / precommit): every claim of `session` is its own. */
+  readonly sessionWide: boolean;
   private readonly ownsKronicle: boolean;
   private readonly clock: () => Date;
 
@@ -77,6 +95,9 @@ export class SeaLite {
     this.db = this.kronicle.db;
     this.chain = this.kronicle.chain;
     this.actor = opts.actor ?? process.env['SEA_LITE_ACTOR'] ?? DEFAULT_ACTOR;
+    this.session = opts.session ?? null;
+    this.project = opts.project ?? null;
+    this.sessionWide = false;
     this.role = opts.role ?? parseRole(process.env['SEA_LITE_ROLE']);
     this.lifecycle = { tracks: opts.tracks ?? parseTracks(process.env['SEA_LITE_TRACKS']) };
     this.clock = opts.now ?? (() => new Date());
@@ -92,17 +113,21 @@ export class SeaLite {
    * the connection, the clock and the lifecycle; `close()` on the view is a
    * no-op. The HTTP transport builds one per request from the bearer token.
    */
-  as(actor: string, role: Role = this.role): SeaLite {
+  as(actor: string, role: Role = this.role, more: { session?: string | null; project?: string | null; sessionWide?: boolean } = {}): SeaLite {
     const view = Object.create(SeaLite.prototype) as SeaLite;
     Object.assign(view, {
       kronicle: this.kronicle,
       db: this.db,
       chain: this.chain,
       actor,
+      session: more.session !== undefined ? more.session : this.session,
+      project: more.project !== undefined ? more.project : this.project,
+      sessionWide: more.sessionWide ?? this.sessionWide,
       role,
       lifecycle: this.lifecycle,
       ownsKronicle: false,
       clock: this.clock,
+      lastTouch: this.lastTouch,
     });
     return view;
   }
@@ -112,10 +137,37 @@ export class SeaLite {
       db: this.db,
       chain: this.chain,
       actor: actor_id ?? this.actor,
+      session: this.session,
+      sessionWide: this.sessionWide,
+      project: this.project,
       role: this.role,
       lifecycle: this.lifecycle,
       now: this.clock(),
     };
+  }
+
+  /** Renew the caller's own live claims by their lease; report the ones that had lapsed. Row only, like sea_refresh. */
+  heartbeat(input: { actor_id?: string } = {}): claims.HeartbeatResult {
+    return claims.heartbeat(this.ctx(input.actor_id));
+  }
+
+  private lastTouch = new Map<string, number>();
+  /**
+   * Auto-renewal on activity: the MCP layer calls this on every tool call.
+   * At most one heartbeat per actor every TOUCH_INTERVAL_MS (store clock);
+   * never throws.
+   */
+  touch(actor_id?: string): void {
+    const key = `${actor_id ?? this.actor}\u0000${this.session ?? ''}`;
+    const now = this.clock().getTime();
+    const last = this.lastTouch.get(key);
+    if (last !== undefined && now - last < TOUCH_INTERVAL_MS) return;
+    this.lastTouch.set(key, now);
+    try {
+      claims.heartbeat(this.ctx(actor_id), { quiet: true });
+    } catch {
+      // a busy database must not fail the caller's actual request
+    }
   }
 
   create(input: S.CreateInput): tickets.CreateResult {
@@ -187,6 +239,7 @@ export function ensureSeaSchema(db: Db): void {
       const cols = db.prepare(`PRAGMA table_info(${m.table})`).all() as { name: string }[];
       if (!cols.some((c) => c.name === m.column)) db.exec(m.sql);
     }
+    db.exec(SEA_POST_MIGRATION_SQL);
     db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`).run(SEA_SCHEMA_META_KEY, String(SEA_SCHEMA_VERSION));
   }).immediate();
 }

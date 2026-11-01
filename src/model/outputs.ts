@@ -24,6 +24,8 @@ export const ClaimViewOut = z
     write_count: z.number(),
     scope: ScopeOut.nullable(),
     worktree: z.string().nullable().describe('Absolute worktree path the claim is bound to.'),
+    session: z.string().nullable().describe('Holder session; one actor label in two sessions is two holders.'),
+    lease_seconds: z.number().nullable().describe('Lease the claim renews by.'),
   })
   .describe('Who holds the ticket and until when. Never the token.');
 
@@ -42,6 +44,7 @@ export const TicketOut = z.object({
   updated_at: z.string(),
   row_version: z.number(),
   claim: ClaimViewOut.nullable(),
+  project: z.string().nullable().describe('Project key; null = legacy, visible in every project.'),
   created_seq: z.number(),
   last_seq: z.number(),
 });
@@ -55,6 +58,7 @@ export const TicketCompactOut = z.object({
   tags: z.array(z.string()),
   assignee: z.string().nullable(),
   claim: ClaimViewOut.nullable(),
+  project: z.string().nullable(),
   row_version: z.number(),
   updated_at: z.string(),
 });
@@ -235,8 +239,12 @@ export const HistoryOutput = z.object({
 
 export const ScopeConflictOut = z.object({
   ticket_id: z.string(),
+  title: z.string(),
   holder: z.string(),
+  holder_session: z.string().nullable(),
+  holder_label: z.string().describe('actor#session, for humans.'),
   claim_expires_at: z.string(),
+  expires_in_seconds: z.number(),
   held: z.array(z.string()).describe("The holder's scope entries that overlap."),
   overlapping: z.array(z.object({ requested: z.string(), held: z.string() })),
 });

@@ -29,3 +29,18 @@ export function codeOf(fn: () => unknown): string {
   }
   return 'no_error';
 }
+
+/**
+ * The environment for a spawned CLI or server without the identity of
+ * whoever runs the tests (a Claude Code session exports
+ * CLAUDE_CODE_SESSION_ID / CLAUDE_PID / CLAUDE_PROJECT_DIR to its Bash tool).
+ */
+export function cleanEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (/^(CLAUDE_CODE_SESSION_ID|CLAUDE_PID|CLAUDE_PROJECT_DIR|SEA_LITE_.*)$/.test(k)) continue;
+    env[k] = v;
+  }
+  return { ...env, ...extra };
+}

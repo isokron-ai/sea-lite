@@ -68,12 +68,12 @@ describe('expiry and lease bounds', () => {
     expect(hasLiveClaim({ id: 'x', claim_token_hash: 'h', claim_actor: 'a', claim_expires_at: later }, now)).toBe(true);
   });
 
-  it('clampLease defaults, rejects 0, negatives, floats and > 600', () => {
-    expect(clampLease(undefined)).toBe(300);
-    expect(clampLease(MAX_LEASE_SECONDS)).toBe(600);
+  it('clampLease defaults, rejects 0, negatives, floats and > 3600', () => {
+    expect(clampLease(undefined)).toBe(900);
+    expect(clampLease(MAX_LEASE_SECONDS)).toBe(3600);
     expect(codeOf(() => clampLease(0))).toBe('invalid_input');
     expect(codeOf(() => clampLease(-5))).toBe('invalid_input');
     expect(codeOf(() => clampLease(1.5))).toBe('invalid_input');
-    expect(codeOf(() => clampLease(601))).toBe('invalid_input');
+    expect(codeOf(() => clampLease(3601))).toBe('invalid_input');
   });
 });

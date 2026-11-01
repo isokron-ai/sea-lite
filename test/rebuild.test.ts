@@ -85,7 +85,7 @@ describe('rebuild from chain', () => {
     const t = claimedTicket(store);
     const chained = store.get({ id: t.id }).ticket.claim!.expires_at;
     clock.advance(100);
-    const refreshed = store.refresh({ ticket_id: t.id, claim_token: t.token, extend_by_seconds: 600 }).expires_at;
+    const refreshed = store.refresh({ ticket_id: t.id, claim_token: t.token, extend_by_seconds: 1200 }).expires_at;
     expect(refreshed).not.toBe(chained);
     store.rebuild();
     expect(store.get({ id: t.id }).ticket.claim!.expires_at).toBe(chained);

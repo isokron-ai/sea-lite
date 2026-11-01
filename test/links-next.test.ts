@@ -151,7 +151,7 @@ describe('sea_next', () => {
     const { store, clock } = fresh();
     const t = claimedTicket(store, 'bob', 'abandoned');
     expect(store.next({ include_unassigned: true }).ticket).toBeNull();
-    clock.advance(301);
+    clock.advance(901);
     const r = store.next({ include_unassigned: true });
     expect(r.ticket!.id).toBe(t.id);
     expect(r.ticket!.claim!.holder).toBe('alice');

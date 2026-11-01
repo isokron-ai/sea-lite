@@ -4,9 +4,11 @@
  *
  * One endpoint, POST only, stateless: no session id is minted or honored, GET
  * and DELETE answer 405, per-request `_meta` carries the protocol version and
- * client capabilities. 2025-era (`initialize`) clients are rejected with
- * `UnsupportedProtocolVersionError` (-32022) naming the supported revision;
- * stdio serves those.
+ * client capabilities. 2025-era clients (`initialize` handshake: Cursor and
+ * other clients that do not speak 2026-07-28 yet) are served by the SDK's
+ * stateless legacy fallback by default (0.4.0); `legacy: 'reject'` restores
+ * the modern-only endpoint that answers them with
+ * `UnsupportedProtocolVersionError` (-32022).
  *
  * Identity, per request: the shared bearer (`<data dir>/http-bearer.token`)
  * acts as the server's `--actor` with `actor_id` a self-asserted label, as on
@@ -198,6 +200,12 @@ export interface HttpServeOptions {
   /** Extra Host header hostnames to accept besides loopback and the bound host. */
   allowedHosts?: string[];
   version?: string;
+  /**
+   * 2025-era clients: `stateless` (default) serves each legacy request through
+   * the SDK's stateless fallback from the same factory, so both eras see the
+   * same tools and the same per-request identity; `reject` answers them -32022.
+   */
+  legacy?: 'stateless' | 'reject';
   onerror?: (err: Error) => void;
 }
 
@@ -242,10 +250,11 @@ export function createHttpListener(opts: HttpServeOptions): {
   const handler = createMcpHandler(
     (ctx) => {
       const id = identityOf(ctx, fallback);
-      const view = id.actor === store.actor && id.role === store.role ? store : store.as(id.actor, id.role);
+      // No per-request session: an HTTP identity is its token (or the shared bearer's label).
+      const view = id.actor === store.actor && id.role === store.role ? store : store.as(id.actor, id.role, { session: null });
       return createServer(view, { version: opts.version ?? VERSION, bindActor: id.bound });
     },
-    { legacy: 'reject', ...(opts.onerror ? { onerror: opts.onerror } : {}) },
+    { legacy: opts.legacy ?? 'stateless', ...(opts.onerror ? { onerror: opts.onerror } : {}) },
   );
   const node = toNodeHandler(handler, opts.onerror ? { onerror: opts.onerror } : {});
 

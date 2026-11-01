@@ -19,7 +19,7 @@ describe('sea_claim', () => {
     expect(row.claim_token_hash).not.toBe(token);
     expect(row.claim_actor).toBe('alice');
     const got = store.get({ id });
-    expect(got.ticket.claim).toEqual({ holder: 'alice', expires_at: expect.any(String), write_count: 0, scope: null, worktree: null });
+    expect(got.ticket.claim).toEqual({ holder: 'alice', expires_at: expect.any(String), write_count: 0, scope: null, worktree: null, session: null, lease_seconds: 900 });
     expect(JSON.stringify(got)).not.toContain(token);
     expect(JSON.stringify(got)).not.toContain(row.claim_token_hash);
     const claimed = [...store.chain.iterate()].find((e) => e.event_type === EVENT.ticket_claimed)!;
@@ -78,7 +78,7 @@ describe('sea_claim', () => {
   it('enforces the lease bound at the schema and the handler', () => {
     const { store } = fresh();
     const { id } = claimedTicket(store);
-    expect(codeOf(() => store.claim({ ticket_ids: [id], lease_seconds: 601 }))).toBe('invalid_input');
+    expect(codeOf(() => store.claim({ ticket_ids: [id], lease_seconds: 3601 }))).toBe('invalid_input');
   });
 });
 
@@ -93,9 +93,9 @@ describe('sea_refresh', () => {
     expect(r0.extended).toBe(false);
     expect(r0.expires_at).toBe(first);
     clock.advance(200);
-    const r1 = store.refresh({ ticket_id: id, claim_token: token, extend_by_seconds: 600 });
+    const r1 = store.refresh({ ticket_id: id, claim_token: token, extend_by_seconds: 1200 });
     expect(r1.extended).toBe(true);
-    expect(Date.parse(r1.expires_at) - clock.now().getTime()).toBe(600_000);
+    expect(Date.parse(r1.expires_at) - clock.now().getTime()).toBe(1_200_000);
     expect(store.chain.head().seq).toBe(head);
     expect(eventTypes(store).filter((t) => t.includes('refresh'))).toEqual([]);
   });
@@ -104,7 +104,7 @@ describe('sea_refresh', () => {
     const { store, clock } = fresh();
     const { id, token } = claimedTicket(store);
     expect(codeOf(() => store.refresh({ ticket_id: id, claim_token: token, extend_by_seconds: 60, actor_id: 'bob' }))).toBe('fence_foreign_holder');
-    clock.advance(301);
+    clock.advance(901);
     expect(codeOf(() => store.refresh({ ticket_id: id, claim_token: token, extend_by_seconds: 60 }))).toBe('fence_expired');
   });
 });
@@ -150,7 +150,7 @@ describe('lazy expiry', () => {
   it('an expired lease is treated as free on the next read and chained exactly once', () => {
     const { store, clock } = fresh();
     const { id, token } = claimedTicket(store);
-    clock.advance(301);
+    clock.advance(901);
     const g1 = store.get({ id });
     expect(g1.ticket.claim).toBeNull();
     const g2 = store.get({ id });
@@ -165,7 +165,7 @@ describe('lazy expiry', () => {
     const { store, clock } = fresh();
     claimedTicket(store, 'alice', 'one');
     claimedTicket(store, 'alice', 'two');
-    clock.advance(301);
+    clock.advance(901);
     const l = store.list({ include_terminal: false, claimed: 'any', limit: 50, view: 'compact' });
     expect(l.swept_expired).toBe(2);
     expect(l.tickets.every((t) => t.claim === null)).toBe(true);

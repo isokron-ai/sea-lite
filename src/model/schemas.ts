@@ -6,7 +6,7 @@
 
 import { z } from 'zod';
 
-import { MAX_LEASE_SECONDS } from '../core/fence.js';
+import { DEFAULT_LEASE_SECONDS, MAX_LEASE_SECONDS } from '../core/fence.js';
 import { MAX_SCOPE_PATH_CHARS, MAX_SCOPE_PATHS, MAX_WORKTREE_CHARS } from '../core/scope.js';
 import { ALL_STATES, LINK_TYPES, PRIORITIES, TICKET_KINDS } from './enums.js';
 
@@ -53,7 +53,9 @@ export const LeaseSeconds = z
   .min(1)
   .max(MAX_LEASE_SECONDS)
   .optional()
-  .describe(`Lease length in seconds (default 300, max ${MAX_LEASE_SECONDS}). Refresh before it lapses; expiry frees the ticket.`);
+  .describe(
+    `Lease length in seconds (default ${DEFAULT_LEASE_SECONDS}, max ${MAX_LEASE_SECONDS}). Renewed automatically while you keep calling sea-lite tools; expiry frees the ticket.`,
+  );
 
 export const ScopeSchema = z
   .object({
@@ -70,7 +72,7 @@ export const ScopeSchema = z
       .optional()
       .describe('Absolute path of the git worktree you work in. Binds the claim to it: `sea-lite release-worktree <path>` frees it when the worktree is removed.'),
   })
-  .describe('The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by another actor.');
+  .describe('The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by someone else (another actor, or this actor in another session).');
 
 export const NewTicketFields = {
   title: z.string().min(1).max(500),
@@ -143,6 +145,12 @@ export const ListShape = {
   limit: z.number().int().min(1).max(200).default(50),
   cursor: z.string().optional().describe('Opaque cursor from a previous page.'),
   view: z.enum(['compact', 'full']).default('compact'),
+  project: z
+    .string()
+    .min(1)
+    .max(1024)
+    .optional()
+    .describe('Default: this server\'s project (plus legacy tickets without one). Another project key, or "*" for every project.'),
   actor_id: ActorId,
 };
 export const ListInput = z.object(ListShape);
@@ -165,8 +173,8 @@ export const RefreshShape = {
     .int()
     .min(1)
     .max(MAX_LEASE_SECONDS)
-    .default(300)
-    .describe(`New expiry = now + this (max ${MAX_LEASE_SECONDS}); never shortens an existing lease.`),
+    .optional()
+    .describe(`New expiry = now + this (default: the claim's own lease; max ${MAX_LEASE_SECONDS}); never shortens an existing lease.`),
   actor_id: ActorId,
 };
 export const RefreshInput = z.object(RefreshShape);

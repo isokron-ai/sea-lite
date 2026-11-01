@@ -9,8 +9,9 @@ import type { ChainHead } from 'kronicle-lite';
 
 import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
-import { clampLease, expiryFrom, hasLiveClaim, MAX_LEASE_SECONDS, validateFence } from '../core/fence.js';
-import { addNote, mustGetRow, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
+import { clampLease, DEFAULT_LEASE_SECONDS, expiryFrom, hasLiveClaim, MAX_LEASE_SECONDS, validateFence } from '../core/fence.js';
+import { holderLabel } from '../core/identity.js';
+import { addNote, mustGetRow, ownsClaim, projectFilter, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
 import {
   findOverlaps,
   normalizeScope,
@@ -36,40 +37,63 @@ export interface ClaimResult {
   head: ChainHead;
 }
 
-/** One live claim by another actor whose scope overlaps the request. */
+/** One live claim by someone else (another actor, or the same actor in another session) whose scope overlaps the request. */
 export interface ScopeConflict {
   ticket_id: string;
+  /** The ticket's title, so a hook's deny message says what the holder is working on. */
+  title: string;
+  /** The holder's actor label. */
   holder: string;
+  /** The holder's session (0.4.0), or null for a legacy claim. */
+  holder_session: string | null;
+  /** `actor#session8` (or the bare actor): what to show a human. */
+  holder_label: string;
   claim_expires_at: string;
+  /** Seconds until the lease lapses (as of the check). */
+  expires_in_seconds: number;
   /** The holder's scope entries that overlap. */
   held: string[];
   overlapping: OverlapPair[];
 }
 
 /**
- * Every live, scoped claim held by someone other than `ctx.actor` (and not
- * on `excludeIds`) that overlaps `paths`. Callers sweep expired leases first
- * so a lapsed scope never blocks anyone.
+ * Every live, scoped claim in the current project held by someone other than
+ * the caller (another actor, or the same actor in another session; see
+ * ownsClaim) and not on `excludeIds`, that overlaps `paths`. Callers sweep
+ * expired leases first so a lapsed scope never blocks anyone.
  */
 export function findScopeConflicts(ctx: Ctx, paths: readonly string[], excludeIds: ReadonlySet<string> = new Set()): ScopeConflict[] {
+  const pf = projectFilter(ctx);
   const rows = ctx.db
     .prepare(
-      `SELECT id, claim_actor, claim_expires_at, claim_scope FROM sea_tickets
-        WHERE claim_scope IS NOT NULL AND claim_token_hash IS NOT NULL AND claim_expires_at > ? AND claim_actor <> ?
-        ORDER BY claim_expires_at, id`,
+      `SELECT t.id, t.title, t.claim_actor, t.claim_session, t.claim_expires_at, t.claim_scope FROM sea_tickets t
+        WHERE t.claim_scope IS NOT NULL AND t.claim_token_hash IS NOT NULL AND t.claim_expires_at > ?${pf.sql ? ` AND ${pf.sql}` : ''}
+        ORDER BY t.claim_expires_at, t.id`,
     )
-    .all(ctx.now.toISOString(), ctx.actor) as { id: string; claim_actor: string; claim_expires_at: string; claim_scope: string }[];
+    .all(ctx.now.toISOString(), ...pf.params) as {
+    id: string;
+    title: string;
+    claim_actor: string;
+    claim_session: string | null;
+    claim_expires_at: string;
+    claim_scope: string;
+  }[];
   const conflicts: ScopeConflict[] = [];
   for (const r of rows) {
     if (excludeIds.has(r.id)) continue;
+    if (ownsClaim(ctx, r.claim_actor, r.claim_session)) continue;
     const held = parseScopeJson(r.claim_scope);
     if (!held) continue;
     const overlapping = findOverlaps(paths, held.paths);
     if (overlapping.length === 0) continue;
     conflicts.push({
       ticket_id: r.id,
+      title: r.title,
       holder: r.claim_actor,
+      holder_session: r.claim_session ?? null,
+      holder_label: holderLabel(r.claim_actor, r.claim_session),
       claim_expires_at: r.claim_expires_at,
+      expires_in_seconds: Math.max(0, Math.round((Date.parse(r.claim_expires_at) - ctx.now.getTime()) / 1000)),
       held: [...new Set(overlapping.map((o) => o.held))],
       overlapping,
     });
@@ -85,7 +109,7 @@ export function assertScopeFree(ctx: Ctx, scope: Scope, excludeIds: ReadonlySet<
   const more = conflicts.length > 1 ? ` (+${conflicts.length - 1} more)` : '';
   throw new SeaError(
     'scope_conflict',
-    `scope overlaps a live claim: "${first.holder}" holds ${first.held.join(', ')} on ticket ${first.ticket_id} until ${first.claim_expires_at}${more}`,
+    `scope overlaps a live claim: "${first.holder_label}" holds ${first.held.join(', ')} on ticket ${first.ticket_id} ("${first.title}") until ${first.claim_expires_at}${more}`,
     { requested: scope.paths, conflicts },
   );
 }
@@ -100,10 +124,12 @@ export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
     const rows: TicketRow[] = [];
     for (const id of ids) {
       const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
-      if (hasLiveClaim(row, ctx.now) && row.claim_actor !== ctx.actor) {
-        throw new SeaError('already_claimed', `ticket ${id} is claimed by "${row.claim_actor}" until ${row.claim_expires_at}`, {
+      if (hasLiveClaim(row, ctx.now) && !ownsClaim({ actor: ctx.actor, session: ctx.session }, row.claim_actor, row.claim_session)) {
+        const label = holderLabel(row.claim_actor ?? '?', row.claim_session);
+        throw new SeaError('already_claimed', `ticket ${id} is claimed by "${label}" until ${row.claim_expires_at}`, {
           ticket_id: id,
           held_by: row.claim_actor,
+          held_by_session: row.claim_session,
           claim_expires_at: row.claim_expires_at,
           requested: ids,
         });
@@ -116,7 +142,7 @@ export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
     }
     const claims: ClaimResult['claims'] = [];
     for (const row of rows) {
-      const rotated = row.claim_token_hash !== null && row.claim_actor === ctx.actor;
+      const rotated = row.claim_token_hash !== null && ownsClaim({ actor: ctx.actor, session: ctx.session }, row.claim_actor, row.claim_session);
       const c = placeClaim(ctx, row, lease, ids.length > 1 ? { set: ids } : {}, scope, worktree);
       claims.push({ ticket_id: row.id, claim_token: c.token, expires_at: c.expires_at, rotated });
     }
@@ -155,16 +181,17 @@ export interface RefreshResult {
   head: ChainHead;
 }
 
-/** Heartbeat. Never shortens; capped at now + MAX_LEASE_SECONDS. Row only — not chained. */
+/** Heartbeat. Never shortens; capped at now + MAX_LEASE_SECONDS. Row only — not chained. Default: the claim's own lease. */
 export function refresh(ctx: Ctx, input: RefreshInput): RefreshResult {
-  if (input.extend_by_seconds > MAX_LEASE_SECONDS) {
+  if (input.extend_by_seconds !== undefined && input.extend_by_seconds > MAX_LEASE_SECONDS) {
     throw new SeaError('invalid_input', `extend_by_seconds must be ≤ ${MAX_LEASE_SECONDS}`);
   }
   return tx(ctx.db, () => {
     const id = resolveId(ctx.db, input.ticket_id);
     const row = mustGetRow(ctx.db, id);
     validateFence(row, input.claim_token, ctx.actor, ctx.now);
-    const proposed = Date.parse(expiryFrom(ctx.now, input.extend_by_seconds));
+    const by = input.extend_by_seconds ?? row.claim_lease_seconds ?? DEFAULT_LEASE_SECONDS;
+    const proposed = Date.parse(expiryFrom(ctx.now, by));
     const current = Date.parse(row.claim_expires_at!);
     if (proposed <= current) return { ticket_id: id, expires_at: row.claim_expires_at!, extended: false, head: ctx.chain.head() };
     const expires_at = new Date(proposed).toISOString();
@@ -237,7 +264,7 @@ function clearClaim(ctx: Ctx, id: string, seq: number): void {
   ctx.db
     .prepare(
       `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0,
-         claim_scope = NULL, claim_worktree = NULL, last_seq = ? WHERE id = ?`,
+         claim_scope = NULL, claim_worktree = NULL, claim_session = NULL, claim_lease_seconds = NULL, last_seq = ? WHERE id = ?`,
     )
     .run(seq, id);
 }
@@ -277,6 +304,11 @@ export function next(ctx: Ctx, input: NextInput): NextResult {
          WHERE l.state = 'active' AND l.link_type = 'depends_on' AND l.from_id = t.id AND p.status NOT IN (${sqlIn(TERMINAL_STATES)}))`,
     ];
     const params: unknown[] = [ctx.actor];
+    const pf = projectFilter(ctx);
+    if (pf.sql) {
+      where.push(pf.sql);
+      params.push(...pf.params);
+    }
     if (input.kind && input.kind.length > 0) {
       where.push(`t.kind IN (${input.kind.map(() => '?').join(', ')})`);
       params.push(...input.kind);
@@ -361,5 +393,51 @@ export function releaseWorktree(ctx: Ctx, input: { worktree: string | readonly s
       released.push({ ticket_id: row.id, holder: row.claim_actor ?? '', scope });
     }
     return { worktree: candidates[0]!, released, expired, head: ctx.chain.head() };
+  });
+}
+
+export interface HeartbeatResult {
+  /** The caller's live claims, renewed to now + their lease (never shortened). */
+  renewed: { ticket_id: string; title: string; expires_at: string; lease_seconds: number; scope: Scope | null }[];
+  /** The caller's claims whose lease had already lapsed: recorded as expired, not renewed. */
+  lapsed: { ticket_id: string; title: string; expired_at: string }[];
+  head: ChainHead;
+}
+
+/**
+ * Renew every live claim the caller holds (ownsClaim) to now + its own lease
+ * (claim_lease_seconds, else the default), never shortening one. Claims of
+ * the caller whose lease already lapsed are swept (chained as expired, once)
+ * and reported, never resurrected: a lapsed lease may already have been
+ * taken over by someone else. Renewal is row-only, like sea_refresh, so it
+ * does not flood the chain. `quiet` skips the result assembly (the MCP
+ * layer's per-call touch).
+ */
+export function heartbeat(ctx: Ctx, opts: { quiet?: boolean } = {}): HeartbeatResult {
+  return tx(ctx.db, () => {
+    const rows = ctx.db
+      .prepare(`SELECT * FROM sea_tickets WHERE claim_token_hash IS NOT NULL AND claim_actor IS NOT NULL ORDER BY id`)
+      .all() as TicketRow[];
+    const renewed: HeartbeatResult['renewed'] = [];
+    const lapsed: HeartbeatResult['lapsed'] = [];
+    const nowMs = ctx.now.getTime();
+    const upd = ctx.db.prepare(`UPDATE sea_tickets SET claim_expires_at = ? WHERE id = ?`);
+    for (const row of rows) {
+      if (!ownsClaim(ctx, row.claim_actor, row.claim_session)) continue;
+      if (!hasLiveClaim(row, ctx.now)) {
+        sweepExpired(ctx, row);
+        lapsed.push({ ticket_id: row.id, title: row.title, expired_at: row.claim_expires_at ?? '' });
+        continue;
+      }
+      const lease = Math.min(row.claim_lease_seconds ?? DEFAULT_LEASE_SECONDS, MAX_LEASE_SECONDS);
+      const proposed = nowMs + lease * 1000;
+      let expires_at = row.claim_expires_at!;
+      if (proposed > Date.parse(expires_at)) {
+        expires_at = new Date(proposed).toISOString();
+        upd.run(expires_at, row.id);
+      }
+      if (!opts.quiet) renewed.push({ ticket_id: row.id, title: row.title, expires_at, lease_seconds: lease, scope: parseScopeJson(row.claim_scope) });
+    }
+    return { renewed, lapsed, head: ctx.chain.head() };
   });
 }

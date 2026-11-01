@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T01:36:06.190Z",
+  "capturedAt": "2026-11-01T02:44:03.518Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -334,7 +334,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Take a lease on one or more tickets (all-or-nothing; locked in id order so concurrent claimers cannot deadlock). Returns one claim_token per ticket — keep it, it is shown once and is required for every write. Leases are at most 600 s; refresh with sea_refresh or let them lapse. Fails with already_claimed (naming the holder and expiry) if any ticket is held by someone else. Claiming a ticket you already hold rotates its token. Pass `scope.paths` (the files or directories you will edit; a worktree is a scope) to lock them for the lease: refused with scope_conflict, naming the holder, ticket, overlapping paths and expiry, if they overlap another actor's live scope.",
+        "description": "Take a lease on one or more tickets (all-or-nothing; locked in id order so concurrent claimers cannot deadlock). Returns one claim_token per ticket — keep it, it is shown once and is required for every write. Leases (default 900 s, max 3600 s) renew while you keep calling sea-lite tools; otherwise they lapse. Fails with already_claimed (naming the holder and expiry) if any ticket is held by someone else. Claiming a ticket you already hold rotates its token. Pass `scope.paths` (the files or directories you will edit; a worktree is a scope) to lock them for the lease: refused with scope_conflict, naming the holder, ticket, overlapping paths and expiry, if they overlap someone else's live scope (another actor, or this actor in another session).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -345,13 +345,13 @@
               "type": "string"
             },
             "lease_seconds": {
-              "description": "Lease length in seconds (default 300, max 600). Refresh before it lapses; expiry frees the ticket.",
-              "maximum": 600,
+              "description": "Lease length in seconds (default 900, max 3600). Renewed automatically while you keep calling sea-lite tools; expiry frees the ticket.",
+              "maximum": 3600,
               "minimum": 1,
               "type": "integer"
             },
             "scope": {
-              "description": "The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by another actor.",
+              "description": "The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by someone else (another actor, or this actor in another session).",
               "properties": {
                 "paths": {
                   "description": "Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.",
@@ -513,7 +513,7 @@
             },
             "claim_seconds": {
               "description": "Also claim the new ticket for this many seconds and return the token.",
-              "maximum": 600,
+              "maximum": 3600,
               "minimum": 1,
               "type": "integer"
             },
@@ -701,6 +701,13 @@
                         "holder": {
                           "type": "string"
                         },
+                        "lease_seconds": {
+                          "description": "Lease the claim renews by.",
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
                         "scope": {
                           "anyOf": [
                             {
@@ -724,6 +731,13 @@
                             }
                           ]
                         },
+                        "session": {
+                          "description": "Holder session; one actor label in two sessions is two holders.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "worktree": {
                           "description": "Absolute worktree path the claim is bound to.",
                           "type": [
@@ -740,7 +754,9 @@
                         "expires_at",
                         "write_count",
                         "scope",
-                        "worktree"
+                        "worktree",
+                        "session",
+                        "lease_seconds"
                       ],
                       "type": "object"
                     },
@@ -801,6 +817,13 @@
                   ],
                   "type": "string"
                 },
+                "project": {
+                  "description": "Project key; null = legacy, visible in every project.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "row_version": {
                   "type": "number"
                 },
@@ -850,6 +873,7 @@
                 "updated_at",
                 "row_version",
                 "claim",
+                "project",
                 "created_seq",
                 "last_seq"
               ],
@@ -1096,6 +1120,13 @@
                         "holder": {
                           "type": "string"
                         },
+                        "lease_seconds": {
+                          "description": "Lease the claim renews by.",
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
                         "scope": {
                           "anyOf": [
                             {
@@ -1119,6 +1150,13 @@
                             }
                           ]
                         },
+                        "session": {
+                          "description": "Holder session; one actor label in two sessions is two holders.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "worktree": {
                           "description": "Absolute worktree path the claim is bound to.",
                           "type": [
@@ -1135,7 +1173,9 @@
                         "expires_at",
                         "write_count",
                         "scope",
-                        "worktree"
+                        "worktree",
+                        "session",
+                        "lease_seconds"
                       ],
                       "type": "object"
                     },
@@ -1196,6 +1236,13 @@
                   ],
                   "type": "string"
                 },
+                "project": {
+                  "description": "Project key; null = legacy, visible in every project.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "row_version": {
                   "type": "number"
                 },
@@ -1245,6 +1292,7 @@
                 "updated_at",
                 "row_version",
                 "claim",
+                "project",
                 "created_seq",
                 "last_seq"
               ],
@@ -1681,7 +1729,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Filter by status (default: every non-terminal), kind, priority, assignee (\"me\" / \"none\"), tag, claim state (any / yes / no / mine), and/or full-text `query` over title and body. Paginated with an opaque cursor. `view: compact` (default) omits bodies. Ordered by priority then recency, or by relevance when querying.",
+        "description": "Filter by status (default: every non-terminal), kind, priority, assignee (\"me\" / \"none\"), tag, claim state (any / yes / no / mine), and/or full-text `query` over title and body. This project only unless `project` says otherwise. Paginated with an opaque cursor. `view: compact` (default) omits bodies. Ordered by priority then recency, or by relevance when querying.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -1756,6 +1804,12 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "project": {
+              "description": "Default: this server's project (plus legacy tickets without one). Another project key, or \"*\" for every project.",
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
             },
             "query": {
               "description": "Full-text search over title and body (FTS5; words are OR-ed).",
@@ -1857,6 +1911,13 @@
                               "holder": {
                                 "type": "string"
                               },
+                              "lease_seconds": {
+                                "description": "Lease the claim renews by.",
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
                               "scope": {
                                 "anyOf": [
                                   {
@@ -1880,6 +1941,13 @@
                                   }
                                 ]
                               },
+                              "session": {
+                                "description": "Holder session; one actor label in two sessions is two holders.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
                               "worktree": {
                                 "description": "Absolute worktree path the claim is bound to.",
                                 "type": [
@@ -1896,7 +1964,9 @@
                               "expires_at",
                               "write_count",
                               "scope",
-                              "worktree"
+                              "worktree",
+                              "session",
+                              "lease_seconds"
                             ],
                             "type": "object"
                           },
@@ -1938,6 +2008,12 @@
                           "parked"
                         ],
                         "type": "string"
+                      },
+                      "project": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       },
                       "row_version": {
                         "type": "number"
@@ -1982,6 +2058,7 @@
                       "tags",
                       "assignee",
                       "claim",
+                      "project",
                       "row_version",
                       "updated_at"
                     ],
@@ -2011,6 +2088,13 @@
                               "holder": {
                                 "type": "string"
                               },
+                              "lease_seconds": {
+                                "description": "Lease the claim renews by.",
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
                               "scope": {
                                 "anyOf": [
                                   {
@@ -2034,6 +2118,13 @@
                                   }
                                 ]
                               },
+                              "session": {
+                                "description": "Holder session; one actor label in two sessions is two holders.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
                               "worktree": {
                                 "description": "Absolute worktree path the claim is bound to.",
                                 "type": [
@@ -2050,7 +2141,9 @@
                               "expires_at",
                               "write_count",
                               "scope",
-                              "worktree"
+                              "worktree",
+                              "session",
+                              "lease_seconds"
                             ],
                             "type": "object"
                           },
@@ -2111,6 +2204,13 @@
                         ],
                         "type": "string"
                       },
+                      "project": {
+                        "description": "Project key; null = legacy, visible in every project.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
                       "row_version": {
                         "type": "number"
                       },
@@ -2160,6 +2260,7 @@
                       "updated_at",
                       "row_version",
                       "claim",
+                      "project",
                       "created_seq",
                       "last_seq"
                     ],
@@ -2188,7 +2289,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Dispatch: atomically pick and claim the highest-priority unclaimed triaged or in_progress ticket that is assigned to you or unassigned, is not priority parked, and whose predecessors (tickets that `blocks` it, tickets it `depends_on`) are all terminal. in_progress beats triaged at equal priority; then oldest (chain order) first. Returns ticket + claim_token, or ticket: null with reason nothing_eligible. Call it in a loop. `scope.paths` locks the paths you will edit for the lease (scope_conflict if they overlap another actor's live scope).",
+        "description": "Dispatch: atomically pick and claim the highest-priority unclaimed triaged or in_progress ticket that is assigned to you or unassigned, is not priority parked, and whose predecessors (tickets that `blocks` it, tickets it `depends_on`) are all terminal. in_progress beats triaged at equal priority; then oldest (chain order) first. Returns ticket + claim_token, or ticket: null with reason nothing_eligible. This project only. Call it in a loop. `scope.paths` locks the paths you will edit for the lease (scope_conflict if they overlap someone else's live scope).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -2229,13 +2330,13 @@
               "type": "array"
             },
             "lease_seconds": {
-              "description": "Lease length in seconds (default 300, max 600). Refresh before it lapses; expiry frees the ticket.",
-              "maximum": 600,
+              "description": "Lease length in seconds (default 900, max 3600). Renewed automatically while you keep calling sea-lite tools; expiry frees the ticket.",
+              "maximum": 3600,
               "minimum": 1,
               "type": "integer"
             },
             "scope": {
-              "description": "The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by another actor.",
+              "description": "The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by someone else (another actor, or this actor in another session).",
               "properties": {
                 "paths": {
                   "description": "Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.",
@@ -2340,6 +2441,13 @@
                             "holder": {
                               "type": "string"
                             },
+                            "lease_seconds": {
+                              "description": "Lease the claim renews by.",
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            },
                             "scope": {
                               "anyOf": [
                                 {
@@ -2363,6 +2471,13 @@
                                 }
                               ]
                             },
+                            "session": {
+                              "description": "Holder session; one actor label in two sessions is two holders.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
                             "worktree": {
                               "description": "Absolute worktree path the claim is bound to.",
                               "type": [
@@ -2379,7 +2494,9 @@
                             "expires_at",
                             "write_count",
                             "scope",
-                            "worktree"
+                            "worktree",
+                            "session",
+                            "lease_seconds"
                           ],
                           "type": "object"
                         },
@@ -2440,6 +2557,13 @@
                       ],
                       "type": "string"
                     },
+                    "project": {
+                      "description": "Project key; null = legacy, visible in every project.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
                     "row_version": {
                       "type": "number"
                     },
@@ -2489,6 +2613,7 @@
                     "updated_at",
                     "row_version",
                     "claim",
+                    "project",
                     "created_seq",
                     "last_seq"
                   ],
@@ -2519,7 +2644,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Heartbeat: set the lease expiry to now + extend_by_seconds (≤ 600) if that is later than the current expiry; never shortens. Holder-only. Not recorded on the chain, so heartbeats do not flood anyone's orient delta.",
+        "description": "Heartbeat: set the lease expiry to now + extend_by_seconds (default: the claim's lease; ≤ 3600) if later than the current expiry; never shortens. Holder-only. Any sea-lite call renews your claims anyway. Not chained.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -2537,9 +2662,8 @@
               "type": "string"
             },
             "extend_by_seconds": {
-              "default": 300,
-              "description": "New expiry = now + this (max 600); never shortens an existing lease.",
-              "maximum": 600,
+              "description": "New expiry = now + this (default: the claim's own lease; max 3600); never shortens an existing lease.",
+              "maximum": 3600,
               "minimum": 1,
               "type": "integer"
             },
@@ -2743,6 +2867,13 @@
                         "holder": {
                           "type": "string"
                         },
+                        "lease_seconds": {
+                          "description": "Lease the claim renews by.",
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
                         "scope": {
                           "anyOf": [
                             {
@@ -2766,6 +2897,13 @@
                             }
                           ]
                         },
+                        "session": {
+                          "description": "Holder session; one actor label in two sessions is two holders.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "worktree": {
                           "description": "Absolute worktree path the claim is bound to.",
                           "type": [
@@ -2782,7 +2920,9 @@
                         "expires_at",
                         "write_count",
                         "scope",
-                        "worktree"
+                        "worktree",
+                        "session",
+                        "lease_seconds"
                       ],
                       "type": "object"
                     },
@@ -2843,6 +2983,13 @@
                   ],
                   "type": "string"
                 },
+                "project": {
+                  "description": "Project key; null = legacy, visible in every project.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "row_version": {
                   "type": "number"
                 },
@@ -2892,6 +3039,7 @@
                 "updated_at",
                 "row_version",
                 "claim",
+                "project",
                 "created_seq",
                 "last_seq"
               ],
@@ -2915,7 +3063,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Would editing these paths collide with a scope another actor holds right now? Returns { ok, conflicts } naming each holder, ticket, the overlapping entries and the expiry. No claim is taken or needed and your own scopes never conflict. Meant for an edit hook (PreToolUse on Edit/Write) and for checking before you touch a file outside your claim.",
+        "description": "Would editing these paths collide with a scope someone else holds right now (another actor, or this actor in another session)? Returns { ok, conflicts } naming each holder, ticket, the overlapping entries and the expiry. No claim is taken or needed and your own scopes never conflict. Use before you touch a file outside your claim.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -2954,6 +3102,9 @@
                   "claim_expires_at": {
                     "type": "string"
                   },
+                  "expires_in_seconds": {
+                    "type": "number"
+                  },
                   "held": {
                     "description": "The holder's scope entries that overlap.",
                     "items": {
@@ -2963,6 +3114,16 @@
                   },
                   "holder": {
                     "type": "string"
+                  },
+                  "holder_label": {
+                    "description": "actor#session, for humans.",
+                    "type": "string"
+                  },
+                  "holder_session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "overlapping": {
                     "items": {
@@ -2985,12 +3146,19 @@
                   },
                   "ticket_id": {
                     "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
                   }
                 },
                 "required": [
                   "ticket_id",
+                  "title",
                   "holder",
+                  "holder_session",
+                  "holder_label",
                   "claim_expires_at",
+                  "expires_in_seconds",
                   "held",
                   "overlapping"
                 ],
@@ -3450,6 +3618,13 @@
                             "holder": {
                               "type": "string"
                             },
+                            "lease_seconds": {
+                              "description": "Lease the claim renews by.",
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            },
                             "scope": {
                               "anyOf": [
                                 {
@@ -3473,6 +3648,13 @@
                                 }
                               ]
                             },
+                            "session": {
+                              "description": "Holder session; one actor label in two sessions is two holders.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
                             "worktree": {
                               "description": "Absolute worktree path the claim is bound to.",
                               "type": [
@@ -3489,7 +3671,9 @@
                             "expires_at",
                             "write_count",
                             "scope",
-                            "worktree"
+                            "worktree",
+                            "session",
+                            "lease_seconds"
                           ],
                           "type": "object"
                         },
@@ -3550,6 +3734,13 @@
                       ],
                       "type": "string"
                     },
+                    "project": {
+                      "description": "Project key; null = legacy, visible in every project.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
                     "row_version": {
                       "type": "number"
                     },
@@ -3599,6 +3790,7 @@
                     "updated_at",
                     "row_version",
                     "claim",
+                    "project",
                     "created_seq",
                     "last_seq"
                   ],
@@ -3878,6 +4070,13 @@
                             "holder": {
                               "type": "string"
                             },
+                            "lease_seconds": {
+                              "description": "Lease the claim renews by.",
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            },
                             "scope": {
                               "anyOf": [
                                 {
@@ -3901,6 +4100,13 @@
                                 }
                               ]
                             },
+                            "session": {
+                              "description": "Holder session; one actor label in two sessions is two holders.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
                             "worktree": {
                               "description": "Absolute worktree path the claim is bound to.",
                               "type": [
@@ -3917,7 +4123,9 @@
                             "expires_at",
                             "write_count",
                             "scope",
-                            "worktree"
+                            "worktree",
+                            "session",
+                            "lease_seconds"
                           ],
                           "type": "object"
                         },
@@ -3978,6 +4186,13 @@
                       ],
                       "type": "string"
                     },
+                    "project": {
+                      "description": "Project key; null = legacy, visible in every project.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
                     "row_version": {
                       "type": "number"
                     },
@@ -4027,6 +4242,7 @@
                     "updated_at",
                     "row_version",
                     "claim",
+                    "project",
                     "created_seq",
                     "last_seq"
                   ],
@@ -4061,7 +4277,7 @@
   "protocolVersion": "2025-11-25",
   "server": {
     "name": "sea-lite",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
-  "sha256": "208a8092cda637a719790e6bfcab79040337c73949df47b0a77b5abaa0aab2ea"
+  "sha256": "d24221dabed6a41261f11677b085167f2d8470016266ce12d33eec84faaf6d0a"
 }

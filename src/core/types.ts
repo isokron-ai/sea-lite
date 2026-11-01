@@ -22,6 +22,9 @@ export interface TicketRow {
   claim_write_count: number;
   claim_scope: string | null; // JSON array of normalized paths, or NULL
   claim_worktree: string | null; // normalized absolute worktree path, or NULL
+  claim_session: string | null; // holder's session (0.4.0), or NULL
+  claim_lease_seconds: number | null; // lease length the claim was taken with (0.4.0), or NULL
+  project: string | null; // project key (0.4.0), or NULL for legacy tickets
   created_seq: number;
   last_seq: number;
 }
@@ -58,6 +61,10 @@ export interface ClaimView {
   scope: Scope | null;
   /** Worktree the claim is bound to, or null. */
   worktree: string | null;
+  /** The holder's session (0.4.0): two holders with one actor label are told apart by it. Null for legacy claims. */
+  session: string | null;
+  /** Lease length the claim was taken with; heartbeats renew by it. Null for legacy claims. */
+  lease_seconds: number | null;
 }
 
 /** What tools return. The token hash never leaves the row/chain. */
@@ -76,6 +83,8 @@ export interface Ticket {
   updated_at: string;
   row_version: number;
   claim: ClaimView | null;
+  /** Project key the ticket belongs to (0.4.0), or null for a legacy ticket visible everywhere. */
+  project: string | null;
   created_seq: number;
   last_seq: number;
 }
@@ -89,6 +98,7 @@ export interface TicketCompact {
   tags: string[];
   assignee: string | null;
   claim: ClaimView | null;
+  project: string | null;
   row_version: number;
   updated_at: string;
 }
@@ -135,8 +145,11 @@ export function rowToTicket(r: TicketRow): Ticket {
             write_count: r.claim_write_count,
             scope: parseScopeJson(r.claim_scope),
             worktree: r.claim_worktree ?? null,
+            session: r.claim_session ?? null,
+            lease_seconds: r.claim_lease_seconds ?? null,
           }
         : null,
+    project: r.project ?? null,
     created_seq: r.created_seq,
     last_seq: r.last_seq,
   };
@@ -152,6 +165,7 @@ export function toCompact(t: Ticket): TicketCompact {
     tags: t.tags,
     assignee: t.assignee,
     claim: t.claim,
+    project: t.project,
     row_version: t.row_version,
     updated_at: t.updated_at,
   };

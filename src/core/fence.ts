@@ -18,8 +18,14 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { SeaError } from './errors.js';
 
-export const MAX_LEASE_SECONDS = 600;
-export const DEFAULT_LEASE_SECONDS = 300;
+/**
+ * 0.4.0: 900 s by default (was 300), up to an hour (was 600). Leases are
+ * renewed while the holder is active (any sea-lite tool call, `sea-lite
+ * heartbeat` from a hook), so the default is how long a crashed or abandoned
+ * holder keeps its lock, not how long a task may take.
+ */
+export const MAX_LEASE_SECONDS = 3600;
+export const DEFAULT_LEASE_SECONDS = 900;
 
 export interface ClaimFields {
   readonly id: string;
@@ -53,6 +59,8 @@ export function hasLiveClaim(row: ClaimFields, now: Date): boolean {
 
 /** Throws a SeaError unless `token` is the live fence held by `actor` on this row. */
 export function validateFence(row: ClaimFields, token: string, actor: string, now: Date): void {
+  // The token is the fence; the actor check catches a leaked token. Sessions
+  // are not compared here: whoever holds the token is the holder's process.
   if (row.claim_token_hash === null || !hashEquals(row.claim_token_hash, hashToken(token))) {
     throw new SeaError('fence_invalid', `claim token does not fence ticket ${row.id}`, {
       ticket_id: row.id,

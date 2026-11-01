@@ -27,6 +27,7 @@ import { ChainConflictError } from 'kronicle-lite';
 import { z } from 'zod';
 
 import { SeaError } from './core/errors.js';
+import { shortSession } from './core/identity.js';
 import { ALL_STATES, isTerminalStatus, LINK_TYPES, PRIORITIES, TICKET_KINDS } from './model/enums.js';
 import {
   ApplyOutput,
@@ -131,11 +132,12 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
   const actor = store.actor.length > 40 ? store.actor.slice(0, 37) + '…' : store.actor;
   // Statuses are not repeated here: sea_transition's description and every
   // illegal_transition error carry legal_next. Budget: MAX_INSTRUCTIONS_CHARS.
+  const who = store.session !== null ? `${actor}#${shortSession(store.session)}` : actor;
   const instructions =
     'Fenced work queue for parallel agents. Loop: sea_next (scope: the paths you will edit) → work → sea_update notes → ' +
-    'sea_transition resolved (confirm: true, or answer the prompt). Writes need the claim_token from sea_claim/sea_next; ' +
-    'only the holder writes while its lease is live (sea_refresh extends, sea_release returns the ticket). Scopes of ' +
-    `different actors never overlap; run sea_scope_check before editing a path you did not claim. Actor "${actor}" (role ${store.role}).`;
+    'sea_transition resolved (confirm: true). Writes need the claim_token from sea_claim/sea_next. Leases renew while you ' +
+    'keep calling sea-lite tools; sea_release when you stop. Scopes of other holders (other actors, or this actor in ' +
+    `another session) never overlap; sea_scope_check before editing a path you did not claim. You are "${who}" (role ${store.role}).`;
   if (instructions.length > MAX_INSTRUCTIONS_CHARS) {
     throw new Error(`sea-lite: server instructions are ${instructions.length} chars; the limit is ${MAX_INSTRUCTIONS_CHARS}`);
   }
@@ -149,6 +151,15 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       });
     }
     return args;
+  };
+
+  /**
+   * B5: every tool call is activity by its actor, so it renews that actor's
+   * live claims (rate-limited inside store.touch; never fails the call).
+   */
+  const run = (args: { actor_id?: string | undefined }, fn: () => unknown): CallToolResult => {
+    store.touch(opts.bindActor === true ? undefined : args.actor_id);
+    return wrap(fn);
   };
 
   const server = new McpServer(
@@ -181,7 +192,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: CreateOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.create(bind(args))),
+    (args) => run(args, () => store.create(bind(args))),
   );
 
   server.registerTool(
@@ -197,7 +208,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: ApplyOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.apply(bind(args))),
+    (args) => run(args, () => store.apply(bind(args))),
   );
 
   server.registerTool(
@@ -213,7 +224,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: UpdateOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.update(bind(args))),
+    (args) => run(args, () => store.update(bind(args))),
   );
 
   server.registerTool(
@@ -237,6 +248,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       } catch (err) {
         return errorResult(err);
       }
+      store.touch(opts.bindActor === true ? undefined : args.actor_id);
       return transitionWithConfirmation(store, server, args, ctx);
     },
   );
@@ -254,7 +266,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: LinkOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.link(bind(args))),
+    (args) => run(args, () => store.link(bind(args))),
   );
 
   // ───────────────────────────── claims ─────────────────────────────
@@ -265,16 +277,16 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       title: 'Claim one or more tickets',
       description:
         'Take a lease on one or more tickets (all-or-nothing; locked in id order so concurrent claimers cannot deadlock). ' +
-        'Returns one claim_token per ticket — keep it, it is shown once and is required for every write. Leases are at most ' +
-        '600 s; refresh with sea_refresh or let them lapse. Fails with already_claimed (naming the holder and expiry) if any ' +
-        'ticket is held by someone else. Claiming a ticket you already hold rotates its token. Pass `scope.paths` (the files ' +
+        'Returns one claim_token per ticket — keep it, it is shown once and is required for every write. Leases (default 900 s, ' +
+        'max 3600 s) renew while you keep calling sea-lite tools; otherwise they lapse. Fails with already_claimed (naming the ' +
+        'holder and expiry) if any ticket is held by someone else. Claiming a ticket you already hold rotates its token. Pass `scope.paths` (the files ' +
         'or directories you will edit; a worktree is a scope) to lock them for the lease: refused with scope_conflict, naming ' +
-        'the holder, ticket, overlapping paths and expiry, if they overlap another actor\'s live scope.',
+        'the holder, ticket, overlapping paths and expiry, if they overlap someone else\'s live scope (another actor, or this actor in another session).',
       inputSchema: ClaimInput,
       outputSchema: ClaimOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.claim(bind(args))),
+    (args) => run(args, () => store.claim(bind(args))),
   );
 
   server.registerTool(
@@ -282,13 +294,13 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     {
       title: 'Extend a claim lease',
       description:
-        'Heartbeat: set the lease expiry to now + extend_by_seconds (≤ 600) if that is later than the current expiry; never ' +
-        "shortens. Holder-only. Not recorded on the chain, so heartbeats do not flood anyone's orient delta.",
+        'Heartbeat: set the lease expiry to now + extend_by_seconds (default: the claim\'s lease; ≤ 3600) if later than the ' +
+        "current expiry; never shortens. Holder-only. Any sea-lite call renews your claims anyway. Not chained.",
       inputSchema: RefreshInput,
       outputSchema: RefreshOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.refresh(bind(args))),
+    (args) => run(args, () => store.refresh(bind(args))),
   );
 
   server.registerTool(
@@ -303,7 +315,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: ReleaseOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.release(bind(args))),
+    (args) => run(args, () => store.release(bind(args))),
   );
 
   server.registerTool(
@@ -314,13 +326,13 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'Dispatch: atomically pick and claim the highest-priority unclaimed triaged or in_progress ticket that is assigned ' +
         'to you or unassigned, is not priority parked, and whose predecessors (tickets that `blocks` it, tickets it ' +
         '`depends_on`) are all terminal. in_progress beats triaged at equal priority; then oldest (chain order) first. Returns ticket + ' +
-        'claim_token, or ticket: null with reason nothing_eligible. Call it in a loop. `scope.paths` locks the paths you will ' +
-        'edit for the lease (scope_conflict if they overlap another actor\'s live scope).',
+        'claim_token, or ticket: null with reason nothing_eligible. This project only. Call it in a loop. `scope.paths` locks ' +
+        'the paths you will edit for the lease (scope_conflict if they overlap someone else\'s live scope).',
       inputSchema: NextInput,
       outputSchema: NextOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.next(bind(args))),
+    (args) => run(args, () => store.next(bind(args))),
   );
 
   // ───────────────────────────── reads ─────────────────────────────
@@ -336,7 +348,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: GetOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.get(bind(args))),
+    (args) => run(args, () => store.get(bind(args))),
   );
 
   server.registerTool(
@@ -345,13 +357,14 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       title: 'List and search tickets',
       description:
         'Filter by status (default: every non-terminal), kind, priority, assignee ("me" / "none"), tag, claim state ' +
-        '(any / yes / no / mine), and/or full-text `query` over title and body. Paginated with an opaque cursor. ' +
+        '(any / yes / no / mine), and/or full-text `query` over title and body. This project only unless `project` says ' +
+        'otherwise. Paginated with an opaque cursor. ' +
         '`view: compact` (default) omits bodies. Ordered by priority then recency, or by relevance when querying.',
       inputSchema: ListInput,
       outputSchema: ListOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.list(bind(args))),
+    (args) => run(args, () => store.list(bind(args))),
   );
 
   server.registerTool(
@@ -366,7 +379,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: HistoryOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.history(bind(args))),
+    (args) => run(args, () => store.history(bind(args))),
   );
 
   server.registerTool(
@@ -374,14 +387,14 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     {
       title: 'Check paths against live claim scopes',
       description:
-        'Would editing these paths collide with a scope another actor holds right now? Returns { ok, conflicts } naming each ' +
-        'holder, ticket, the overlapping entries and the expiry. No claim is taken or needed and your own scopes never ' +
-        'conflict. Meant for an edit hook (PreToolUse on Edit/Write) and for checking before you touch a file outside your claim.',
+        'Would editing these paths collide with a scope someone else holds right now (another actor, or this actor in another ' +
+        'session)? Returns { ok, conflicts } naming each holder, ticket, the overlapping entries and the expiry. No claim is ' +
+        'taken or needed and your own scopes never conflict. Use before you touch a file outside your claim.',
       inputSchema: ScopeCheckInput,
       outputSchema: ScopeCheckOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.scopeCheck(bind(args))),
+    (args) => run(args, () => store.scopeCheck(bind(args))),
   );
 
   server.registerTool(
@@ -396,7 +409,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: StatsOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.stats(bind(args))),
+    (args) => run(args, () => store.stats(bind(args))),
   );
 
   // ───────────────────────────── resource ─────────────────────────────

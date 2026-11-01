@@ -3,7 +3,25 @@
  * module is for embedding the queue or building another transport.
  */
 
-export { SeaLite, ensureSeaSchema, parseRole, parseTracks, DEFAULT_ACTOR, type SeaLiteOptions } from './store.js';
+export { SeaLite, ensureSeaSchema, parseRole, parseTracks, DEFAULT_ACTOR, TOUCH_INTERVAL_MS, type SeaLiteOptions } from './store.js';
+export {
+  holderLabel,
+  shortSession,
+  sameOwner,
+  sessionKeyFromEnv,
+  newInstanceSession,
+  registerInstance,
+  listInstances,
+  resolveIdentity as resolveCliIdentity,
+  ancestors,
+  pidAlive,
+  SESSIONS_DIR,
+  type Owner,
+  type InstanceEntry,
+  type ResolvedIdentity,
+  type IdentitySource,
+} from './core/identity.js';
+export { projectKeyFor, resolveProject, findRepo, normalizeRemote, originUrl, ALL_PROJECTS, type RepoInfo } from './core/project.js';
 export { createServer, errorResult, type ServerOptions } from './server.js';
 export {
   serveHttp,
@@ -44,9 +62,9 @@ export {
 } from './core/fence.js';
 export { EVENT, SEA_EVENT_TYPES, SEA_EVENT_PREFIXES, IDEMPOTENCY_PREFIX, isSeaEventType, type SeaEventType } from './core/events.js';
 export type { Ticket, TicketCompact, TicketRow, LinkRow, LinkView, NoteRow, ClaimView } from './core/types.js';
-export type { Ctx } from './core/repo.js';
+export { ownsClaim, projectFilter, type Ctx } from './core/repo.js';
 export type { CreateResult, ApplyResult, UpdateResult, TransitionResult, GetResult, ListResult, LinkWithPeer } from './handlers/tickets.js';
-export type { ClaimResult, RefreshResult, ReleaseResult, NextResult, ScopeCheckResult, ScopeConflict, ReleaseWorktreeResult } from './handlers/claims.js';
+export type { ClaimResult, RefreshResult, ReleaseResult, NextResult, ScopeCheckResult, ScopeConflict, ReleaseWorktreeResult, HeartbeatResult } from './handlers/claims.js';
 export { findScopeConflicts, assertScopeFree } from './handlers/claims.js';
 export {
   normalizeScope,

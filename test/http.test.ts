@@ -1,5 +1,5 @@
 /**
- * Streamable HTTP: 2026-07-28 only, bearer, loopback, per-request identity
+ * Streamable HTTP: 2026-07-28 plus the stateless 2025 fallback (0.4.0), bearer, loopback, per-request identity
  * (shared bearer → --actor, unbound; actors-file token → its own actor, bound).
  */
 
@@ -119,7 +119,7 @@ describe('tokens and the actors file', () => {
   });
 });
 
-describe('Streamable HTTP (2026-07-28 only, bearer, loopback, per-request actor)', () => {
+describe('Streamable HTTP (2026-07-28 + legacy fallback, bearer, loopback, per-request actor)', () => {
   let store: SeaLite;
   let dir: string;
   let http: HttpServeHandle;
@@ -229,22 +229,47 @@ describe('Streamable HTTP (2026-07-28 only, bearer, loopback, per-request actor)
     expect(status).toBe(403);
   });
 
-  it('a 2025-era initialize POST is refused with 400 / -32022 naming 2026-07-28, no session id', async () => {
-    const res = await fetch(http.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${bearer}` },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'old', version: '1' } },
-      }),
-    });
-    expect(res.status).toBe(400);
-    const json = (await res.json()) as { error: { code: number; data?: { supported?: string[] } } };
-    expect(json.error.code).toBe(-32022);
-    expect(json.error.data?.supported).toEqual([MODERN]);
-    expect(res.headers.get('mcp-session-id')).toBeNull();
+  it('H2: a 2025-era client (SDK v1, initialize handshake: Cursor today) is served, with its token\'s identity', async () => {
+    const { Client: V1Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+    const { StreamableHTTPClientTransport: V1Http } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+    const client = new V1Client({ name: 'cursor-like', version: '1' });
+    const transport = new V1Http(new URL(http.url), { requestInit: { headers: { Authorization: `Bearer ${aliceToken}` } } });
+    await client.connect(transport);
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((t) => t.name).sort()).toEqual(TOOLS);
+      const created = await client.callTool({ name: 'sea_create', arguments: { title: 'from a 2025 client' } });
+      expect(parse<{ ticket: { created_by: string } }>(created).ticket.created_by).toBe('alice');
+      // The token binds the actor on this era too.
+      const forged = await client.callTool({ name: 'sea_create', arguments: { title: 'x', actor_id: 'bob' } });
+      expect(forged.isError).toBe(true);
+      expect(parse<{ error: string }>(forged).error).toBe('forbidden');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('`legacy: reject` keeps the modern-only endpoint: a 2025 initialize POST → 400 / -32022 naming 2026-07-28', async () => {
+    const strict = await serveHttp({ store, bearer, port: 0, legacy: 'reject' });
+    try {
+      const res = await fetch(strict.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${bearer}` },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'old', version: '1' } },
+        }),
+      });
+      expect(res.status).toBe(400);
+      const json = (await res.json()) as { error: { code: number; data?: { supported?: string[] } } };
+      expect(json.error.code).toBe(-32022);
+      expect(json.error.data?.supported).toEqual([MODERN]);
+      expect(res.headers.get('mcp-session-id')).toBeNull();
+    } finally {
+      await strict.close();
+    }
   });
 
   it('modern raw POST from a loopback Origin gets a plain JSON result, cache hints and no session id', async () => {

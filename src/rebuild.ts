@@ -13,7 +13,7 @@
 import type { Chain, ChainEvent, Db } from 'kronicle-lite';
 
 import { EVENT } from './core/events.js';
-import { SEA_DROP_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
+import { SEA_DROP_SQL, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
 
 export interface RebuildResult {
   events_seen: number;
@@ -35,8 +35,8 @@ export function applySeaEvent(db: Db, ev: ChainEvent): boolean {
     case EVENT.ticket_created: {
       db.prepare(
         `INSERT OR REPLACE INTO sea_tickets (id, kind, title, body, status, priority, tags, assignee, duplicate_of, created_by,
-           created_at, updated_at, row_version, created_seq, last_seq)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?)`,
+           created_at, updated_at, row_version, project, created_seq, last_seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?)`,
       ).run(
         s(p['ticket_id']),
         s(p['kind']),
@@ -49,6 +49,7 @@ export function applySeaEvent(db: Db, ev: ChainEvent): boolean {
         s(p['created_by']) ?? ev.actor_id,
         s(p['created_at']) ?? ev.occurred_at,
         s(p['created_at']) ?? ev.occurred_at,
+        s(p['project']),
         ev.seq,
         ev.seq,
       );
@@ -90,8 +91,18 @@ export function applySeaEvent(db: Db, ev: ChainEvent): boolean {
       const scopeJson = scope && typeof scope === 'object' && Array.isArray(scope.paths) ? JSON.stringify(scope.paths) : null;
       db.prepare(
         `UPDATE sea_tickets SET claim_token_hash = ?, claim_actor = ?, claim_expires_at = ?, claim_write_count = 0, claim_scope = ?,
-          claim_worktree = ?, last_seq = ? WHERE id = ?`,
-      ).run(s(p['claim_token_hash']), s(p['claim_actor']) ?? ev.actor_id, s(p['expires_at']), scopeJson, s(p['worktree']), ev.seq, s(p['ticket_id']));
+          claim_worktree = ?, claim_session = ?, claim_lease_seconds = ?, last_seq = ? WHERE id = ?`,
+      ).run(
+        s(p['claim_token_hash']),
+        s(p['claim_actor']) ?? ev.actor_id,
+        s(p['expires_at']),
+        scopeJson,
+        s(p['worktree']),
+        s(p['claim_session']),
+        typeof p['lease_seconds'] === 'number' ? p['lease_seconds'] : null,
+        ev.seq,
+        s(p['ticket_id']),
+      );
       return true;
     }
     case EVENT.ticket_claim_released:
@@ -144,12 +155,12 @@ export function applySeaEvent(db: Db, ev: ChainEvent): boolean {
 function clearClaim(db: Db, id: string, seq: number | null): void {
   if (seq === null) {
     db.prepare(
-      `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL WHERE id = ?`,
+      `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL, claim_session = NULL, claim_lease_seconds = NULL WHERE id = ?`,
     ).run(id);
   } else {
     db.prepare(
       `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL,
-         last_seq = ? WHERE id = ?`,
+         claim_session = NULL, claim_lease_seconds = NULL, last_seq = ? WHERE id = ?`,
     ).run(seq, id);
   }
 }
@@ -159,6 +170,7 @@ export function rebuild(db: Db, chain: Chain): RebuildResult {
   const run = db.transaction((): RebuildResult => {
     db.exec(SEA_DROP_SQL);
     db.exec(SEA_SCHEMA_SQL);
+    db.exec(SEA_POST_MIGRATION_SQL);
     db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`).run(SEA_SCHEMA_META_KEY, String(SEA_SCHEMA_VERSION));
     let seen = 0;
     let applied = 0;

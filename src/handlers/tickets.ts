@@ -16,6 +16,8 @@ import {
   checkVersion,
   mustGetRow,
   notesFor,
+  ownsClaim,
+  projectFilter,
   resolveId,
   sweepAllExpired,
   sweepExpired,
@@ -63,6 +65,8 @@ interface CreatedPayload {
   assignee: string | null;
   created_by: string;
   created_at: string;
+  /** 0.4.0: present only when the creator works in a project. */
+  project?: string;
   batch_id?: string;
   ref?: string;
 }
@@ -83,6 +87,7 @@ function ticketFromCreatedPayload(p: CreatedPayload, seq: number): Ticket {
     updated_at: p.created_at,
     row_version: 1,
     claim: null,
+    project: p.project ?? null,
     created_seq: seq,
     last_seq: seq,
   };
@@ -117,6 +122,7 @@ function insertTicket(
     assignee: fields.assignee ?? null,
     created_by: ctx.actor,
     created_at,
+    ...(ctx.project !== null ? { project: ctx.project } : {}),
     ...extra,
   };
   const r = ctx.chain.append({
@@ -129,8 +135,8 @@ function insertTicket(
   ctx.db
     .prepare(
       `INSERT INTO sea_tickets (id, kind, title, body, status, priority, tags, assignee, duplicate_of, created_by,
-         created_at, updated_at, row_version, created_seq, last_seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?)`,
+         created_at, updated_at, row_version, project, created_seq, last_seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?)`,
     )
     .run(
       id,
@@ -144,6 +150,7 @@ function insertTicket(
       ctx.actor,
       created_at,
       created_at,
+      ctx.project,
       r.event.seq,
       r.event.seq,
     );
@@ -162,7 +169,7 @@ export function placeClaim(
   const token = newClaimToken();
   const token_hash = hashToken(token);
   const expires_at = expiryFrom(ctx.now, lease_seconds);
-  const rotated = row.claim_token_hash !== null && row.claim_actor === ctx.actor;
+  const rotated = row.claim_token_hash !== null && ownsClaim({ actor: ctx.actor, session: ctx.session }, row.claim_actor, row.claim_session);
   const r = ctx.chain.append({
     event_type: EVENT.ticket_claimed,
     actor_id: ctx.actor,
@@ -177,15 +184,17 @@ export function placeClaim(
       scope,
       // Present only on worktree-bound claims, so unbound payloads are unchanged.
       ...(worktree !== null ? { worktree } : {}),
+      // 0.4.0: present only when the holder has a session, so session-less payloads are unchanged.
+      ...(ctx.session !== null ? { claim_session: ctx.session } : {}),
       ...extra,
     },
   });
   ctx.db
     .prepare(
       `UPDATE sea_tickets SET claim_token_hash = ?, claim_actor = ?, claim_expires_at = ?, claim_write_count = 0, claim_scope = ?,
-         claim_worktree = ?, last_seq = ? WHERE id = ?`,
+         claim_worktree = ?, claim_session = ?, claim_lease_seconds = ?, last_seq = ? WHERE id = ?`,
     )
-    .run(token_hash, ctx.actor, expires_at, scope ? JSON.stringify(scope.paths) : null, worktree, r.event.seq, row.id);
+    .run(token_hash, ctx.actor, expires_at, scope ? JSON.stringify(scope.paths) : null, worktree, ctx.session, lease_seconds, r.event.seq, row.id);
   return { token, expires_at, seq: r.event.seq };
 }
 
@@ -227,6 +236,7 @@ export function create(ctx: Ctx, input: CreateInput): CreateResult {
         updated_at: ctx.now.toISOString(),
         row_version: 1,
         claim: null,
+        project: ctx.project,
         created_seq: 0,
         last_seq: 0,
       };
@@ -770,7 +780,8 @@ export function transition(ctx: Ctx, input: TransitionInput): TransitionResult {
     if (willRelease) {
       ctx.db
         .prepare(
-          `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL
+          `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL,
+             claim_session = NULL, claim_lease_seconds = NULL
              WHERE id = ?`,
         )
         .run(id);
@@ -881,8 +892,13 @@ export function list(ctx: Ctx, input: ListInput): ListResult {
     if (input.claimed === 'yes') where.push(`t.claim_token_hash IS NOT NULL`);
     else if (input.claimed === 'no') where.push(`t.claim_token_hash IS NULL`);
     else if (input.claimed === 'mine') {
-      where.push(`t.claim_actor = ?`);
-      params.push(ctx.actor);
+      where.push(`t.claim_actor = ?`, `t.claim_session IS ?`);
+      params.push(ctx.actor, ctx.session);
+    }
+    const pf = projectFilter(ctx, 't', input.project);
+    if (pf.sql) {
+      where.push(pf.sql);
+      params.push(...pf.params);
     }
     let fromSql = `sea_tickets t`;
     let orderSql = `CASE t.priority ${Object.entries(PRIORITY_RANK)

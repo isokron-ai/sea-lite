@@ -10,11 +10,19 @@
  * v3 (0.3.0): `sea_tickets.claim_worktree` — the absolute worktree path a
  * live claim is bound to (`scope.worktree`), so `release-worktree` can free
  * it when the worktree is removed. Added with ALTER TABLE on older stores.
+ *
+ * v4 (0.4.0): `sea_tickets.project` — the project key the ticket was created
+ * in (core/project.ts; NULL for tickets created before 0.4.0, which stay
+ * visible in every project); `claim_session` — the holder's session
+ * (core/identity.ts; a claim is the caller's own only when actor AND session
+ * match); `claim_lease_seconds` — the lease length the claim was taken with,
+ * which heartbeats renew by. All three are additive and come back on rebuild
+ * from optional payload fields.
  */
 
 import { ALL_STATES, LINK_STATES, LINK_TYPES, PRIORITIES, sqlIn, TICKET_KINDS } from '../model/enums.js';
 
-export const SEA_SCHEMA_VERSION = 3;
+export const SEA_SCHEMA_VERSION = 4;
 export const SEA_SCHEMA_META_KEY = 'sea_schema_version';
 
 export const SEA_TABLES = ['sea_tickets_fts', 'sea_notes', 'sea_links', 'sea_tickets'] as const;
@@ -40,6 +48,9 @@ CREATE TABLE IF NOT EXISTS sea_tickets (
   claim_write_count INTEGER NOT NULL DEFAULT 0,
   claim_scope       TEXT,
   claim_worktree    TEXT,
+  claim_session     TEXT,
+  claim_lease_seconds INTEGER,
+  project           TEXT,
   created_seq       INTEGER NOT NULL,
   last_seq          INTEGER NOT NULL
 );
@@ -103,7 +114,13 @@ END;
 export const SEA_MIGRATIONS: readonly { version: number; table: string; column: string; sql: string }[] = [
   { version: 2, table: 'sea_tickets', column: 'claim_scope', sql: `ALTER TABLE sea_tickets ADD COLUMN claim_scope TEXT` },
   { version: 3, table: 'sea_tickets', column: 'claim_worktree', sql: `ALTER TABLE sea_tickets ADD COLUMN claim_worktree TEXT` },
+  { version: 4, table: 'sea_tickets', column: 'claim_session', sql: `ALTER TABLE sea_tickets ADD COLUMN claim_session TEXT` },
+  { version: 4, table: 'sea_tickets', column: 'claim_lease_seconds', sql: `ALTER TABLE sea_tickets ADD COLUMN claim_lease_seconds INTEGER` },
+  { version: 4, table: 'sea_tickets', column: 'project', sql: `ALTER TABLE sea_tickets ADD COLUMN project TEXT` },
 ];
+
+/** Indexes over migrated columns: created after the migrations so an old store has the column first. */
+export const SEA_POST_MIGRATION_SQL = `CREATE INDEX IF NOT EXISTS sea_tickets_project_idx ON sea_tickets (project);`;
 
 export const SEA_DROP_SQL = `
 DROP TRIGGER IF EXISTS sea_tickets_fts_ai;

@@ -15,7 +15,7 @@ import { EVENT } from '../src/core/events.js';
 import { entriesOverlap, findOverlaps, isGlobEntry, looksLikeFile, normalizeScope, normalizeScopePath } from '../src/core/scope.js';
 import { SEA_SCHEMA_META_KEY, SEA_SCHEMA_VERSION } from '../src/db/schema.js';
 import { ensureSeaSchema, SeaLite } from '../src/store.js';
-import { claimedTicket, codeOf, fresh } from './helpers.js';
+import { claimedTicket, cleanEnv, codeOf, fresh } from './helpers.js';
 import { connectInMemory, parse, type ToolResult } from './mcp-helpers.js';
 
 function triaged(store: SeaLite, title: string, actor = 'alice'): string {
@@ -136,7 +136,15 @@ describe('scoped claims', () => {
     const id = triaged(store, 'A');
     const r = store.claim({ ticket_ids: [id], scope: { paths: ['src/handlers/', './docs'] } });
     expect(r.scope).toEqual({ paths: ['docs', 'src/handlers'] });
-    expect(store.get({ id }).ticket.claim).toEqual({ holder: 'alice', expires_at: expect.any(String), write_count: 0, scope: { paths: ['docs', 'src/handlers'] }, worktree: null });
+    expect(store.get({ id }).ticket.claim).toEqual({
+      holder: 'alice',
+      expires_at: expect.any(String),
+      write_count: 0,
+      scope: { paths: ['docs', 'src/handlers'] },
+      worktree: null,
+      session: null,
+      lease_seconds: 900,
+    });
     const listed = store.list({ include_terminal: false, claimed: 'mine', limit: 10, view: 'compact' });
     expect(listed.tickets[0]!.claim?.scope).toEqual({ paths: ['docs', 'src/handlers'] });
     const ev = [...store.chain.iterate()].find((e) => e.event_type === EVENT.ticket_claimed)!;
@@ -163,8 +171,12 @@ describe('scoped claims', () => {
       expect(err.details.conflicts).toEqual([
         {
           ticket_id: a,
+          title: 'A',
           holder: 'alice',
+          holder_session: null,
+          holder_label: 'alice',
           claim_expires_at: held.claims[0]!.expires_at,
+          expires_in_seconds: 900,
           held: ['docs/*.md', 'src/handlers'],
           overlapping: [
             { requested: 'docs/guide.md', held: 'docs/*.md' },
@@ -310,8 +322,12 @@ describe('sea_scope_check (hot path)', () => {
     expect(other.conflicts).toEqual([
       {
         ticket_id: a,
+        title: 'A',
         holder: 'alice',
+        holder_session: null,
+        holder_label: 'alice',
         claim_expires_at: expect.any(String),
+        expires_in_seconds: expect.any(Number),
         held: ['src'],
         overlapping: [{ requested: 'src/handlers/claims.ts', held: 'src' }],
       },
@@ -422,7 +438,7 @@ describe('scope over MCP and the CLI', () => {
     }
   });
 
-  it('`sea-lite scope-check` exits 0 when clear and 1 on a conflict, with --json for hooks', () => {
+  it('`sea-lite scope-check` exits 0 when clear, 1 on a conflict, 2 on bad input, with --json for hooks', () => {
     const CLI = join(process.cwd(), 'dist', 'cli.js');
     const store = new SeaLite({ dataDir: dir, actor: 'alice' });
     const id = triaged(store, 'held');
@@ -430,7 +446,7 @@ describe('scope over MCP and the CLI', () => {
     store.close();
     const run = (args: string[]) => {
       try {
-        return { code: 0, out: execFileSync(process.execPath, [CLI, 'scope-check', '--data-dir', dir, ...args], { encoding: 'utf8' }) };
+        return { code: 0, out: execFileSync(process.execPath, [CLI, 'scope-check', '--data-dir', dir, ...args], { encoding: 'utf8', env: cleanEnv() }) };
       } catch (e) {
         const err = e as { status: number; stdout: string; stderr: string };
         return { code: err.status, out: err.stdout + err.stderr };
@@ -444,6 +460,6 @@ describe('scope over MCP and the CLI', () => {
     expect(json.code).toBe(1);
     expect(JSON.parse(json.out)).toMatchObject({ ok: false, conflicts: [{ holder: 'alice' }] });
     expect(run(['lib/x.ts', '--actor', 'bob'])).toMatchObject({ code: 0 });
-    expect(run(['--actor', 'bob']).code).toBe(1); // no paths: usage error
+    expect(run(['--actor', 'bob']).code).toBe(2); // no paths: usage error (0.4.0: 2, so a hook can tell it from a conflict)
   });
 });

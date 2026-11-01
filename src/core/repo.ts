@@ -12,6 +12,7 @@ import type { Role } from '../model/enums.js';
 import { EVENT } from './events.js';
 import { SeaError, notFound } from './errors.js';
 import { isExpired } from './fence.js';
+import { sameOwner } from './identity.js';
 import { parseScopeJson } from './scope.js';
 import type { LinkRow, NoteRow, TicketRow } from './types.js';
 
@@ -20,9 +21,40 @@ export interface Ctx {
   readonly chain: Chain;
   /** Actor for this call (per-call override already applied). */
   readonly actor: string;
+  /**
+   * The caller's session (core/identity.ts), or null when unknown (library
+   * use, HTTP, a human at a terminal). A claim is the caller's own only when
+   * actor and session both match.
+   */
+  readonly session: string | null;
+  /**
+   * A hook speaks for a whole agent session (main agent and subagents alike):
+   * when set, every claim held under `session` counts as the caller's own,
+   * whatever its actor label. Only the CLI's scope-check / precommit set it.
+   */
+  readonly sessionWide?: boolean;
+  /** Project key (core/project.ts), or null for every project (pre-0.4 behaviour). */
+  readonly project: string | null;
   readonly role: Role;
   readonly lifecycle: LifecycleConfig;
   readonly now: Date;
+}
+
+/** Is the claim on this row held by the caller? (See Ctx.session / Ctx.sessionWide.) */
+export function ownsClaim(ctx: Pick<Ctx, 'actor' | 'session' | 'sessionWide'>, holderActor: string | null, holderSession: string | null): boolean {
+  if (ctx.sessionWide === true && ctx.session !== null) return holderSession === ctx.session;
+  return sameOwner(holderActor, holderSession, { actor: ctx.actor, session: ctx.session });
+}
+
+/**
+ * SQL filter for "tickets of the current project": its own plus legacy
+ * tickets that carry no project. `project` overrides ctx.project; `*` (or a
+ * null ctx.project) means every project.
+ */
+export function projectFilter(ctx: Pick<Ctx, 'project'>, alias = 't', override?: string): { sql: string | null; params: unknown[] } {
+  const p = override !== undefined ? (override === '*' ? null : override) : ctx.project;
+  if (p === null) return { sql: null, params: [] };
+  return { sql: `(${alias}.project = ? OR ${alias}.project IS NULL)`, params: [p] };
 }
 
 export function uuid(): string {
@@ -80,7 +112,7 @@ export function sweepExpired(ctx: Ctx, row: TicketRow): TicketRow {
   ctx.db
     .prepare(
       `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL,
-         claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL, last_seq = ? WHERE id = ?`,
+         claim_write_count = 0, claim_scope = NULL, claim_worktree = NULL, claim_session = NULL, claim_lease_seconds = NULL, last_seq = ? WHERE id = ?`,
     )
     .run(r.event.seq, row.id);
   return mustGetRow(ctx.db, row.id);
