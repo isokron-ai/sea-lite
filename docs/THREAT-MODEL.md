@@ -37,7 +37,9 @@ that was `alice` a minute ago. The `fence_foreign_holder` check exists so a
 token that leaks into another agent's context (a pasted log, a shared
 scratchpad) is refused unless that agent also impersonates the holder; it is
 defence in depth, not identity. If two agents are hostile to each other, the
-fence does not separate them.
+fence does not separate them. The one exception is an actor token over
+`serve --http` (below): there the actor is bound to the credential, though
+it is still one trust domain.
 
 **`--role operator` is self-asserted.** Whoever starts the server picks the
 role. Force release is gated on it so an *agent* configured as an agent cannot
@@ -73,6 +75,71 @@ agents are not fully trusted with each other's results.
 
 **Dedup is advisory.** `possible_duplicates` on create is an FTS/exact-title
 hint. It never blocks, and it can miss paraphrases.
+
+## HTTP transport (`serve --http`)
+
+The Streamable HTTP mode (0.3.0) mirrors kronicle-lite's. It does not change
+the trust domain; it changes who can reach the process and, with actor
+tokens, ties an actor label to a credential. Be precise about what the knobs
+do.
+
+**Loopback by default.** The server binds `127.0.0.1:7418` unless `--host` /
+`--port` say otherwise. The `Host` header must name the bound host or
+loopback, and the `Origin` header, when a browser sends one, must be
+loopback or in `--allow-origin` — both are checked before the bearer is
+looked at (DNS-rebinding defence per the Streamable HTTP spec). Binding
+`0.0.0.0` or a LAN address is your decision: add the hostnames clients will
+use with `--allow-host` and put TLS in front. sea-lite does not do TLS; a
+bearer on plain HTTP off-box is a bearer anyone on the path can read.
+
+**The shared bearer.** `<data dir>/http-bearer.token` (created with mode
+`0600` when absent; or `--bearer` / `--bearer-file`). It is the same file
+kronicle-lite's `serve --http` uses: one data dir, one store, one owner
+secret. A request presenting it acts as the server's `--actor` with the
+server's `--role`, and a per-call `actor_id` is a self-asserted label —
+exactly the stdio posture. Holding it is holding the whole store. Rotate by
+deleting the file and restarting.
+
+**Actor tokens.** `sea-lite add-token --actor alice` mints a 256-bit token,
+appends its SHA-256 (never the token) to `<data dir>/http-actors.json`
+(mode `0600`) and prints the token once. A request presenting it acts as
+`alice` with that entry's role (default `agent`), and a per-call `actor_id`
+naming anyone else is refused with `forbidden`. That makes claim holders,
+`created_by`, notes, chain `actor_id` and `sea_stats` attributable to a
+credential rather than a label — the basis for per-seat accounting.
+Comparison is constant-time over every entry (SHA-256 digests, no early
+exit). An entry's `role: operator` is what lets that token force-release.
+Rotate a token by deleting its entry and running `add-token` again;
+restart the server to pick up changes (the file is read at start).
+
+**What actor tokens do not give you.**
+
+- *Single trust domain.* Every token reaches the same store with the same
+  tool surface. There are no per-ticket ACLs, no read isolation (alice can
+  `sea_list` and `sea_history` everything), no rate limits, no quotas. An
+  actor token stops alice from writing *as bob*; it does not stop alice
+  from doing anything bob could do as herself.
+- *The chain is not signed per actor.* Events are appended by the server
+  process; the `actor_id` on them is what the server resolved from the
+  token. Anyone with the SQLite file, the shared bearer or a stdio session
+  can still write events under any label. `sea_stats` is accounting for a
+  cooperative team, not evidence against a hostile one.
+- *No revocation list, no expiry.* A token is valid until its entry is
+  removed and the server restarted.
+- *The shared bearer outranks them.* It is the owner credential; do not
+  hand it to teammates — give each one an actor token.
+
+**Stateless, 2026-07-28 only.** No session id is minted or honored; `GET` and
+`DELETE` answer `405`; every request carries its own protocol version and
+client capabilities. A 2025-era client that sends `initialize` gets `400`
+with `UnsupportedProtocolVersionError` (`-32022`) naming `2026-07-28`; point
+it at stdio, which serves both eras. Each request gets a fresh MCP server
+instance over a per-identity view of the one open store.
+
+**What it is for.** A client on the same machine that cannot spawn a process,
+several agents sharing one queue server with per-agent credentials, or a
+trusted team box reached over a tunnel you already protect. It is not, by
+itself, a multi-tenant service. Treat every token like an SSH key.
 
 ## Operational advice
 

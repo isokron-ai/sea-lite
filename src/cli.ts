@@ -3,6 +3,8 @@
  * sea-lite CLI
  *
  *   sea-lite serve   [--data-dir DIR] [--actor ID] [--role agent|operator] [--tracks work,design]
+ *   sea-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--actors-file F] [--allow-origin H,..] [--allow-host H,..]
+ *   sea-lite add-token --actor ID [--role agent|operator] [--actors-file F]   mint a per-actor HTTP token (shown once)
  *   sea-lite list    [--data-dir DIR] [--status S,S] [--all] [--query Q] [--json]
  *   sea-lite show ID [--data-dir DIR] [--json]
  *   sea-lite rebuild [--data-dir DIR]        drop + replay sea tables from the chain
@@ -12,10 +14,22 @@
 
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { defaultDataDir } from 'kronicle-lite';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { SeaError } from './core/errors.js';
 import type { TicketCompact, Ticket } from './core/types.js';
 import { ALL_STATES, type TicketStatus } from './model/enums.js';
+import {
+  ACTORS_FILE_NAME,
+  addActorToken,
+  DEFAULT_HTTP_PORT,
+  loadOrCreateBearer,
+  readActorsFile,
+  readBearerFile,
+  serveHttp,
+  type ActorToken,
+} from './http.js';
 import { createServer } from './server.js';
 import { parseRole, parseTracks, SeaLite } from './store.js';
 
@@ -54,10 +68,33 @@ function str(v: string | true | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
+function num(v: string | true | undefined, flag: string): number | undefined {
+  if (typeof v !== 'string') return undefined;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) throw new SeaError('invalid_input', `--${flag} must be a non-negative integer, got "${v}"`);
+  return n;
+}
+
+/** Comma-separated flag values. */
+function list(v: string | true | undefined): string[] {
+  return typeof v === 'string' ? v.split(',').map((x) => x.trim()).filter((x) => x.length > 0) : [];
+}
+
+function dataDirOf(flags: Args['flags']): string {
+  return str(flags['data-dir']) ?? defaultDataDir();
+}
+
 const HELP = `sea-lite ${VERSION} — a work queue for parallel coding agents that can't collide
 
 Usage:
   sea-lite serve   [--data-dir DIR] [--actor ID] [--role agent|operator] [--tracks work,design]
+  sea-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--actors-file F]
+                   [--allow-origin H,..] [--allow-host H,..]
+                                        Streamable HTTP (2026-07-28 only) on 127.0.0.1:${DEFAULT_HTTP_PORT}/mcp; shared
+                                        bearer from DIR/http-bearer.token (created 0600) acts as --actor;
+                                        per-actor tokens from DIR/http-actors.json (or --actors-file)
+  sea-lite add-token --actor ID [--role agent|operator] [--actors-file F]
+                                        mint a per-actor HTTP token, store its sha256 (file 0600), print it once
   sea-lite list    [--data-dir DIR] [--status S,S] [--all] [--query Q] [--json]
   sea-lite show ID [--data-dir DIR] [--json]
   sea-lite rebuild [--data-dir DIR]     drop the sea tables and replay them from the chain
@@ -102,6 +139,7 @@ async function main(argv: string[]): Promise<number> {
   switch (cmd) {
     case 'serve': {
       const store = openStore(flags);
+      if (flags['http']) return serveHttpCmd(store, flags);
       process.stderr.write(
         `sea-lite ${VERSION} serving on stdio; data dir ${store.kronicle.dataDir}; actor ${store.actor}; role ${store.role}; tracks ${store.lifecycle.tracks.join(',')}\n`,
       );
@@ -208,10 +246,71 @@ async function main(argv: string[]): Promise<number> {
       store.close();
       return r.ok ? 0 : 1;
     }
+    case 'add-token': {
+      const actor = str(flags['actor']);
+      if (actor === undefined) throw new SeaError('invalid_input', 'add-token needs --actor ID');
+      const role = str(flags['role']);
+      const file = str(flags['actors-file']) ?? join(dataDirOf(flags), ACTORS_FILE_NAME);
+      const r = addActorToken(file, actor, role !== undefined ? parseRole(role) : undefined);
+      process.stderr.write(`token for "${actor}" added to ${r.file}${r.created ? ' (created, mode 0600)' : ''}; only its sha256 is stored, so copy it now:\n`);
+      process.stdout.write(r.token + '\n');
+      return 0;
+    }
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 2;
   }
+}
+
+async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<number> {
+  const dataDir = store.kronicle.dataDir ?? dataDirOf(flags);
+  let bearer: string;
+  let bearerNote: string;
+  if (str(flags['bearer']) !== undefined) {
+    bearer = str(flags['bearer'])!;
+    bearerNote = 'bearer from --bearer';
+  } else if (str(flags['bearer-file']) !== undefined) {
+    bearer = readBearerFile(str(flags['bearer-file'])!);
+    bearerNote = `bearer from ${str(flags['bearer-file'])}`;
+  } else {
+    const b = loadOrCreateBearer(dataDir);
+    bearer = b.token;
+    bearerNote = `bearer from ${b.file}${b.created ? ' (created, mode 0600)' : ''}`;
+  }
+  const explicitActors = str(flags['actors-file']);
+  const actorsFile = explicitActors ?? join(dataDir, ACTORS_FILE_NAME);
+  let actors: ActorToken[] = [];
+  if (explicitActors !== undefined || existsSync(actorsFile)) {
+    actors = readActorsFile(actorsFile);
+    bearerNote += `; ${actors.length} actor token(s) from ${actorsFile}`;
+  }
+  const allowedOrigins = list(flags['allow-origin']);
+  const allowedHosts = list(flags['allow-host']);
+  const port = num(flags['port'], 'port');
+  const handle = await serveHttp({
+    store,
+    bearer,
+    actors,
+    version: VERSION,
+    ...(str(flags['host']) !== undefined ? { host: str(flags['host'])! } : {}),
+    ...(port !== undefined ? { port } : {}),
+    ...(allowedOrigins.length > 0 ? { allowedOrigins } : {}),
+    ...(allowedHosts.length > 0 ? { allowedHosts } : {}),
+    onerror: (err) => process.stderr.write(`http: ${err.message}\n`),
+  });
+  process.stderr.write(
+    `sea-lite ${VERSION} serving Streamable HTTP (2026-07-28) at ${handle.url}; ${bearerNote}; data dir ${dataDir}; ` +
+      `default actor ${store.actor}; role ${store.role}\n`,
+  );
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      handle.close().finally(resolve);
+    };
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  });
+  store.close();
+  return 0;
 }
 
 main(process.argv.slice(2)).then(

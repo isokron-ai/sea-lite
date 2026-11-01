@@ -5,6 +5,25 @@
 
 export { SeaLite, ensureSeaSchema, parseRole, parseTracks, DEFAULT_ACTOR, type SeaLiteOptions } from './store.js';
 export { createServer, errorResult, type ServerOptions } from './server.js';
+export {
+  serveHttp,
+  createHttpListener,
+  loadOrCreateBearer,
+  readBearerFile,
+  parseActorsFile,
+  readActorsFile,
+  addActorToken,
+  tokenSha256,
+  resolveIdentity,
+  DEFAULT_HTTP_PORT,
+  DEFAULT_HTTP_PATH,
+  BEARER_FILE_NAME,
+  ACTORS_FILE_NAME,
+  type HttpServeOptions,
+  type HttpServeHandle,
+  type HttpIdentity,
+  type ActorToken,
+} from './http.js';
 export { rebuild, verifySea, applySeaEvent, type RebuildResult, type SeaVerifyResult } from './rebuild.js';
 export { SEA_SCHEMA_SQL, SEA_DROP_SQL, SEA_SCHEMA_VERSION, SEA_SCHEMA_META_KEY, SEA_TABLES, SEA_MIGRATIONS } from './db/schema.js';
 export * from './model/enums.js';

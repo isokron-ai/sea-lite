@@ -86,6 +86,26 @@ export class SeaLite {
     if (this.ownsKronicle) this.kronicle.close();
   }
 
+  /**
+   * A view over this open store with another default actor (and role). Shares
+   * the connection, the clock and the lifecycle; `close()` on the view is a
+   * no-op. The HTTP transport builds one per request from the bearer token.
+   */
+  as(actor: string, role: Role = this.role): SeaLite {
+    const view = Object.create(SeaLite.prototype) as SeaLite;
+    Object.assign(view, {
+      kronicle: this.kronicle,
+      db: this.db,
+      chain: this.chain,
+      actor,
+      role,
+      lifecycle: this.lifecycle,
+      ownsKronicle: false,
+      clock: this.clock,
+    });
+    return view;
+  }
+
   ctx(actor_id?: string): Ctx {
     return {
       db: this.db,

@@ -63,6 +63,13 @@ import { VERSION } from './version.js';
 
 export interface ServerOptions {
   version?: string;
+  /**
+   * The store's actor is an authenticated identity (an HTTP actor token), not
+   * a default: a per-call `actor_id` naming anyone else is refused with
+   * `forbidden`. Off for stdio and the shared HTTP bearer, where actor_id is
+   * a self-asserted label.
+   */
+  bindActor?: boolean;
 }
 
 /** Catalog results change only with a release; a client may cache them for an hour, shared. */
@@ -131,6 +138,17 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     throw new Error(`sea-lite: server instructions are ${instructions.length} chars; the limit is ${MAX_INSTRUCTIONS_CHARS}`);
   }
 
+  /** Enforce `bindActor`: a bound connection may only act as its own actor. */
+  const bind = <T extends { actor_id?: string | undefined }>(args: T): T => {
+    if (opts.bindActor === true && args.actor_id !== undefined && args.actor_id !== store.actor) {
+      throw new SeaError('forbidden', `this connection is authenticated as "${store.actor}"; actor_id "${args.actor_id}" is not allowed`, {
+        actor: store.actor,
+        actor_id: args.actor_id,
+      });
+    }
+    return args;
+  };
+
   const server = new McpServer(
     { name: 'sea-lite', version: opts.version ?? VERSION },
     {
@@ -161,7 +179,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: CreateOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.create(args)),
+    (args) => wrap(() => store.create(bind(args))),
   );
 
   server.registerTool(
@@ -177,7 +195,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: ApplyOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.apply(args)),
+    (args) => wrap(() => store.apply(bind(args))),
   );
 
   server.registerTool(
@@ -193,7 +211,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: UpdateOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.update(args)),
+    (args) => wrap(() => store.update(bind(args))),
   );
 
   server.registerTool(
@@ -211,7 +229,14 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: TransitionOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    (args, ctx) => transitionWithConfirmation(store, server, args, ctx),
+    (args, ctx) => {
+      try {
+        bind(args);
+      } catch (err) {
+        return errorResult(err);
+      }
+      return transitionWithConfirmation(store, server, args, ctx);
+    },
   );
 
   server.registerTool(
@@ -227,7 +252,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: LinkOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.link(args)),
+    (args) => wrap(() => store.link(bind(args))),
   );
 
   // ───────────────────────────── claims ─────────────────────────────
@@ -247,7 +272,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: ClaimOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.claim(args)),
+    (args) => wrap(() => store.claim(bind(args))),
   );
 
   server.registerTool(
@@ -261,7 +286,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: RefreshOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.refresh(args)),
+    (args) => wrap(() => store.refresh(bind(args))),
   );
 
   server.registerTool(
@@ -276,7 +301,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: ReleaseOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.release(args)),
+    (args) => wrap(() => store.release(bind(args))),
   );
 
   server.registerTool(
@@ -293,7 +318,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: NextOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => wrap(() => store.next(args)),
+    (args) => wrap(() => store.next(bind(args))),
   );
 
   // ───────────────────────────── reads ─────────────────────────────
@@ -309,7 +334,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: GetOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.get(args)),
+    (args) => wrap(() => store.get(bind(args))),
   );
 
   server.registerTool(
@@ -324,7 +349,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: ListOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.list(args)),
+    (args) => wrap(() => store.list(bind(args))),
   );
 
   server.registerTool(
@@ -339,7 +364,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: HistoryOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.history(args)),
+    (args) => wrap(() => store.history(bind(args))),
   );
 
   server.registerTool(
@@ -354,7 +379,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       outputSchema: ScopeCheckOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => wrap(() => store.scopeCheck(args)),
+    (args) => wrap(() => store.scopeCheck(bind(args))),
   );
 
   // ───────────────────────────── resource ─────────────────────────────
