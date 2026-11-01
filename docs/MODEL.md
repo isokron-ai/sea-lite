@@ -109,6 +109,13 @@ A bulk `sea_transition` keys item k as `<key>#k`, one
 any batch: the key replays the expanded batch it first wrote (templates are
 expanded before anything is chained, so no event records a template).
 
+A key is bound to its request: the keyed event's payload carries
+`request_hash` (sha256 of the RFC 8785 JSON of the operation and the
+request, minus the key, `dry_run`, `verbose`, `confirm`, claim tokens and the
+caller; ticket ids resolved; `sea_apply` after template expansion). A reuse
+whose hash differs is `invalid_input` (`reason: "request_mismatch"`),
+never a replay. Events from before request hashes carry none and replay.
+
 Claims are not keyed: a repeated `sea_claim` by the current holder rotates
 the token, which is the useful behaviour for a retry.
 

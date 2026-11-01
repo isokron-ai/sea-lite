@@ -64,6 +64,28 @@ agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
   `transitionMany()`.
 - `sea_transition` takes `note` (appended in the same transaction).
 
+### Fixed
+
+- **A reused `idempotency_key` with a different request is refused, never
+  replayed.** In 0.4.0 a second `sea_apply` (or `sea_create`, `sea_update`,
+  `sea_transition`, `sea_link`) under a key already used returned the first
+  call's result even when the request differed — e.g. a 3-ticket batch under
+  the key of an earlier 10-ticket batch came back as the 10 tickets and
+  created nothing. Every keyed write now stores `request_hash` (sha256 of the
+  canonical JSON of the operation and its request) on the keyed event; a
+  reuse with a different hash is `invalid_input` — `idempotency_key "K"
+  reused with a different request; nothing was written`, with
+  `details.reason: "request_mismatch"` and the key's `first_seq`. The same
+  request still replays, from any process, session or actor. The hash
+  ignores the key, `dry_run`, `verbose`, `confirm` and claim tokens, uses
+  full ticket ids (a prefix and the full id are the same request), and is
+  taken after template expansion (the same templates, or the same plan
+  written out, are the same request). Bulk `sea_transition` and
+  `sea_finish` bind every item's `<key>#k` to the whole request, so a reuse
+  with more tickets is refused instead of moving the extra ones. Keys
+  written before this change carry no hash and still replay. Reusing a key
+  for another operation stays `invalid_input` (`reason: "other_operation"`).
+
 ### Changed
 
 - **`sea_apply` returns `{created: {ref: id}, links: n, idempotent_replay}`

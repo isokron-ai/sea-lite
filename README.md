@@ -389,7 +389,10 @@ each depending on the one before (21 tickets, 39 links), in one call:
 
 Result: `{"created":{"epic":"…","m1":"…",…,"m20":"…"},"links":39,"idempotent_replay":false}`.
 Re-sending it with the same `idempotency_key` replays that result
-(`idempotent_replay: true`) instead of creating 21 more tickets.
+(`idempotent_replay: true`) instead of creating 21 more tickets. A key is
+bound to its request: re-using it with a different batch is
+`invalid_input` ("idempotency_key reused with a different request"), never
+a replay of the first one — the same holds for every keyed tool.
 
 ## Scopes: locking the files, not just the ticket
 

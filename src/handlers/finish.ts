@@ -18,6 +18,7 @@
 
 import { SeaError } from '../core/errors.js';
 import { EVENT, idemKey } from '../core/events.js';
+import { idForHash, priorFor, requestHash } from '../core/idem.js';
 import { validateFence } from '../core/fence.js';
 import { addNote, mustGetRow, resolveId, sweepExpired, tx, type Ctx } from '../core/repo.js';
 import type { TicketStatus } from '../model/enums.js';
@@ -54,12 +55,19 @@ export function finish(ctx: Ctx, input: FinishInput): FinishResult {
   const titleOf = (id: string) => (ctx.db.prepare(`SELECT title FROM sea_tickets WHERE id = ?`).get(id) as { title: string } | undefined)?.title ?? null;
 
   return tx(ctx.db, () => {
-    // Replay: every item's finish note already chained under its key.
+    // Every item's key (<key>#k) is bound to the whole request.
+    const hash = requestHash('sea_finish', {
+      tickets: items.map((it) => ({ ticket_id: idForHash(ctx, it.ticket_id), expected_version: it.expected_version })),
+      outcome: input.outcome,
+      note,
+      commit,
+    });
+    // Replay: every item's finish note already chained under its key (and any found must be this request's).
     if (input.idempotency_key !== undefined) {
-      const prior = items.map((_, k) => ctx.chain.findByIdempotencyKey(key(k)!));
-      if (prior.every((p) => p !== null && p !== undefined)) {
+      const prior = items.map((_, k) => priorFor(ctx, input.idempotency_key, key(k), [EVENT.ticket_note_added], hash));
+      if (prior.every((p) => p !== null)) {
         const finished = prior.map((p) => {
-          if (p!.event_type !== EVENT.ticket_note_added || p!.payload['finish'] === undefined) {
+          if (p!.payload['finish'] === undefined) {
             throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${p!.event_type})`);
           }
           const f = p!.payload['finish'] as FinishRecord;
@@ -120,7 +128,7 @@ export function finish(ctx: Ctx, input: FinishInput): FinishResult {
     plan.forEach((p, k) => {
       // A terminal status releases the claim itself; blocked is not terminal, so release explicitly after the note.
       if (p.move) transition(ctx, { ticket_id: p.id, claim_token: p.token, to, confirm: true, dry_run: false, reason: `finish: ${input.outcome}` }, { outcome: input.outcome, commit });
-      addNote(ctx, p.id, finishNoteBody(input.outcome, note, commit), { finish: record(p) }, key(k));
+      addNote(ctx, p.id, finishNoteBody(input.outcome, note, commit), { finish: record(p), ...(input.idempotency_key !== undefined ? { request_hash: hash } : {}) }, key(k));
       if (to === 'blocked') release(ctx, { ticket_id: p.id, claim_token: p.token, force: false, reason: `finish: ${input.outcome}` });
     });
     return { outcome: input.outcome, finished: plan.map(view), commit, replayed: false, dry_run: false };

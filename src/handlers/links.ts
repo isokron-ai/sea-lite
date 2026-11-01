@@ -9,6 +9,7 @@ import type { ChainHead } from 'kronicle-lite';
 
 import { SeaError } from '../core/errors.js';
 import { EVENT, idemKey } from '../core/events.js';
+import { idForHash, priorFor, requestHash } from '../core/idem.js';
 import { validateFence } from '../core/fence.js';
 import { checkVersion, mustGetRow, resolveId, sweepExpired, tx, type Ctx } from '../core/repo.js';
 import { rowToLink, type LinkRow, type LinkView } from '../core/types.js';
@@ -68,13 +69,17 @@ function bumpFrom(ctx: Ctx, from_id: string, seq: number): number {
 export function link(ctx: Ctx, input: LinkInput): LinkResult {
   const key = idemKey(input.idempotency_key);
   return tx(ctx.db, () => {
-    if (key !== undefined) {
-      const prior = ctx.chain.findByIdempotencyKey(key);
+    const hash = requestHash('sea_link', {
+      action: input.action,
+      from_id: idForHash(ctx, input.from_id),
+      to_id: idForHash(ctx, input.to_id),
+      link_type: input.link_type,
+      reason: input.reason,
+      expected_version: input.expected_version,
+    });
+    {
+      const prior = priorFor(ctx, input.idempotency_key, key, [input.action === 'add' ? EVENT.link_created : EVENT.link_tombstoned], hash);
       if (prior) {
-        const expected = input.action === 'add' ? EVENT.link_created : EVENT.link_tombstoned;
-        if (prior.event_type !== expected) {
-          throw new SeaError('invalid_input', `idempotency_key was used for a different operation (${prior.event_type})`);
-        }
         const p = prior.payload as { link_id: string; from_row_version?: number };
         const row = ctx.db.prepare(`SELECT * FROM sea_links WHERE link_id = ?`).get(p.link_id) as LinkRow | undefined;
         return {
@@ -114,7 +119,14 @@ export function link(ctx: Ctx, input: LinkInput): LinkResult {
       if (input.dry_run) {
         return { action: 'add', link: null, link_id: '(dry_run)', from_row_version: from.row_version, head: ctx.chain.head(), replayed: false, dry_run: true };
       }
-      const link_id = insertLink(ctx, from_id, to_id, input.link_type, { from_row_version: from.row_version + 1, reason: input.reason ?? null }, key);
+      const link_id = insertLink(
+        ctx,
+        from_id,
+        to_id,
+        input.link_type,
+        { from_row_version: from.row_version + 1, reason: input.reason ?? null, ...(key !== undefined ? { request_hash: hash } : {}) },
+        key,
+      );
       const row = ctx.db.prepare(`SELECT * FROM sea_links WHERE link_id = ?`).get(link_id) as LinkRow;
       const from_row_version = bumpFrom(ctx, from_id, row.chain_seq);
       return { action: 'add', link: rowToLink(row), link_id, from_row_version, head: ctx.chain.head(), replayed: false, dry_run: false };
@@ -142,6 +154,7 @@ export function link(ctx: Ctx, input: LinkInput): LinkResult {
         reason: input.reason ?? null,
         tombstoned_at,
         from_row_version: from.row_version + 1,
+        ...(key !== undefined ? { request_hash: hash } : {}),
       },
       ...(key !== undefined ? { idempotency_key: key } : {}),
     });
