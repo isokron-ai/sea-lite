@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T00:13:29.316Z",
+  "capturedAt": "2026-11-01T01:23:24.774Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -2934,6 +2934,227 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Per actor, derived from the chain: claims taken / rotated / released / expired / force-released, lease-seconds held, status transitions, tickets created, live claims. `since` limits the window (`24h`, `7d`, or ISO time). scope_conflict refusals are not chained, so they are not counted.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "actor": {
+              "description": "Only this actor.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "actor_id": {
+              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "since": {
+              "description": "Window start: a duration back from now (`24h`, `7d`, `2w`) or an ISO-8601 timestamp. Default: the whole chain.",
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "sea_stats",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "actors": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "actor": {
+                    "type": "string"
+                  },
+                  "claims_rotated": {
+                    "description": "Re-claims of a ticket already held (token rotation).",
+                    "type": "number"
+                  },
+                  "claims_taken": {
+                    "description": "Claims taken, excluding token rotations.",
+                    "type": "number"
+                  },
+                  "expired": {
+                    "description": "Leases that lapsed.",
+                    "type": "number"
+                  },
+                  "force_released": {
+                    "description": "Own claims an operator force-released.",
+                    "type": "number"
+                  },
+                  "force_releases_issued": {
+                    "description": "Force releases performed as operator.",
+                    "type": "number"
+                  },
+                  "lease_seconds": {
+                    "description": "Seconds claims were held, clipped to the window.",
+                    "type": "number"
+                  },
+                  "live_claims": {
+                    "description": "Claims held right now.",
+                    "type": "number"
+                  },
+                  "released": {
+                    "description": "Claims given back by the holder.",
+                    "type": "number"
+                  },
+                  "released_on_transition": {
+                    "description": "Claims released by the holder's terminal transition.",
+                    "type": "number"
+                  },
+                  "scoped_claims": {
+                    "description": "Claims taken with a scope.",
+                    "type": "number"
+                  },
+                  "tickets_created": {
+                    "type": "number"
+                  },
+                  "transitions": {
+                    "description": "Status changes made.",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "actor",
+                  "claims_taken",
+                  "claims_rotated",
+                  "scoped_claims",
+                  "released",
+                  "released_on_transition",
+                  "expired",
+                  "force_released",
+                  "force_releases_issued",
+                  "lease_seconds",
+                  "live_claims",
+                  "transitions",
+                  "tickets_created"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "events_scanned": {
+              "type": "number"
+            },
+            "head": {
+              "additionalProperties": false,
+              "description": "Chain head after the call.",
+              "properties": {
+                "hash": {
+                  "type": "string"
+                },
+                "seq": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "seq",
+                "hash"
+              ],
+              "type": "object"
+            },
+            "since": {
+              "description": "Window start, or null for the whole chain.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "totals": {
+              "additionalProperties": false,
+              "properties": {
+                "claims_rotated": {
+                  "description": "Re-claims of a ticket already held (token rotation).",
+                  "type": "number"
+                },
+                "claims_taken": {
+                  "description": "Claims taken, excluding token rotations.",
+                  "type": "number"
+                },
+                "expired": {
+                  "description": "Leases that lapsed.",
+                  "type": "number"
+                },
+                "force_released": {
+                  "description": "Own claims an operator force-released.",
+                  "type": "number"
+                },
+                "force_releases_issued": {
+                  "description": "Force releases performed as operator.",
+                  "type": "number"
+                },
+                "lease_seconds": {
+                  "description": "Seconds claims were held, clipped to the window.",
+                  "type": "number"
+                },
+                "live_claims": {
+                  "description": "Claims held right now.",
+                  "type": "number"
+                },
+                "released": {
+                  "description": "Claims given back by the holder.",
+                  "type": "number"
+                },
+                "released_on_transition": {
+                  "description": "Claims released by the holder's terminal transition.",
+                  "type": "number"
+                },
+                "scoped_claims": {
+                  "description": "Claims taken with a scope.",
+                  "type": "number"
+                },
+                "tickets_created": {
+                  "type": "number"
+                },
+                "transitions": {
+                  "description": "Status changes made.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "claims_taken",
+                "claims_rotated",
+                "scoped_claims",
+                "released",
+                "released_on_transition",
+                "expired",
+                "force_released",
+                "force_releases_issued",
+                "lease_seconds",
+                "live_claims",
+                "transitions",
+                "tickets_created"
+              ],
+              "type": "object"
+            },
+            "until": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "since",
+            "until",
+            "actors",
+            "totals",
+            "events_scanned",
+            "head"
+          ],
+          "type": "object"
+        },
+        "title": "Per-actor claim accounting"
+      },
+      {
+        "annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
@@ -3718,5 +3939,5 @@
     "name": "sea-lite",
     "version": "0.2.0"
   },
-  "sha256": "b86ac0180251149e1cc021b7a7774b8646f4f8c095175539424aab5f8bffc6a1"
+  "sha256": "7974adc6f0db8aa73f7594c955ed1741738d5c328dcb4afd9a5741d19f7cc2c7"
 }

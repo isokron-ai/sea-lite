@@ -63,4 +63,5 @@ export {
 } from './core/scope.js';
 export type { LinkResult } from './handlers/links.js';
 export type { HistoryResult, HistoryEntry } from './handlers/history.js';
+export { parseSince, type StatsResult, type ActorStats } from './handlers/stats.js';
 export { findPossibleDuplicates, titleMatchExpression, type PossibleDuplicate } from './handlers/dedup.js';

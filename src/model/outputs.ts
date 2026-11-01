@@ -246,3 +246,27 @@ export const ScopeCheckOutput = z.object({
   swept_expired: z.number(),
   head: HeadOut,
 });
+
+const StatsCounters = {
+  claims_taken: z.number().describe('Claims taken, excluding token rotations.'),
+  claims_rotated: z.number().describe('Re-claims of a ticket already held (token rotation).'),
+  scoped_claims: z.number().describe('Claims taken with a scope.'),
+  released: z.number().describe('Claims given back by the holder.'),
+  released_on_transition: z.number().describe("Claims released by the holder's terminal transition."),
+  expired: z.number().describe('Leases that lapsed.'),
+  force_released: z.number().describe('Own claims an operator force-released.'),
+  force_releases_issued: z.number().describe('Force releases performed as operator.'),
+  lease_seconds: z.number().describe('Seconds claims were held, clipped to the window.'),
+  live_claims: z.number().describe('Claims held right now.'),
+  transitions: z.number().describe('Status changes made.'),
+  tickets_created: z.number(),
+};
+
+export const StatsOutput = z.object({
+  since: z.string().nullable().describe('Window start, or null for the whole chain.'),
+  until: z.string(),
+  actors: z.array(z.object({ actor: z.string(), ...StatsCounters })),
+  totals: z.object(StatsCounters),
+  events_scanned: z.number(),
+  head: HeadOut,
+});

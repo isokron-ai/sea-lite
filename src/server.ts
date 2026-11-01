@@ -1,5 +1,5 @@
 /**
- * MCP surface (protocol 2026-07-28, @modelcontextprotocol/server v2): thirteen
+ * MCP surface (protocol 2026-07-28, @modelcontextprotocol/server v2): fourteen
  * tools and one resource template over a SeaLite store. Every handler is
  * synchronous; the SDK wraps the result. Each tool publishes an
  * `outputSchema` and returns the same JSON as `structuredContent` and as a
@@ -40,6 +40,7 @@ import {
   RefreshOutput,
   ReleaseOutput,
   ScopeCheckOutput,
+  StatsOutput,
   TransitionOutput,
   UpdateOutput,
 } from './model/outputs.js';
@@ -55,6 +56,7 @@ import {
   RefreshInput,
   ReleaseInput,
   ScopeCheckInput,
+  StatsInput,
   TransitionInput,
   UpdateInput,
 } from './model/schemas.js';
@@ -380,6 +382,21 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     (args) => wrap(() => store.scopeCheck(bind(args))),
+  );
+
+  server.registerTool(
+    'sea_stats',
+    {
+      title: 'Per-actor claim accounting',
+      description:
+        'Per actor, derived from the chain: claims taken / rotated / released / expired / force-released, lease-seconds held, ' +
+        'status transitions, tickets created, live claims. `since` limits the window (`24h`, `7d`, or ISO time). ' +
+        'scope_conflict refusals are not chained, so they are not counted.',
+      inputSchema: StatsInput,
+      outputSchema: StatsOutput,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    (args) => wrap(() => store.stats(bind(args))),
   );
 
   // ───────────────────────────── resource ─────────────────────────────

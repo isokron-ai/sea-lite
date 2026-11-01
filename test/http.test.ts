@@ -268,7 +268,7 @@ describe('Streamable HTTP (2026-07-28 only, bearer, loopback, per-request actor)
 });
 
 describe('sea-lite serve --http (CLI)', () => {
-  const CLI = join(__dirname, '..', 'dist', 'cli.js');
+  const CLI = join(process.cwd(), 'dist', 'cli.js');
 
   it('creates the bearer file, prints the URL, serves a request, stops on SIGTERM', async () => {
     const { spawn } = await import('node:child_process');

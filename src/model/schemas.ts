@@ -254,3 +254,16 @@ export const ScopeCheckShape = {
 };
 export const ScopeCheckInput = z.object(ScopeCheckShape);
 export type ScopeCheckInput = z.infer<typeof ScopeCheckInput>;
+
+export const StatsShape = {
+  since: z
+    .string()
+    .min(1)
+    .max(64)
+    .optional()
+    .describe('Window start: a duration back from now (`24h`, `7d`, `2w`) or an ISO-8601 timestamp. Default: the whole chain.'),
+  actor: z.string().min(1).max(200).optional().describe('Only this actor.'),
+  actor_id: ActorId,
+};
+export const StatsInput = z.object(StatsShape);
+export type StatsInput = z.infer<typeof StatsInput>;

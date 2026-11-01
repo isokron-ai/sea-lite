@@ -10,6 +10,7 @@
  *   sea-lite rebuild [--data-dir DIR]        drop + replay sea tables from the chain
  *   sea-lite verify  [--data-dir DIR]        chain verify + sea rows whose chain_seq is missing
  *   sea-lite scope-check --paths a,b [--actor ID] [--json]   exit 1 if another actor's live scope overlaps
+ *   sea-lite stats   [--since 24h|7d|ISO] [--for ACTOR] [--json]   per-actor claim accounting from the chain
  */
 
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
@@ -30,6 +31,7 @@ import {
   serveHttp,
   type ActorToken,
 } from './http.js';
+import type { ActorStats, StatsResult } from './handlers/stats.js';
 import { createServer } from './server.js';
 import { parseRole, parseTracks, SeaLite } from './store.js';
 
@@ -102,6 +104,9 @@ Usage:
   sea-lite scope-check [--paths a,b | PATH...] [--actor ID] [--json]
                                         exit 0 if no other actor's live claim scope overlaps, 1 if one does
                                         (for a PreToolUse edit hook; see hooks/README.md)
+  sea-lite stats   [--since 24h|7d|ISO] [--for ACTOR] [--json]
+                                        per actor: claims taken/released/expired/force-released, lease time,
+                                        transitions — derived from the chain (read-only)
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite (shared with kronicle-lite).
 Env: SEA_LITE_ACTOR, SEA_LITE_ROLE, SEA_LITE_TRACKS.
@@ -246,6 +251,16 @@ async function main(argv: string[]): Promise<number> {
       store.close();
       return r.ok ? 0 : 1;
     }
+    case 'stats': {
+      const store = openStore(flags);
+      const since = str(flags['since']);
+      const forActor = str(flags['for']);
+      const r = store.stats({ ...(since !== undefined ? { since } : {}), ...(forActor !== undefined ? { actor: forActor } : {}) });
+      if (flags['json'] === true) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      else process.stdout.write(formatStats(r));
+      store.close();
+      return 0;
+    }
     case 'add-token': {
       const actor = str(flags['actor']);
       if (actor === undefined) throw new SeaError('invalid_input', 'add-token needs --actor ID');
@@ -260,6 +275,37 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 2;
   }
+}
+
+function fmtDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
+  return `${Math.floor(seconds / 3600)}h${String(Math.floor((seconds % 3600) / 60)).padStart(2, '0')}m`;
+}
+
+function formatStats(r: StatsResult): string {
+  const cols = ['actor', 'taken', 'rotated', 'released', 'on_term', 'expired', 'forced', 'held', 'live', 'transitions', 'created'] as const;
+  const row = (a: Omit<ActorStats, 'actor'> & { actor: string }): string[] => [
+    a.actor,
+    String(a.claims_taken),
+    String(a.claims_rotated),
+    String(a.released),
+    String(a.released_on_transition),
+    String(a.expired),
+    String(a.force_released),
+    fmtDuration(a.lease_seconds),
+    String(a.live_claims),
+    String(a.transitions),
+    String(a.tickets_created),
+  ];
+  const rows = [[...cols], ...r.actors.map(row), row({ actor: 'total', ...r.totals })];
+  const widths = cols.map((_, i) => Math.max(...rows.map((x) => x[i]!.length)));
+  const lines = rows.map((x) => x.map((c, i) => (i === 0 ? c.padEnd(widths[i]!) : c.padStart(widths[i]!))).join('  '));
+  return (
+    `window ${r.since ?? 'all time'} → ${r.until}; ${r.events_scanned} event(s); head seq ${r.head.seq}\n` +
+    lines.join('\n') +
+    '\n(scope_conflict refusals are not chained and are not counted)\n'
+  );
 }
 
 async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<number> {

@@ -12,6 +12,7 @@ import { SEA_MIGRATIONS, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION
 import * as claims from './handlers/claims.js';
 import * as hist from './handlers/history.js';
 import * as links from './handlers/links.js';
+import * as statsH from './handlers/stats.js';
 import * as tickets from './handlers/tickets.js';
 import { ROLES, TRACKS, type Role, type Track } from './model/enums.js';
 import { DEFAULT_LIFECYCLE, type LifecycleConfig } from './model/lifecycle.js';
@@ -155,6 +156,9 @@ export class SeaLite {
   }
   scopeCheck(input: S.ScopeCheckInput): claims.ScopeCheckResult {
     return claims.scopeCheck(this.ctx(input.actor_id), input);
+  }
+  stats(input: S.StatsInput): statsH.StatsResult {
+    return statsH.stats(this.ctx(input.actor_id), input);
   }
 
   rebuild(): RebuildResult {

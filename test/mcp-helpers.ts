@@ -36,6 +36,7 @@ export const TOOLS = [
   'sea_refresh',
   'sea_release',
   'sea_scope_check',
+  'sea_stats',
   'sea_transition',
   'sea_update',
 ];
