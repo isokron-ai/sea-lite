@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T15:38:29.490Z",
+  "capturedAt": "2026-11-01T16:57:25.729Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -1838,7 +1838,7 @@
   "protocolVersion": "2025-11-25",
   "server": {
     "name": "sea-lite",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "sha256": "e76170654894db991824e15d0449cf131a068836406d468a6284b1c9b69534dc"
 }

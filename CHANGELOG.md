@@ -4,7 +4,10 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased]
+## [0.5.0] — 2026-11-01
+
+
+- Depends on kronicle-lite ^0.7.0 (was ^0.2.0): picks up the atomic first-start fix (signing key and SQLite schema), so several `sea-lite serve` processes starting at once on a fresh data directory no longer crash.
 
 Lean on context and fewer calls to plan and close work. Measured by
 agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`

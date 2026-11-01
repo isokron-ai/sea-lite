@@ -20,7 +20,7 @@ import { SeaLite } from './store.js';
 
 export const CATALOG_FINGERPRINT = 'e76170654894db991824e15d0449cf131a068836406d468a6284b1c9b69534dc';
 /** Package version the fingerprint above was pinned for. */
-export const CATALOG_VERSION = '0.4.0';
+export const CATALOG_VERSION = '0.5.0';
 
 const MODERN = '2026-07-28';
 
