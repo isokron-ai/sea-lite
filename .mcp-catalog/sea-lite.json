@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T02:44:03.518Z",
+  "capturedAt": "2026-11-01T14:47:28.433Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -20,31 +20,23 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Author 1–50 tickets and up to 100 links in one all-or-nothing write. Each ticket carries a batch-local `ref`; a link end is a ref or an existing ticket (`from_id` / `to_id`; a from_id needs its claim_token in `claims`). Rejected as a whole on duplicate refs, unknown refs or ids, self-loops, duplicate links, or a parent_of/depends_on/blocks cycle across existing links — the error lists every problem. `dry_run` validates only.",
+        "description": "Create up to 50 tickets and 100 links in one all-or-nothing write. Each ticket has a batch-local `ref`; links join refs and/or existing ids. `templates` repeat one ticket per `for_each` value, e.g. a 20-step chain: {for_each: 20, ref: \"s{i}\", ticket: {title: \"Step {i}\"}, links: [{from_ref: \"{ref}\", to_ref: \"{prev}\", link_type: \"depends_on\"}]}. Rejected as a whole, every problem listed, on bad or duplicate refs, unknown ids, self-loops, duplicate links or a cycle. Returns {created: {ref: id}, links, idempotent_replay}; verbose: true echoes every id.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "claims": {
-              "description": "Claim tokens for existing tickets used as from_id (one per ticket).",
+              "description": "Tokens for existing tickets used as from_id.",
               "items": {
                 "properties": {
                   "claim_token": {
-                    "description": "The claim token returned by sea_claim or sea_next.",
-                    "maxLength": 64,
-                    "minLength": 64,
-                    "pattern": "^[0-9a-f]+$",
+                    "description": "From sea_claim / sea_next.",
                     "type": "string"
                   },
                   "ticket_id": {
-                    "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-                    "maxLength": 36,
-                    "minLength": 8,
+                    "description": "Id or unique ≥8-char prefix.",
                     "type": "string"
                   }
                 },
@@ -59,29 +51,23 @@
             },
             "dry_run": {
               "default": false,
-              "description": "Validate and report what would happen; write nothing.",
+              "description": "Validate only; the result shows the expanded plan.",
               "type": "boolean"
             },
             "idempotency_key": {
-              "description": "Replay-safe key. A second call with the same key returns the first result without writing again.",
-              "maxLength": 180,
-              "minLength": 1,
+              "description": "Replay-safe: a repeat with the same key returns the first result, writes nothing.",
               "type": "string"
             },
             "links": {
               "default": [],
               "items": {
+                "description": "One end each side: *_ref = a ticket in this batch, *_id = an existing ticket (a from_id needs its token in `claims`).",
                 "properties": {
                   "from_id": {
-                    "description": "An existing ticket; needs its claim_token in `claims` (links are fenced on from).",
-                    "maxLength": 36,
-                    "minLength": 8,
+                    "description": "Id or unique ≥8-char prefix.",
                     "type": "string"
                   },
                   "from_ref": {
-                    "description": "A ticket in this batch. Exactly one of from_ref / from_id.",
-                    "maxLength": 64,
-                    "minLength": 1,
                     "type": "string"
                   },
                   "link_type": {
@@ -102,15 +88,10 @@
                     "type": "string"
                   },
                   "to_id": {
-                    "description": "An existing ticket (not fenced).",
-                    "maxLength": 36,
-                    "minLength": 8,
+                    "description": "Id or unique ≥8-char prefix.",
                     "type": "string"
                   },
                   "to_ref": {
-                    "description": "A ticket in this batch. Exactly one of to_ref / to_id.",
-                    "maxLength": 64,
-                    "minLength": 1,
                     "type": "string"
                   }
                 },
@@ -122,17 +103,68 @@
               "maxItems": 100,
               "type": "array"
             },
+            "templates": {
+              "items": {
+                "description": "One ticket (+ links) per for_each value. In every string: {i} = 1-based index, {value}, {ref} = this item's ref, {prev} = the previous item's ref.",
+                "properties": {
+                  "for_each": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            }
+                          ]
+                        },
+                        "maxItems": 50,
+                        "minItems": 1,
+                        "type": "array"
+                      },
+                      {
+                        "maximum": 50,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    ],
+                    "description": "Values to repeat over, or a count n (= values 1..n)."
+                  },
+                  "links": {
+                    "default": [],
+                    "description": "Per item, entries like `links`; one naming {prev} is skipped for the first item.",
+                    "type": "array"
+                  },
+                  "ref": {
+                    "description": "Ref per item; must use {i} or {value}, e.g. \"t{i}\".",
+                    "type": "string"
+                  },
+                  "ticket": {
+                    "description": "Fields of a `tickets` entry without ref (title required).",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "for_each",
+                  "ref",
+                  "ticket"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
             "tickets": {
+              "default": [],
               "items": {
                 "properties": {
                   "assignee": {
-                    "maxLength": 200,
-                    "minLength": 1,
                     "type": "string"
                   },
                   "body": {
                     "default": "",
-                    "maxLength": 100000,
                     "type": "string"
                   },
                   "kind": {
@@ -169,9 +201,7 @@
                     "type": "string"
                   },
                   "ref": {
-                    "description": "Batch-local handle other entries use to point at this ticket.",
-                    "maxLength": 64,
-                    "minLength": 1,
+                    "description": "Batch-local handle that links use.",
                     "type": "string"
                   },
                   "status": {
@@ -185,16 +215,12 @@
                   "tags": {
                     "default": [],
                     "items": {
-                      "maxLength": 64,
-                      "minLength": 1,
                       "type": "string"
                     },
                     "maxItems": 32,
                     "type": "array"
                   },
                   "title": {
-                    "maxLength": 500,
-                    "minLength": 1,
                     "type": "string"
                   }
                 },
@@ -205,19 +231,18 @@
                 "type": "object"
               },
               "maxItems": 50,
-              "minItems": 1,
               "type": "array"
+            },
+            "verbose": {
+              "description": "true: return every ticket and link id in full instead of {created, links, idempotent_replay}.",
+              "type": "boolean"
             }
           },
-          "required": [
-            "tickets"
-          ],
           "type": "object"
         },
         "name": "sea_apply",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
+          "description": "One of: {created,links,idempotent_replay,dry_run?,plan?} | {batch_id,tickets,links,head,replayed,dry_run}",
           "properties": {
             "batch_id": {
               "type": [
@@ -225,107 +250,48 @@
                 "null"
               ]
             },
+            "created": {
+              "description": "ref → ticket id.",
+              "type": "object"
+            },
             "dry_run": {
               "type": "boolean"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
+            "idempotent_replay": {
+              "type": "boolean"
+            },
             "links": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "from_id": {
-                    "type": "string"
-                  },
-                  "from_ref": {
-                    "description": "null when from is an existing ticket.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "link_id": {
-                    "type": "string"
-                  },
-                  "link_type": {
-                    "type": "string"
-                  },
-                  "to_id": {
-                    "type": "string"
-                  },
-                  "to_ref": {
-                    "description": "null when to is an existing ticket.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "link_id",
-                  "from_ref",
-                  "to_ref",
-                  "from_id",
-                  "to_id",
-                  "link_type"
-                ],
-                "type": "object"
-              },
-              "type": "array"
+              "description": "Links written.",
+              "type": [
+                "number",
+                "array"
+              ]
+            },
+            "plan": {
+              "description": "dry_run only: the expanded plan; links as \"from link_type to\". {tickets,links}",
+              "type": "object"
             },
             "replayed": {
               "type": "boolean"
             },
             "tickets": {
               "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "ref": {
-                    "type": "string"
-                  },
-                  "ticket_id": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "ref",
-                  "ticket_id",
-                  "title"
-                ],
+                "description": "{ref,ticket_id,title}",
                 "type": "object"
               },
               "type": "array"
             }
           },
           "required": [
-            "batch_id",
-            "tickets",
-            "links",
-            "head",
-            "replayed",
-            "dry_run"
+            "links"
           ],
           "type": "object"
         },
-        "title": "Create a batch of tickets and links atomically"
+        "title": "Create tickets and links in one batch"
       },
       {
         "annotations": {
@@ -334,30 +300,25 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Take a lease on one or more tickets (all-or-nothing; locked in id order so concurrent claimers cannot deadlock). Returns one claim_token per ticket — keep it, it is shown once and is required for every write. Leases (default 900 s, max 3600 s) renew while you keep calling sea-lite tools; otherwise they lapse. Fails with already_claimed (naming the holder and expiry) if any ticket is held by someone else. Claiming a ticket you already hold rotates its token. Pass `scope.paths` (the files or directories you will edit; a worktree is a scope) to lock them for the lease: refused with scope_conflict, naming the holder, ticket, overlapping paths and expiry, if they overlap someone else's live scope (another actor, or this actor in another session).",
+        "description": "Lease tickets, all or nothing. Returns one claim_token per ticket (shown once; every write needs it). Leases (default 900 s, max 3600) renew while you call sea-lite tools. already_claimed names the holder and expiry; re-claiming your own rotates the token. `scope.paths` locks the files you will edit (scope_conflict names the holder, ticket, overlap and expiry).",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "lease_seconds": {
-              "description": "Lease length in seconds (default 900, max 3600). Renewed automatically while you keep calling sea-lite tools; expiry frees the ticket.",
+              "description": "Lease seconds (default 900, max 3600); renewed while you keep calling sea-lite tools.",
               "maximum": 3600,
               "minimum": 1,
               "type": "integer"
             },
             "scope": {
-              "description": "The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by someone else (another actor, or this actor in another session).",
+              "description": "What you will edit; scope_conflict if someone else holds an overlapping scope.",
               "properties": {
                 "paths": {
-                  "description": "Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.",
+                  "description": "Repo-relative files or dirs (a dir covers everything beneath), globs, or `.` for the whole repo.",
                   "items": {
-                    "maxLength": 512,
-                    "minLength": 1,
                     "type": "string"
                   },
                   "maxItems": 64,
@@ -365,20 +326,15 @@
                   "type": "array"
                 },
                 "worktree": {
-                  "description": "Absolute path of the git worktree you work in. Binds the claim to it: `sea-lite release-worktree <path>` frees it when the worktree is removed.",
-                  "maxLength": 1024,
-                  "minLength": 1,
+                  "description": "Absolute path of your git worktree; `sea-lite release-worktree` frees the claim when it is removed.",
                   "type": "string"
                 }
               },
               "type": "object"
             },
             "ticket_ids": {
-              "description": "One or more tickets. All are claimed or none is.",
               "items": {
-                "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-                "maxLength": 36,
-                "minLength": 8,
+                "description": "Id or unique ≥8-char prefix.",
                 "type": "string"
               },
               "maxItems": 50,
@@ -393,77 +349,26 @@
         },
         "name": "sea_claim",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "claims": {
               "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "claim_token": {
-                    "type": "string"
-                  },
-                  "expires_at": {
-                    "type": "string"
-                  },
-                  "rotated": {
-                    "type": "boolean"
-                  },
-                  "ticket_id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "ticket_id",
-                  "claim_token",
-                  "expires_at",
-                  "rotated"
-                ],
+                "description": "{ticket_id,claim_token,expires_at,rotated}",
                 "type": "object"
               },
               "type": "array"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "lease_seconds": {
               "type": "number"
             },
             "scope": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                  "properties": {
-                    "paths": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "paths"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim. {paths}",
+              "type": [
+                "object",
+                "null"
               ]
             },
             "worktree": {
@@ -482,7 +387,7 @@
           ],
           "type": "object"
         },
-        "title": "Claim one or more tickets"
+        "title": "Claim tickets"
       },
       {
         "annotations": {
@@ -491,24 +396,18 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Create one ticket (status idea, or triaged to make it dispatchable right away). Returns the ticket plus `possible_duplicates` — existing tickets with the same or a similar title; the create always goes through, you decide. Pass `claim_seconds` to claim it in the same call and get a claim_token back. `idempotency_key` makes retries safe. Kinds: feature | research | investigation | refactor | curiosity | question | other | bug | chore | incident | security | epic | spike | log | docs | decision. Priorities: urgent | high | medium | low | parked.",
+        "description": "Create one ticket (status idea, or triaged = dispatchable now). Returns it plus `possible_duplicates` (similar titles; the create still happens, you decide). `claim_seconds` also claims it and returns a claim_token.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "assignee": {
-              "maxLength": 200,
-              "minLength": 1,
               "type": "string"
             },
             "body": {
               "default": "",
-              "maxLength": 100000,
               "type": "string"
             },
             "claim_seconds": {
@@ -519,13 +418,11 @@
             },
             "dry_run": {
               "default": false,
-              "description": "Validate and report what would happen; write nothing.",
+              "description": "Validate only; write nothing.",
               "type": "boolean"
             },
             "idempotency_key": {
-              "description": "Replay-safe key. A second call with the same key returns the first result without writing again.",
-              "maxLength": 180,
-              "minLength": 1,
+              "description": "Replay-safe: a repeat with the same key returns the first result, writes nothing.",
               "type": "string"
             },
             "kind": {
@@ -573,16 +470,12 @@
             "tags": {
               "default": [],
               "items": {
-                "maxLength": 64,
-                "minLength": 1,
                 "type": "string"
               },
               "maxItems": 32,
               "type": "array"
             },
             "title": {
-              "maxLength": 500,
-              "minLength": 1,
               "type": "string"
             }
           },
@@ -593,8 +486,6 @@
         },
         "name": "sea_create",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "claim_expires_at": {
               "type": [
@@ -612,64 +503,12 @@
               "type": "boolean"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "possible_duplicates": {
               "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "exact_title_match": {
-                    "type": "boolean"
-                  },
-                  "score": {
-                    "type": "number"
-                  },
-                  "status": {
-                    "enum": [
-                      "idea",
-                      "triaged",
-                      "in_progress",
-                      "in_design",
-                      "ready",
-                      "parked",
-                      "blocked",
-                      "needs_decision",
-                      "resolved",
-                      "wont_fix",
-                      "duplicate",
-                      "dropped",
-                      "merged"
-                    ],
-                    "type": "string"
-                  },
-                  "ticket_id": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "ticket_id",
-                  "title",
-                  "status",
-                  "score",
-                  "exact_title_match"
-                ],
+                "description": "{ticket_id,title,status,score,exact_title_match}",
                 "type": "object"
               },
               "type": "array"
@@ -678,205 +517,7 @@
               "type": "boolean"
             },
             "ticket": {
-              "additionalProperties": false,
-              "properties": {
-                "assignee": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "body": {
-                  "type": "string"
-                },
-                "claim": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "description": "Who holds the ticket and until when. Never the token.",
-                      "properties": {
-                        "expires_at": {
-                          "type": "string"
-                        },
-                        "holder": {
-                          "type": "string"
-                        },
-                        "lease_seconds": {
-                          "description": "Lease the claim renews by.",
-                          "type": [
-                            "number",
-                            "null"
-                          ]
-                        },
-                        "scope": {
-                          "anyOf": [
-                            {
-                              "additionalProperties": false,
-                              "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                              "properties": {
-                                "paths": {
-                                  "items": {
-                                    "type": "string"
-                                  },
-                                  "type": "array"
-                                }
-                              },
-                              "required": [
-                                "paths"
-                              ],
-                              "type": "object"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        },
-                        "session": {
-                          "description": "Holder session; one actor label in two sessions is two holders.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "worktree": {
-                          "description": "Absolute worktree path the claim is bound to.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "write_count": {
-                          "type": "number"
-                        }
-                      },
-                      "required": [
-                        "holder",
-                        "expires_at",
-                        "write_count",
-                        "scope",
-                        "worktree",
-                        "session",
-                        "lease_seconds"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "created_at": {
-                  "type": "string"
-                },
-                "created_by": {
-                  "type": "string"
-                },
-                "created_seq": {
-                  "type": "number"
-                },
-                "duplicate_of": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "id": {
-                  "type": "string"
-                },
-                "kind": {
-                  "enum": [
-                    "feature",
-                    "research",
-                    "investigation",
-                    "refactor",
-                    "curiosity",
-                    "question",
-                    "other",
-                    "bug",
-                    "chore",
-                    "incident",
-                    "security",
-                    "epic",
-                    "spike",
-                    "log",
-                    "docs",
-                    "decision"
-                  ],
-                  "type": "string"
-                },
-                "last_seq": {
-                  "type": "number"
-                },
-                "priority": {
-                  "enum": [
-                    "urgent",
-                    "high",
-                    "medium",
-                    "low",
-                    "parked"
-                  ],
-                  "type": "string"
-                },
-                "project": {
-                  "description": "Project key; null = legacy, visible in every project.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "row_version": {
-                  "type": "number"
-                },
-                "status": {
-                  "enum": [
-                    "idea",
-                    "triaged",
-                    "in_progress",
-                    "in_design",
-                    "ready",
-                    "parked",
-                    "blocked",
-                    "needs_decision",
-                    "resolved",
-                    "wont_fix",
-                    "duplicate",
-                    "dropped",
-                    "merged"
-                  ],
-                  "type": "string"
-                },
-                "tags": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "title": {
-                  "type": "string"
-                },
-                "updated_at": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "id",
-                "kind",
-                "title",
-                "body",
-                "status",
-                "priority",
-                "tags",
-                "assignee",
-                "duplicate_of",
-                "created_by",
-                "created_at",
-                "updated_at",
-                "row_version",
-                "claim",
-                "project",
-                "created_seq",
-                "last_seq"
-              ],
+              "description": "{id,kind,title,body,status,priority,tags,assignee,duplicate_of,created_by,created_at,updated_at,row_version,claim,project,created_seq,last_seq}",
               "type": "object"
             }
           },
@@ -895,24 +536,128 @@
       },
       {
         "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Done with a ticket: appends `note` (optional), sets a terminal status (default resolved) and releases your claim, in one write. `tickets` closes several (each with its own claim_token; all or none). Calling it is the confirmation.",
+        "inputSchema": {
+          "properties": {
+            "actor_id": {
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
+              "type": "string"
+            },
+            "claim_token": {
+              "description": "From sea_claim / sea_next.",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "Validate only; write nothing.",
+              "type": "boolean"
+            },
+            "idempotency_key": {
+              "description": "Replay-safe: a repeat with the same key returns the first result, writes nothing.",
+              "type": "string"
+            },
+            "note": {
+              "description": "Hand-off note appended to each ticket.",
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "default": "resolved",
+              "enum": [
+                "resolved",
+                "wont_fix",
+                "dropped",
+                "merged"
+              ],
+              "type": "string"
+            },
+            "ticket_id": {
+              "description": "Id or unique ≥8-char prefix.",
+              "type": "string"
+            },
+            "tickets": {
+              "description": "Several tickets (each with its own token) instead of ticket_id + claim_token; all or none.",
+              "items": {
+                "properties": {
+                  "claim_token": {
+                    "description": "From sea_claim / sea_next.",
+                    "type": "string"
+                  },
+                  "expected_version": {
+                    "description": "Fail with version_conflict unless row_version equals this.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "ticket_id": {
+                    "description": "Id or unique ≥8-char prefix.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "ticket_id",
+                  "claim_token"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "name": "sea_finish",
+        "outputSchema": {
+          "properties": {
+            "dry_run": {
+              "type": "boolean"
+            },
+            "finished": {
+              "items": {
+                "description": "{ticket_id,title,from,to,claim_released}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "note_added": {
+              "type": "boolean"
+            },
+            "replayed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "finished",
+            "note_added",
+            "replayed",
+            "dry_run"
+          ],
+          "type": "object"
+        },
+        "title": "Finish tickets"
+      },
+      {
+        "annotations": {
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Full ticket by id or a unique ≥8-char prefix: fields, row_version (for expected_version), claim holder and expiry (never the token), active links with the peer ticket's title/status, recent notes, and legal_next statuses.",
+        "description": "One ticket by id or ≥8-char prefix: fields, row_version, claim holder and expiry (never the token), links with the peer's title/status, recent notes, legal_next.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "id": {
-              "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-              "maxLength": 36,
-              "minLength": 8,
+              "description": "Id or unique ≥8-char prefix.",
               "type": "string"
             }
           },
@@ -923,379 +668,33 @@
         },
         "name": "sea_get",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "legal_next": {
               "items": {
-                "enum": [
-                  "idea",
-                  "triaged",
-                  "in_progress",
-                  "in_design",
-                  "ready",
-                  "parked",
-                  "blocked",
-                  "needs_decision",
-                  "resolved",
-                  "wont_fix",
-                  "duplicate",
-                  "dropped",
-                  "merged"
-                ],
                 "type": "string"
               },
               "type": "array"
             },
             "links": {
               "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "chain_seq": {
-                    "type": "number"
-                  },
-                  "created_at": {
-                    "type": "string"
-                  },
-                  "created_by": {
-                    "type": "string"
-                  },
-                  "direction": {
-                    "enum": [
-                      "out",
-                      "in"
-                    ],
-                    "type": "string"
-                  },
-                  "from_id": {
-                    "type": "string"
-                  },
-                  "link_id": {
-                    "type": "string"
-                  },
-                  "link_type": {
-                    "enum": [
-                      "parent_of",
-                      "relates_to",
-                      "inspired_by",
-                      "responds_to",
-                      "conflicts_with",
-                      "supersedes",
-                      "blocks",
-                      "depends_on",
-                      "condenses_into",
-                      "branches_from",
-                      "references",
-                      "duplicates"
-                    ],
-                    "type": "string"
-                  },
-                  "peer": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "id": {
-                        "type": "string"
-                      },
-                      "status": {
-                        "enum": [
-                          "idea",
-                          "triaged",
-                          "in_progress",
-                          "in_design",
-                          "ready",
-                          "parked",
-                          "blocked",
-                          "needs_decision",
-                          "resolved",
-                          "wont_fix",
-                          "duplicate",
-                          "dropped",
-                          "merged"
-                        ],
-                        "type": "string"
-                      },
-                      "title": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "title",
-                      "status"
-                    ],
-                    "type": "object"
-                  },
-                  "to_id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "link_id",
-                  "from_id",
-                  "to_id",
-                  "link_type",
-                  "created_by",
-                  "created_at",
-                  "chain_seq",
-                  "direction",
-                  "peer"
-                ],
+                "description": "{link_id,from_id,to_id,link_type,created_by,created_at,chain_seq,direction,peer}",
                 "type": "object"
               },
               "type": "array"
             },
             "notes": {
               "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "author": {
-                    "type": "string"
-                  },
-                  "body": {
-                    "type": "string"
-                  },
-                  "chain_seq": {
-                    "type": "number"
-                  },
-                  "created_at": {
-                    "type": "string"
-                  },
-                  "note_id": {
-                    "type": "string"
-                  },
-                  "ticket_id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "note_id",
-                  "ticket_id",
-                  "author",
-                  "body",
-                  "created_at",
-                  "chain_seq"
-                ],
+                "description": "{note_id,ticket_id,author,body,created_at,chain_seq}",
                 "type": "object"
               },
               "type": "array"
             },
             "ticket": {
-              "additionalProperties": false,
-              "properties": {
-                "assignee": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "body": {
-                  "type": "string"
-                },
-                "claim": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "description": "Who holds the ticket and until when. Never the token.",
-                      "properties": {
-                        "expires_at": {
-                          "type": "string"
-                        },
-                        "holder": {
-                          "type": "string"
-                        },
-                        "lease_seconds": {
-                          "description": "Lease the claim renews by.",
-                          "type": [
-                            "number",
-                            "null"
-                          ]
-                        },
-                        "scope": {
-                          "anyOf": [
-                            {
-                              "additionalProperties": false,
-                              "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                              "properties": {
-                                "paths": {
-                                  "items": {
-                                    "type": "string"
-                                  },
-                                  "type": "array"
-                                }
-                              },
-                              "required": [
-                                "paths"
-                              ],
-                              "type": "object"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        },
-                        "session": {
-                          "description": "Holder session; one actor label in two sessions is two holders.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "worktree": {
-                          "description": "Absolute worktree path the claim is bound to.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "write_count": {
-                          "type": "number"
-                        }
-                      },
-                      "required": [
-                        "holder",
-                        "expires_at",
-                        "write_count",
-                        "scope",
-                        "worktree",
-                        "session",
-                        "lease_seconds"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "created_at": {
-                  "type": "string"
-                },
-                "created_by": {
-                  "type": "string"
-                },
-                "created_seq": {
-                  "type": "number"
-                },
-                "duplicate_of": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "id": {
-                  "type": "string"
-                },
-                "kind": {
-                  "enum": [
-                    "feature",
-                    "research",
-                    "investigation",
-                    "refactor",
-                    "curiosity",
-                    "question",
-                    "other",
-                    "bug",
-                    "chore",
-                    "incident",
-                    "security",
-                    "epic",
-                    "spike",
-                    "log",
-                    "docs",
-                    "decision"
-                  ],
-                  "type": "string"
-                },
-                "last_seq": {
-                  "type": "number"
-                },
-                "priority": {
-                  "enum": [
-                    "urgent",
-                    "high",
-                    "medium",
-                    "low",
-                    "parked"
-                  ],
-                  "type": "string"
-                },
-                "project": {
-                  "description": "Project key; null = legacy, visible in every project.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "row_version": {
-                  "type": "number"
-                },
-                "status": {
-                  "enum": [
-                    "idea",
-                    "triaged",
-                    "in_progress",
-                    "in_design",
-                    "ready",
-                    "parked",
-                    "blocked",
-                    "needs_decision",
-                    "resolved",
-                    "wont_fix",
-                    "duplicate",
-                    "dropped",
-                    "merged"
-                  ],
-                  "type": "string"
-                },
-                "tags": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "title": {
-                  "type": "string"
-                },
-                "updated_at": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "id",
-                "kind",
-                "title",
-                "body",
-                "status",
-                "priority",
-                "tags",
-                "assignee",
-                "duplicate_of",
-                "created_by",
-                "created_at",
-                "updated_at",
-                "row_version",
-                "claim",
-                "project",
-                "created_seq",
-                "last_seq"
-              ],
+              "description": "{id,kind,title,body,status,priority,tags,assignee,duplicate_of,created_by,created_at,updated_at,row_version,claim,project,created_seq,last_seq}",
               "type": "object"
             }
           },
@@ -1316,14 +715,11 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "With ticket_id: every chain event about that ticket (its own events and links touching it), oldest first. Without: a feed of every sea event with seq > since_seq — poll it to watch the queue. `verify` (default true) recomputes every hash on the chain and reports whether the record is intact.",
+        "description": "With ticket_id: its chain events (and links touching it), oldest first. Without: every sea event after since_seq — poll it to watch the queue. `verify` (default true) rechecks every hash.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "limit": {
@@ -1334,14 +730,11 @@
             },
             "since_seq": {
               "description": "Feed mode: every sea event with seq greater than this.",
-              "maximum": 9007199254740991,
               "minimum": 0,
               "type": "integer"
             },
             "ticket_id": {
               "description": "Events for one ticket (its own events and links touching it).",
-              "maxLength": 36,
-              "minLength": 8,
               "type": "string"
             },
             "verify": {
@@ -1354,67 +747,9 @@
         },
         "name": "sea_history",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "chain": {
-              "additionalProperties": false,
-              "properties": {
-                "events_checked": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "first_mismatch": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "actual": {
-                          "type": "string"
-                        },
-                        "expected": {
-                          "type": "string"
-                        },
-                        "kind": {
-                          "enum": [
-                            "hash_mismatch",
-                            "link_broken",
-                            "seq_gap",
-                            "head_mismatch"
-                          ],
-                          "type": "string"
-                        },
-                        "seq": {
-                          "type": "number"
-                        }
-                      },
-                      "required": [
-                        "seq",
-                        "kind",
-                        "expected",
-                        "actual"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "verified": {
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "verified",
-                "events_checked",
-                "first_mismatch"
-              ],
+              "description": "{verified,events_checked,first_mismatch}",
               "type": "object"
             },
             "count": {
@@ -1422,58 +757,13 @@
             },
             "events": {
               "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "actor_id": {
-                    "type": "string"
-                  },
-                  "event_type": {
-                    "type": "string"
-                  },
-                  "hash": {
-                    "type": "string"
-                  },
-                  "occurred_at": {
-                    "type": "string"
-                  },
-                  "payload": {
-                    "additionalProperties": {},
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "type": "object"
-                  },
-                  "seq": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "seq",
-                  "hash",
-                  "event_type",
-                  "actor_id",
-                  "occurred_at",
-                  "payload"
-                ],
+                "description": "{seq,hash,event_type,actor_id,occurred_at,payload}",
                 "type": "object"
               },
               "type": "array"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "last_seq": {
@@ -1483,10 +773,6 @@
               ]
             },
             "mode": {
-              "enum": [
-                "ticket",
-                "feed"
-              ],
               "type": "string"
             },
             "since_seq": {
@@ -1527,9 +813,8 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Add or remove a directed link `from <link_type> to`. Types: parent_of | relates_to | inspired_by | responds_to | conflicts_with | supersedes | blocks | depends_on | condenses_into | branches_from | references | duplicates. Fenced on the from ticket (claim_token). parent_of / depends_on / blocks are kept acyclic across all existing links; a cycle is rejected with its path. Remove tombstones the link (history keeps it). `from blocks to` and `from depends_on to` decide what sea_next may hand out: a ticket is eligible only when every predecessor is terminal.",
+        "description": "Add or remove a directed link `from <link_type> to`, fenced on from (claim_token). parent_of / depends_on / blocks stay acyclic (a cycle is rejected with its path); remove tombstones it. sea_next hands a ticket out only when every ticket it depends_on and every ticket that blocks it is terminal.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "action": {
               "enum": [
@@ -1539,39 +824,29 @@
               "type": "string"
             },
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "claim_token": {
               "description": "Fence on the `from` ticket.",
-              "maxLength": 64,
-              "minLength": 64,
-              "pattern": "^[0-9a-f]+$",
               "type": "string"
             },
             "dry_run": {
               "default": false,
-              "description": "Validate and report what would happen; write nothing.",
+              "description": "Validate only; write nothing.",
               "type": "boolean"
             },
             "expected_version": {
               "description": "row_version of the `from` ticket.",
-              "maximum": 9007199254740991,
               "minimum": 0,
               "type": "integer"
             },
             "from_id": {
-              "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-              "maxLength": 36,
-              "minLength": 8,
+              "description": "Id or unique ≥8-char prefix.",
               "type": "string"
             },
             "idempotency_key": {
-              "description": "Replay-safe key. A second call with the same key returns the first result without writing again.",
-              "maxLength": 180,
-              "minLength": 1,
+              "description": "Replay-safe: a repeat with the same key returns the first result, writes nothing.",
               "type": "string"
             },
             "link_type": {
@@ -1592,13 +867,10 @@
               "type": "string"
             },
             "reason": {
-              "maxLength": 2000,
               "type": "string"
             },
             "to_id": {
-              "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-              "maxLength": 36,
-              "minLength": 8,
+              "description": "Id or unique ≥8-char prefix.",
               "type": "string"
             }
           },
@@ -1613,14 +885,8 @@
         },
         "name": "sea_link",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "action": {
-              "enum": [
-                "add",
-                "remove"
-              ],
               "type": "string"
             },
             "dry_run": {
@@ -1630,77 +896,14 @@
               "type": "number"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "link": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "chain_seq": {
-                      "type": "number"
-                    },
-                    "created_at": {
-                      "type": "string"
-                    },
-                    "created_by": {
-                      "type": "string"
-                    },
-                    "from_id": {
-                      "type": "string"
-                    },
-                    "link_id": {
-                      "type": "string"
-                    },
-                    "link_type": {
-                      "enum": [
-                        "parent_of",
-                        "relates_to",
-                        "inspired_by",
-                        "responds_to",
-                        "conflicts_with",
-                        "supersedes",
-                        "blocks",
-                        "depends_on",
-                        "condenses_into",
-                        "branches_from",
-                        "references",
-                        "duplicates"
-                      ],
-                      "type": "string"
-                    },
-                    "to_id": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "link_id",
-                    "from_id",
-                    "to_id",
-                    "link_type",
-                    "created_by",
-                    "created_at",
-                    "chain_seq"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "description": "{link_id,from_id,to_id,link_type,created_by,created_at,chain_seq}",
+              "type": [
+                "object",
+                "null"
               ]
             },
             "link_id": {
@@ -1729,14 +932,11 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Filter by status (default: every non-terminal), kind, priority, assignee (\"me\" / \"none\"), tag, claim state (any / yes / no / mine), and/or full-text `query` over title and body. This project only unless `project` says otherwise. Paginated with an opaque cursor. `view: compact` (default) omits bodies. Ordered by priority then recency, or by relevance when querying.",
+        "description": "Filter by status (default: non-terminal), kind, priority, assignee (\"me\" / \"none\"), tag, claim state and/or full-text `query`. This project unless `project` says otherwise. Cursor-paginated; view compact (default) omits bodies.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "assignee": {
@@ -1807,13 +1007,10 @@
             },
             "project": {
               "description": "Default: this server's project (plus legacy tickets without one). Another project key, or \"*\" for every project.",
-              "maxLength": 1024,
-              "minLength": 1,
               "type": "string"
             },
             "query": {
               "description": "Full-text search over title and body (FTS5; words are OR-ed).",
-              "maxLength": 500,
               "type": "string"
             },
             "status": {
@@ -1855,27 +1052,12 @@
         },
         "name": "sea_list",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "count": {
               "type": "number"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "next_cursor": {
@@ -1889,384 +1071,8 @@
             },
             "tickets": {
               "items": {
-                "anyOf": [
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "assignee": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "claim": {
-                        "anyOf": [
-                          {
-                            "additionalProperties": false,
-                            "description": "Who holds the ticket and until when. Never the token.",
-                            "properties": {
-                              "expires_at": {
-                                "type": "string"
-                              },
-                              "holder": {
-                                "type": "string"
-                              },
-                              "lease_seconds": {
-                                "description": "Lease the claim renews by.",
-                                "type": [
-                                  "number",
-                                  "null"
-                                ]
-                              },
-                              "scope": {
-                                "anyOf": [
-                                  {
-                                    "additionalProperties": false,
-                                    "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                                    "properties": {
-                                      "paths": {
-                                        "items": {
-                                          "type": "string"
-                                        },
-                                        "type": "array"
-                                      }
-                                    },
-                                    "required": [
-                                      "paths"
-                                    ],
-                                    "type": "object"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              },
-                              "session": {
-                                "description": "Holder session; one actor label in two sessions is two holders.",
-                                "type": [
-                                  "string",
-                                  "null"
-                                ]
-                              },
-                              "worktree": {
-                                "description": "Absolute worktree path the claim is bound to.",
-                                "type": [
-                                  "string",
-                                  "null"
-                                ]
-                              },
-                              "write_count": {
-                                "type": "number"
-                              }
-                            },
-                            "required": [
-                              "holder",
-                              "expires_at",
-                              "write_count",
-                              "scope",
-                              "worktree",
-                              "session",
-                              "lease_seconds"
-                            ],
-                            "type": "object"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "enum": [
-                          "feature",
-                          "research",
-                          "investigation",
-                          "refactor",
-                          "curiosity",
-                          "question",
-                          "other",
-                          "bug",
-                          "chore",
-                          "incident",
-                          "security",
-                          "epic",
-                          "spike",
-                          "log",
-                          "docs",
-                          "decision"
-                        ],
-                        "type": "string"
-                      },
-                      "priority": {
-                        "enum": [
-                          "urgent",
-                          "high",
-                          "medium",
-                          "low",
-                          "parked"
-                        ],
-                        "type": "string"
-                      },
-                      "project": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "row_version": {
-                        "type": "number"
-                      },
-                      "status": {
-                        "enum": [
-                          "idea",
-                          "triaged",
-                          "in_progress",
-                          "in_design",
-                          "ready",
-                          "parked",
-                          "blocked",
-                          "needs_decision",
-                          "resolved",
-                          "wont_fix",
-                          "duplicate",
-                          "dropped",
-                          "merged"
-                        ],
-                        "type": "string"
-                      },
-                      "tags": {
-                        "items": {
-                          "type": "string"
-                        },
-                        "type": "array"
-                      },
-                      "title": {
-                        "type": "string"
-                      },
-                      "updated_at": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "kind",
-                      "title",
-                      "status",
-                      "priority",
-                      "tags",
-                      "assignee",
-                      "claim",
-                      "project",
-                      "row_version",
-                      "updated_at"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "assignee": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "body": {
-                        "type": "string"
-                      },
-                      "claim": {
-                        "anyOf": [
-                          {
-                            "additionalProperties": false,
-                            "description": "Who holds the ticket and until when. Never the token.",
-                            "properties": {
-                              "expires_at": {
-                                "type": "string"
-                              },
-                              "holder": {
-                                "type": "string"
-                              },
-                              "lease_seconds": {
-                                "description": "Lease the claim renews by.",
-                                "type": [
-                                  "number",
-                                  "null"
-                                ]
-                              },
-                              "scope": {
-                                "anyOf": [
-                                  {
-                                    "additionalProperties": false,
-                                    "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                                    "properties": {
-                                      "paths": {
-                                        "items": {
-                                          "type": "string"
-                                        },
-                                        "type": "array"
-                                      }
-                                    },
-                                    "required": [
-                                      "paths"
-                                    ],
-                                    "type": "object"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              },
-                              "session": {
-                                "description": "Holder session; one actor label in two sessions is two holders.",
-                                "type": [
-                                  "string",
-                                  "null"
-                                ]
-                              },
-                              "worktree": {
-                                "description": "Absolute worktree path the claim is bound to.",
-                                "type": [
-                                  "string",
-                                  "null"
-                                ]
-                              },
-                              "write_count": {
-                                "type": "number"
-                              }
-                            },
-                            "required": [
-                              "holder",
-                              "expires_at",
-                              "write_count",
-                              "scope",
-                              "worktree",
-                              "session",
-                              "lease_seconds"
-                            ],
-                            "type": "object"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "created_at": {
-                        "type": "string"
-                      },
-                      "created_by": {
-                        "type": "string"
-                      },
-                      "created_seq": {
-                        "type": "number"
-                      },
-                      "duplicate_of": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "enum": [
-                          "feature",
-                          "research",
-                          "investigation",
-                          "refactor",
-                          "curiosity",
-                          "question",
-                          "other",
-                          "bug",
-                          "chore",
-                          "incident",
-                          "security",
-                          "epic",
-                          "spike",
-                          "log",
-                          "docs",
-                          "decision"
-                        ],
-                        "type": "string"
-                      },
-                      "last_seq": {
-                        "type": "number"
-                      },
-                      "priority": {
-                        "enum": [
-                          "urgent",
-                          "high",
-                          "medium",
-                          "low",
-                          "parked"
-                        ],
-                        "type": "string"
-                      },
-                      "project": {
-                        "description": "Project key; null = legacy, visible in every project.",
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "row_version": {
-                        "type": "number"
-                      },
-                      "status": {
-                        "enum": [
-                          "idea",
-                          "triaged",
-                          "in_progress",
-                          "in_design",
-                          "ready",
-                          "parked",
-                          "blocked",
-                          "needs_decision",
-                          "resolved",
-                          "wont_fix",
-                          "duplicate",
-                          "dropped",
-                          "merged"
-                        ],
-                        "type": "string"
-                      },
-                      "tags": {
-                        "items": {
-                          "type": "string"
-                        },
-                        "type": "array"
-                      },
-                      "title": {
-                        "type": "string"
-                      },
-                      "updated_at": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "kind",
-                      "title",
-                      "body",
-                      "status",
-                      "priority",
-                      "tags",
-                      "assignee",
-                      "duplicate_of",
-                      "created_by",
-                      "created_at",
-                      "updated_at",
-                      "row_version",
-                      "claim",
-                      "project",
-                      "created_seq",
-                      "last_seq"
-                    ],
-                    "type": "object"
-                  }
-                ]
+                "description": "{id,kind,title,status,priority,tags,assignee,claim,project,row_version,updated_at} | {id,kind,title,body,status,priority,tags,assignee,duplicate_of,created_by,created_at,updated_at,row_version,claim,project,created_seq,last_seq}",
+                "type": "object"
               },
               "type": "array"
             }
@@ -2289,14 +1095,11 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Dispatch: atomically pick and claim the highest-priority unclaimed triaged or in_progress ticket that is assigned to you or unassigned, is not priority parked, and whose predecessors (tickets that `blocks` it, tickets it `depends_on`) are all terminal. in_progress beats triaged at equal priority; then oldest (chain order) first. Returns ticket + claim_token, or ticket: null with reason nothing_eligible. This project only. Call it in a loop. `scope.paths` locks the paths you will edit for the lease (scope_conflict if they overlap someone else's live scope).",
+        "description": "Atomically pick and claim the next ticket: unclaimed, triaged or in_progress, assigned to you or nobody, not priority parked, all predecessors (blocks / depends_on) terminal; highest priority, in_progress before triaged, then oldest. Returns ticket + claim_token, or ticket: null (nothing_eligible). This project only. `scope.paths` locks the files you will edit.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "include_unassigned": {
@@ -2330,19 +1133,17 @@
               "type": "array"
             },
             "lease_seconds": {
-              "description": "Lease length in seconds (default 900, max 3600). Renewed automatically while you keep calling sea-lite tools; expiry frees the ticket.",
+              "description": "Lease seconds (default 900, max 3600); renewed while you keep calling sea-lite tools.",
               "maximum": 3600,
               "minimum": 1,
               "type": "integer"
             },
             "scope": {
-              "description": "The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by someone else (another actor, or this actor in another session).",
+              "description": "What you will edit; scope_conflict if someone else holds an overlapping scope.",
               "properties": {
                 "paths": {
-                  "description": "Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.",
+                  "description": "Repo-relative files or dirs (a dir covers everything beneath), globs, or `.` for the whole repo.",
                   "items": {
-                    "maxLength": 512,
-                    "minLength": 1,
                     "type": "string"
                   },
                   "maxItems": 64,
@@ -2350,9 +1151,7 @@
                   "type": "array"
                 },
                 "worktree": {
-                  "description": "Absolute path of the git worktree you work in. Binds the claim to it: `sea-lite release-worktree <path>` frees it when the worktree is removed.",
-                  "maxLength": 1024,
-                  "minLength": 1,
+                  "description": "Absolute path of your git worktree; `sea-lite release-worktree` frees the claim when it is removed.",
                   "type": "string"
                 }
               },
@@ -2367,8 +1166,6 @@
         },
         "name": "sea_next",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "claim_token": {
               "type": [
@@ -2386,242 +1183,20 @@
               ]
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "reason": {
-              "anyOf": [
-                {
-                  "enum": [
-                    "nothing_eligible"
-                  ],
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "type": [
+                "string",
+                "null"
               ]
             },
             "ticket": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "assignee": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "body": {
-                      "type": "string"
-                    },
-                    "claim": {
-                      "anyOf": [
-                        {
-                          "additionalProperties": false,
-                          "description": "Who holds the ticket and until when. Never the token.",
-                          "properties": {
-                            "expires_at": {
-                              "type": "string"
-                            },
-                            "holder": {
-                              "type": "string"
-                            },
-                            "lease_seconds": {
-                              "description": "Lease the claim renews by.",
-                              "type": [
-                                "number",
-                                "null"
-                              ]
-                            },
-                            "scope": {
-                              "anyOf": [
-                                {
-                                  "additionalProperties": false,
-                                  "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                                  "properties": {
-                                    "paths": {
-                                      "items": {
-                                        "type": "string"
-                                      },
-                                      "type": "array"
-                                    }
-                                  },
-                                  "required": [
-                                    "paths"
-                                  ],
-                                  "type": "object"
-                                },
-                                {
-                                  "type": "null"
-                                }
-                              ]
-                            },
-                            "session": {
-                              "description": "Holder session; one actor label in two sessions is two holders.",
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            },
-                            "worktree": {
-                              "description": "Absolute worktree path the claim is bound to.",
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            },
-                            "write_count": {
-                              "type": "number"
-                            }
-                          },
-                          "required": [
-                            "holder",
-                            "expires_at",
-                            "write_count",
-                            "scope",
-                            "worktree",
-                            "session",
-                            "lease_seconds"
-                          ],
-                          "type": "object"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "created_at": {
-                      "type": "string"
-                    },
-                    "created_by": {
-                      "type": "string"
-                    },
-                    "created_seq": {
-                      "type": "number"
-                    },
-                    "duplicate_of": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "id": {
-                      "type": "string"
-                    },
-                    "kind": {
-                      "enum": [
-                        "feature",
-                        "research",
-                        "investigation",
-                        "refactor",
-                        "curiosity",
-                        "question",
-                        "other",
-                        "bug",
-                        "chore",
-                        "incident",
-                        "security",
-                        "epic",
-                        "spike",
-                        "log",
-                        "docs",
-                        "decision"
-                      ],
-                      "type": "string"
-                    },
-                    "last_seq": {
-                      "type": "number"
-                    },
-                    "priority": {
-                      "enum": [
-                        "urgent",
-                        "high",
-                        "medium",
-                        "low",
-                        "parked"
-                      ],
-                      "type": "string"
-                    },
-                    "project": {
-                      "description": "Project key; null = legacy, visible in every project.",
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "row_version": {
-                      "type": "number"
-                    },
-                    "status": {
-                      "enum": [
-                        "idea",
-                        "triaged",
-                        "in_progress",
-                        "in_design",
-                        "ready",
-                        "parked",
-                        "blocked",
-                        "needs_decision",
-                        "resolved",
-                        "wont_fix",
-                        "duplicate",
-                        "dropped",
-                        "merged"
-                      ],
-                      "type": "string"
-                    },
-                    "tags": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    },
-                    "title": {
-                      "type": "string"
-                    },
-                    "updated_at": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "kind",
-                    "title",
-                    "body",
-                    "status",
-                    "priority",
-                    "tags",
-                    "assignee",
-                    "duplicate_of",
-                    "created_by",
-                    "created_at",
-                    "updated_at",
-                    "row_version",
-                    "claim",
-                    "project",
-                    "created_seq",
-                    "last_seq"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "description": "{id,kind,title,body,status,priority,tags,assignee,duplicate_of,created_by,created_at,updated_at,row_version,claim,project,created_seq,last_seq}",
+              "type": [
+                "object",
+                "null"
               ]
             }
           },
@@ -2635,7 +1210,7 @@
           ],
           "type": "object"
         },
-        "title": "Pick and claim the next ticket"
+        "title": "Claim the next ticket"
       },
       {
         "annotations": {
@@ -2644,33 +1219,25 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Heartbeat: set the lease expiry to now + extend_by_seconds (default: the claim's lease; ≤ 3600) if later than the current expiry; never shortens. Holder-only. Any sea-lite call renews your claims anyway. Not chained.",
+        "description": "Extend your lease to now + extend_by_seconds (default: its lease; max 3600; never shortens). Any sea-lite call renews your claims anyway.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "claim_token": {
-              "description": "The claim token returned by sea_claim or sea_next.",
-              "maxLength": 64,
-              "minLength": 64,
-              "pattern": "^[0-9a-f]+$",
+              "description": "From sea_claim / sea_next.",
               "type": "string"
             },
             "extend_by_seconds": {
-              "description": "New expiry = now + this (default: the claim's own lease; max 3600); never shortens an existing lease.",
+              "description": "Expiry = now + this (default: the claim's lease); never shortens.",
               "maximum": 3600,
               "minimum": 1,
               "type": "integer"
             },
             "ticket_id": {
-              "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-              "maxLength": 36,
-              "minLength": 8,
+              "description": "Id or unique ≥8-char prefix.",
               "type": "string"
             }
           },
@@ -2682,8 +1249,6 @@
         },
         "name": "sea_refresh",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "expires_at": {
               "type": "string"
@@ -2692,20 +1257,7 @@
               "type": "boolean"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "ticket_id": {
@@ -2729,21 +1281,15 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Give a ticket back to the queue. Holder: pass claim_token (and ideally a `note` saying where you left off). Operator (server started with --role operator): `force: true` releases any holder and is recorded as sea_ticket.claim_force_released with your reason.",
+        "description": "Give a ticket back to the queue (claim_token; leave a `note` saying where you stopped). Operator role: force: true releases any holder, recorded with your reason.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "claim_token": {
               "description": "Required unless force is set.",
-              "maxLength": 64,
-              "minLength": 64,
-              "pattern": "^[0-9a-f]+$",
               "type": "string"
             },
             "force": {
@@ -2753,18 +1299,14 @@
             },
             "note": {
               "description": "Hand-off note appended to the ticket on release.",
-              "maxLength": 10000,
               "type": "string"
             },
             "reason": {
               "description": "Why (force releases should say).",
-              "maxLength": 2000,
               "type": "string"
             },
             "ticket_id": {
-              "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-              "maxLength": 36,
-              "minLength": 8,
+              "description": "Id or unique ≥8-char prefix.",
               "type": "string"
             }
           },
@@ -2775,66 +1317,19 @@
         },
         "name": "sea_release",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "forced": {
               "type": "boolean"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "note": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "author": {
-                      "type": "string"
-                    },
-                    "body": {
-                      "type": "string"
-                    },
-                    "chain_seq": {
-                      "type": "number"
-                    },
-                    "created_at": {
-                      "type": "string"
-                    },
-                    "note_id": {
-                      "type": "string"
-                    },
-                    "ticket_id": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "note_id",
-                    "ticket_id",
-                    "author",
-                    "body",
-                    "created_at",
-                    "chain_seq"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "description": "{note_id,ticket_id,author,body,created_at,chain_seq}",
+              "type": [
+                "object",
+                "null"
               ]
             },
             "previous_holder": {
@@ -2844,205 +1339,7 @@
               ]
             },
             "ticket": {
-              "additionalProperties": false,
-              "properties": {
-                "assignee": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "body": {
-                  "type": "string"
-                },
-                "claim": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "description": "Who holds the ticket and until when. Never the token.",
-                      "properties": {
-                        "expires_at": {
-                          "type": "string"
-                        },
-                        "holder": {
-                          "type": "string"
-                        },
-                        "lease_seconds": {
-                          "description": "Lease the claim renews by.",
-                          "type": [
-                            "number",
-                            "null"
-                          ]
-                        },
-                        "scope": {
-                          "anyOf": [
-                            {
-                              "additionalProperties": false,
-                              "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                              "properties": {
-                                "paths": {
-                                  "items": {
-                                    "type": "string"
-                                  },
-                                  "type": "array"
-                                }
-                              },
-                              "required": [
-                                "paths"
-                              ],
-                              "type": "object"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        },
-                        "session": {
-                          "description": "Holder session; one actor label in two sessions is two holders.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "worktree": {
-                          "description": "Absolute worktree path the claim is bound to.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "write_count": {
-                          "type": "number"
-                        }
-                      },
-                      "required": [
-                        "holder",
-                        "expires_at",
-                        "write_count",
-                        "scope",
-                        "worktree",
-                        "session",
-                        "lease_seconds"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "created_at": {
-                  "type": "string"
-                },
-                "created_by": {
-                  "type": "string"
-                },
-                "created_seq": {
-                  "type": "number"
-                },
-                "duplicate_of": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "id": {
-                  "type": "string"
-                },
-                "kind": {
-                  "enum": [
-                    "feature",
-                    "research",
-                    "investigation",
-                    "refactor",
-                    "curiosity",
-                    "question",
-                    "other",
-                    "bug",
-                    "chore",
-                    "incident",
-                    "security",
-                    "epic",
-                    "spike",
-                    "log",
-                    "docs",
-                    "decision"
-                  ],
-                  "type": "string"
-                },
-                "last_seq": {
-                  "type": "number"
-                },
-                "priority": {
-                  "enum": [
-                    "urgent",
-                    "high",
-                    "medium",
-                    "low",
-                    "parked"
-                  ],
-                  "type": "string"
-                },
-                "project": {
-                  "description": "Project key; null = legacy, visible in every project.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "row_version": {
-                  "type": "number"
-                },
-                "status": {
-                  "enum": [
-                    "idea",
-                    "triaged",
-                    "in_progress",
-                    "in_design",
-                    "ready",
-                    "parked",
-                    "blocked",
-                    "needs_decision",
-                    "resolved",
-                    "wont_fix",
-                    "duplicate",
-                    "dropped",
-                    "merged"
-                  ],
-                  "type": "string"
-                },
-                "tags": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "title": {
-                  "type": "string"
-                },
-                "updated_at": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "id",
-                "kind",
-                "title",
-                "body",
-                "status",
-                "priority",
-                "tags",
-                "assignee",
-                "duplicate_of",
-                "created_by",
-                "created_at",
-                "updated_at",
-                "row_version",
-                "claim",
-                "project",
-                "created_seq",
-                "last_seq"
-              ],
+              "description": "{id,kind,title,body,status,priority,tags,assignee,duplicate_of,created_by,created_at,updated_at,row_version,claim,project,created_seq,last_seq}",
               "type": "object"
             }
           },
@@ -3063,21 +1360,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Would editing these paths collide with a scope someone else holds right now (another actor, or this actor in another session)? Returns { ok, conflicts } naming each holder, ticket, the overlapping entries and the expiry. No claim is taken or needed and your own scopes never conflict. Use before you touch a file outside your claim.",
+        "description": "Would editing these paths collide with a live scope someone else holds (another actor, or you in another session)? Returns {ok, conflicts} naming holder, ticket, overlap and expiry. Needs no claim; your own scopes never conflict.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "paths": {
               "description": "Files or globs you are about to edit (repo-relative).",
               "items": {
-                "maxLength": 512,
-                "minLength": 1,
                 "type": "string"
               },
               "maxItems": 64,
@@ -3092,95 +1384,16 @@
         },
         "name": "sea_scope_check",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "conflicts": {
               "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "claim_expires_at": {
-                    "type": "string"
-                  },
-                  "expires_in_seconds": {
-                    "type": "number"
-                  },
-                  "held": {
-                    "description": "The holder's scope entries that overlap.",
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "holder": {
-                    "type": "string"
-                  },
-                  "holder_label": {
-                    "description": "actor#session, for humans.",
-                    "type": "string"
-                  },
-                  "holder_session": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "overlapping": {
-                    "items": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "held": {
-                          "type": "string"
-                        },
-                        "requested": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "requested",
-                        "held"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
-                  "ticket_id": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "ticket_id",
-                  "title",
-                  "holder",
-                  "holder_session",
-                  "holder_label",
-                  "claim_expires_at",
-                  "expires_in_seconds",
-                  "held",
-                  "overlapping"
-                ],
+                "description": "{ticket_id,title,holder,holder_session,holder_label,claim_expires_at,expires_in_seconds,held,overlapping}",
                 "type": "object"
               },
               "type": "array"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "ok": {
@@ -3206,7 +1419,7 @@
           ],
           "type": "object"
         },
-        "title": "Check paths against live claim scopes"
+        "title": "Check paths against claim scopes"
       },
       {
         "annotations": {
@@ -3215,26 +1428,19 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Per actor, derived from the chain: claims taken / rotated / released / expired / force-released, lease-seconds held, status transitions, tickets created, live claims. `since` limits the window (`24h`, `7d`, or ISO time). scope_conflict refusals are not chained, so they are not counted.",
+        "description": "Per actor, from the chain: claims taken / rotated / released / expired / force-released, lease-seconds held, transitions, tickets created, live claims. `since`: 24h, 7d or ISO time. scope_conflict refusals are not counted.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor": {
               "description": "Only this actor.",
-              "maxLength": 200,
-              "minLength": 1,
               "type": "string"
             },
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "since": {
               "description": "Window start: a duration back from now (`24h`, `7d`, `2w`) or an ISO-8601 timestamp. Default: the whole chain.",
-              "maxLength": 64,
-              "minLength": 1,
               "type": "string"
             }
           },
@@ -3242,79 +1448,10 @@
         },
         "name": "sea_stats",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "actors": {
               "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "actor": {
-                    "type": "string"
-                  },
-                  "claims_rotated": {
-                    "description": "Re-claims of a ticket already held (token rotation).",
-                    "type": "number"
-                  },
-                  "claims_taken": {
-                    "description": "Claims taken, excluding token rotations.",
-                    "type": "number"
-                  },
-                  "expired": {
-                    "description": "Leases that lapsed.",
-                    "type": "number"
-                  },
-                  "force_released": {
-                    "description": "Own claims an operator force-released.",
-                    "type": "number"
-                  },
-                  "force_releases_issued": {
-                    "description": "Force releases performed as operator.",
-                    "type": "number"
-                  },
-                  "lease_seconds": {
-                    "description": "Seconds claims were held, clipped to the window.",
-                    "type": "number"
-                  },
-                  "live_claims": {
-                    "description": "Claims held right now.",
-                    "type": "number"
-                  },
-                  "released": {
-                    "description": "Claims given back by the holder.",
-                    "type": "number"
-                  },
-                  "released_on_transition": {
-                    "description": "Claims released by the holder's terminal transition.",
-                    "type": "number"
-                  },
-                  "scoped_claims": {
-                    "description": "Claims taken with a scope.",
-                    "type": "number"
-                  },
-                  "tickets_created": {
-                    "type": "number"
-                  },
-                  "transitions": {
-                    "description": "Status changes made.",
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "actor",
-                  "claims_taken",
-                  "claims_rotated",
-                  "scoped_claims",
-                  "released",
-                  "released_on_transition",
-                  "expired",
-                  "force_released",
-                  "force_releases_issued",
-                  "lease_seconds",
-                  "live_claims",
-                  "transitions",
-                  "tickets_created"
-                ],
+                "description": "{actor,claims_taken,claims_rotated,scoped_claims,released,released_on_transition,expired,force_released,force_releases_issued,lease_seconds,live_claims,transitions,tickets_created}",
                 "type": "object"
               },
               "type": "array"
@@ -3323,20 +1460,7 @@
               "type": "number"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "since": {
@@ -3347,70 +1471,7 @@
               ]
             },
             "totals": {
-              "additionalProperties": false,
-              "properties": {
-                "claims_rotated": {
-                  "description": "Re-claims of a ticket already held (token rotation).",
-                  "type": "number"
-                },
-                "claims_taken": {
-                  "description": "Claims taken, excluding token rotations.",
-                  "type": "number"
-                },
-                "expired": {
-                  "description": "Leases that lapsed.",
-                  "type": "number"
-                },
-                "force_released": {
-                  "description": "Own claims an operator force-released.",
-                  "type": "number"
-                },
-                "force_releases_issued": {
-                  "description": "Force releases performed as operator.",
-                  "type": "number"
-                },
-                "lease_seconds": {
-                  "description": "Seconds claims were held, clipped to the window.",
-                  "type": "number"
-                },
-                "live_claims": {
-                  "description": "Claims held right now.",
-                  "type": "number"
-                },
-                "released": {
-                  "description": "Claims given back by the holder.",
-                  "type": "number"
-                },
-                "released_on_transition": {
-                  "description": "Claims released by the holder's terminal transition.",
-                  "type": "number"
-                },
-                "scoped_claims": {
-                  "description": "Claims taken with a scope.",
-                  "type": "number"
-                },
-                "tickets_created": {
-                  "type": "number"
-                },
-                "transitions": {
-                  "description": "Status changes made.",
-                  "type": "number"
-                }
-              },
-              "required": [
-                "claims_taken",
-                "claims_rotated",
-                "scoped_claims",
-                "released",
-                "released_on_transition",
-                "expired",
-                "force_released",
-                "force_releases_issued",
-                "lease_seconds",
-                "live_claims",
-                "transitions",
-                "tickets_created"
-              ],
+              "description": "{claims_taken,claims_rotated,scoped_claims,released,released_on_transition,expired,force_released,force_releases_issued,lease_seconds,live_claims,transitions,tickets_created}",
               "type": "object"
             },
             "until": {
@@ -3436,59 +1497,77 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Set status. Fenced (claim_token). Legal moves: work track idea → triaged → in_progress → resolved; any active ticket may enter parked | blocked | needs_decision (resume only to idea / triaged / in_progress) or a terminal state resolved | wont_fix | duplicate | dropped | merged (no exit). to=duplicate requires duplicate_of and records a `duplicates` link. Entering a terminal state releases your claim and asks for confirmation unless confirm: true is passed. On rejection the error carries legal_next. Known statuses: idea | triaged | in_progress | in_design | ready | parked | blocked | needs_decision | resolved | wont_fix | duplicate | dropped | merged.",
+        "description": "Set status (claim_token). Work track idea → triaged → in_progress → resolved; any active ticket may enter parked | blocked | needs_decision (resume to idea / triaged / in_progress) or a terminal state resolved | wont_fix | duplicate | dropped | merged (no exit; releases the claim; needs confirm: true or the client's confirmation). to=duplicate needs duplicate_of (records a `duplicates` link). `note` appends a note in the same write; `tickets` moves several at once, all or nothing. Rejections carry legal_next.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "claim_token": {
-              "description": "The claim token returned by sea_claim or sea_next.",
-              "maxLength": 64,
-              "minLength": 64,
-              "pattern": "^[0-9a-f]+$",
+              "description": "From sea_claim / sea_next.",
               "type": "string"
             },
             "confirm": {
-              "description": "Terminal states (resolved | wont_fix | duplicate | dropped | merged) have no exit. Pass true to enter one directly. When omitted, a client that supports elicitation is asked to confirm (input_required); one that does not gets confirmation_required.",
+              "description": "true: enter a terminal state now (else the client is asked, or gets confirmation_required).",
               "type": "boolean"
             },
             "dry_run": {
               "default": false,
-              "description": "Validate and report what would happen; write nothing.",
+              "description": "Validate only; write nothing.",
               "type": "boolean"
             },
             "duplicate_of": {
               "description": "Required when to = duplicate; also creates a `duplicates` link.",
-              "maxLength": 36,
-              "minLength": 8,
               "type": "string"
             },
             "expected_version": {
-              "description": "Optimistic concurrency: fail with version_conflict unless the ticket row_version equals this.",
-              "maximum": 9007199254740991,
+              "description": "Fail with version_conflict unless row_version equals this.",
               "minimum": 0,
               "type": "integer"
             },
             "idempotency_key": {
-              "description": "Replay-safe key. A second call with the same key returns the first result without writing again.",
-              "maxLength": 180,
-              "minLength": 1,
+              "description": "Replay-safe: a repeat with the same key returns the first result, writes nothing.",
+              "type": "string"
+            },
+            "note": {
+              "description": "Also append this note (hand-off) in the same write.",
               "type": "string"
             },
             "reason": {
-              "maxLength": 2000,
               "type": "string"
             },
             "ticket_id": {
-              "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-              "maxLength": 36,
-              "minLength": 8,
+              "description": "Id or unique ≥8-char prefix.",
               "type": "string"
+            },
+            "tickets": {
+              "description": "Several tickets (each with its own token) instead of ticket_id + claim_token; all or none.",
+              "items": {
+                "properties": {
+                  "claim_token": {
+                    "description": "From sea_claim / sea_next.",
+                    "type": "string"
+                  },
+                  "expected_version": {
+                    "description": "Fail with version_conflict unless row_version equals this.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "ticket_id": {
+                    "description": "Id or unique ≥8-char prefix.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "ticket_id",
+                  "claim_token"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
             },
             "to": {
               "enum": [
@@ -3510,19 +1589,19 @@
             }
           },
           "required": [
-            "ticket_id",
-            "claim_token",
             "to"
           ],
           "type": "object"
         },
         "name": "sea_transition",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
+          "description": "One of: {ticket,ticket_id,from,to,claim_released,duplicates_link_id,legal_next,head,replayed,dry_run} | {results,count,head,replayed,dry_run}",
           "properties": {
             "claim_released": {
               "type": "boolean"
+            },
+            "count": {
+              "type": "number"
             },
             "dry_run": {
               "type": "boolean"
@@ -3534,57 +1613,14 @@
               ]
             },
             "from": {
-              "enum": [
-                "idea",
-                "triaged",
-                "in_progress",
-                "in_design",
-                "ready",
-                "parked",
-                "blocked",
-                "needs_decision",
-                "resolved",
-                "wont_fix",
-                "duplicate",
-                "dropped",
-                "merged"
-              ],
               "type": "string"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "legal_next": {
               "items": {
-                "enum": [
-                  "idea",
-                  "triaged",
-                  "in_progress",
-                  "in_design",
-                  "ready",
-                  "parked",
-                  "blocked",
-                  "needs_decision",
-                  "resolved",
-                  "wont_fix",
-                  "duplicate",
-                  "dropped",
-                  "merged"
-                ],
                 "type": "string"
               },
               "type": "array"
@@ -3592,252 +1628,35 @@
             "replayed": {
               "type": "boolean"
             },
+            "results": {
+              "items": {
+                "description": "{ticket_id,title,from,to,claim_released}",
+                "type": "object"
+              },
+              "type": "array"
+            },
             "ticket": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "assignee": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "body": {
-                      "type": "string"
-                    },
-                    "claim": {
-                      "anyOf": [
-                        {
-                          "additionalProperties": false,
-                          "description": "Who holds the ticket and until when. Never the token.",
-                          "properties": {
-                            "expires_at": {
-                              "type": "string"
-                            },
-                            "holder": {
-                              "type": "string"
-                            },
-                            "lease_seconds": {
-                              "description": "Lease the claim renews by.",
-                              "type": [
-                                "number",
-                                "null"
-                              ]
-                            },
-                            "scope": {
-                              "anyOf": [
-                                {
-                                  "additionalProperties": false,
-                                  "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                                  "properties": {
-                                    "paths": {
-                                      "items": {
-                                        "type": "string"
-                                      },
-                                      "type": "array"
-                                    }
-                                  },
-                                  "required": [
-                                    "paths"
-                                  ],
-                                  "type": "object"
-                                },
-                                {
-                                  "type": "null"
-                                }
-                              ]
-                            },
-                            "session": {
-                              "description": "Holder session; one actor label in two sessions is two holders.",
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            },
-                            "worktree": {
-                              "description": "Absolute worktree path the claim is bound to.",
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            },
-                            "write_count": {
-                              "type": "number"
-                            }
-                          },
-                          "required": [
-                            "holder",
-                            "expires_at",
-                            "write_count",
-                            "scope",
-                            "worktree",
-                            "session",
-                            "lease_seconds"
-                          ],
-                          "type": "object"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "created_at": {
-                      "type": "string"
-                    },
-                    "created_by": {
-                      "type": "string"
-                    },
-                    "created_seq": {
-                      "type": "number"
-                    },
-                    "duplicate_of": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "id": {
-                      "type": "string"
-                    },
-                    "kind": {
-                      "enum": [
-                        "feature",
-                        "research",
-                        "investigation",
-                        "refactor",
-                        "curiosity",
-                        "question",
-                        "other",
-                        "bug",
-                        "chore",
-                        "incident",
-                        "security",
-                        "epic",
-                        "spike",
-                        "log",
-                        "docs",
-                        "decision"
-                      ],
-                      "type": "string"
-                    },
-                    "last_seq": {
-                      "type": "number"
-                    },
-                    "priority": {
-                      "enum": [
-                        "urgent",
-                        "high",
-                        "medium",
-                        "low",
-                        "parked"
-                      ],
-                      "type": "string"
-                    },
-                    "project": {
-                      "description": "Project key; null = legacy, visible in every project.",
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "row_version": {
-                      "type": "number"
-                    },
-                    "status": {
-                      "enum": [
-                        "idea",
-                        "triaged",
-                        "in_progress",
-                        "in_design",
-                        "ready",
-                        "parked",
-                        "blocked",
-                        "needs_decision",
-                        "resolved",
-                        "wont_fix",
-                        "duplicate",
-                        "dropped",
-                        "merged"
-                      ],
-                      "type": "string"
-                    },
-                    "tags": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    },
-                    "title": {
-                      "type": "string"
-                    },
-                    "updated_at": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "kind",
-                    "title",
-                    "body",
-                    "status",
-                    "priority",
-                    "tags",
-                    "assignee",
-                    "duplicate_of",
-                    "created_by",
-                    "created_at",
-                    "updated_at",
-                    "row_version",
-                    "claim",
-                    "project",
-                    "created_seq",
-                    "last_seq"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "description": "{id,kind,title,body,status,priority,tags,assignee,duplicate_of,created_by,created_at,updated_at,row_version,claim,project,created_seq,last_seq}",
+              "type": [
+                "object",
+                "null"
               ]
             },
             "ticket_id": {
               "type": "string"
             },
             "to": {
-              "enum": [
-                "idea",
-                "triaged",
-                "in_progress",
-                "in_design",
-                "ready",
-                "parked",
-                "blocked",
-                "needs_decision",
-                "resolved",
-                "wont_fix",
-                "duplicate",
-                "dropped",
-                "merged"
-              ],
               "type": "string"
             }
           },
           "required": [
-            "ticket",
-            "ticket_id",
-            "from",
-            "to",
-            "claim_released",
-            "duplicates_link_id",
-            "legal_next",
             "head",
             "replayed",
             "dry_run"
           ],
           "type": "object"
         },
-        "title": "Move a ticket to another status"
+        "title": "Change a ticket's status"
       },
       {
         "annotations": {
@@ -3846,20 +1665,15 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Change title/body/kind/priority/assignee, add or remove tags, and/or append a note. Fenced: requires the claim_token of a live claim held by you. `expected_version` (from sea_get / sea_list row_version) rejects the write with version_conflict if someone changed the ticket since you read it. Notes are the hand-off channel: write what you found and what is left before you release.",
+        "description": "Edit a ticket you hold (claim_token): title/body/kind/priority/assignee, tags, and/or append a note. Notes are the hand-off channel. expected_version (row_version from sea_get / sea_list) rejects a write on a ticket changed since.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.",
-              "maxLength": 200,
-              "minLength": 1,
+              "description": "Acting actor (default: the server --actor). Subagents sharing one server pass their own.",
               "type": "string"
             },
             "add_tags": {
               "items": {
-                "maxLength": 64,
-                "minLength": 1,
                 "type": "string"
               },
               "maxItems": 32,
@@ -3868,7 +1682,6 @@
             "assignee": {
               "anyOf": [
                 {
-                  "maxLength": 200,
                   "type": "string"
                 },
                 {
@@ -3878,31 +1691,24 @@
               "description": "Set the assignee; null clears it."
             },
             "body": {
-              "maxLength": 100000,
               "type": "string"
             },
             "claim_token": {
-              "description": "The claim token returned by sea_claim or sea_next.",
-              "maxLength": 64,
-              "minLength": 64,
-              "pattern": "^[0-9a-f]+$",
+              "description": "From sea_claim / sea_next.",
               "type": "string"
             },
             "dry_run": {
               "default": false,
-              "description": "Validate and report what would happen; write nothing.",
+              "description": "Validate only; write nothing.",
               "type": "boolean"
             },
             "expected_version": {
-              "description": "Optimistic concurrency: fail with version_conflict unless the ticket row_version equals this.",
-              "maximum": 9007199254740991,
+              "description": "Fail with version_conflict unless row_version equals this.",
               "minimum": 0,
               "type": "integer"
             },
             "idempotency_key": {
-              "description": "Replay-safe key. A second call with the same key returns the first result without writing again.",
-              "maxLength": 180,
-              "minLength": 1,
+              "description": "Replay-safe: a repeat with the same key returns the first result, writes nothing.",
               "type": "string"
             },
             "kind": {
@@ -3928,7 +1734,6 @@
             },
             "note": {
               "description": "Append a note (progress, findings, hand-off).",
-              "maxLength": 10000,
               "type": "string"
             },
             "priority": {
@@ -3943,22 +1748,16 @@
             },
             "remove_tags": {
               "items": {
-                "maxLength": 64,
-                "minLength": 1,
                 "type": "string"
               },
               "maxItems": 32,
               "type": "array"
             },
             "ticket_id": {
-              "description": "Ticket id (uuid) or a unique prefix of at least 8 characters.",
-              "maxLength": 36,
-              "minLength": 8,
+              "description": "Id or unique ≥8-char prefix.",
               "type": "string"
             },
             "title": {
-              "maxLength": 500,
-              "minLength": 1,
               "type": "string"
             }
           },
@@ -3970,8 +1769,6 @@
         },
         "name": "sea_update",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "changed": {
               "items": {
@@ -3983,59 +1780,14 @@
               "type": "boolean"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head after the call.",
-              "properties": {
-                "hash": {
-                  "type": "string"
-                },
-                "seq": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
+              "description": "Chain head after the call. {seq,hash}",
               "type": "object"
             },
             "note": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "author": {
-                      "type": "string"
-                    },
-                    "body": {
-                      "type": "string"
-                    },
-                    "chain_seq": {
-                      "type": "number"
-                    },
-                    "created_at": {
-                      "type": "string"
-                    },
-                    "note_id": {
-                      "type": "string"
-                    },
-                    "ticket_id": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "note_id",
-                    "ticket_id",
-                    "author",
-                    "body",
-                    "created_at",
-                    "chain_seq"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "description": "{note_id,ticket_id,author,body,created_at,chain_seq}",
+              "type": [
+                "object",
+                "null"
               ]
             },
             "replayed": {
@@ -4045,212 +1797,10 @@
               "type": "number"
             },
             "ticket": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "assignee": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "body": {
-                      "type": "string"
-                    },
-                    "claim": {
-                      "anyOf": [
-                        {
-                          "additionalProperties": false,
-                          "description": "Who holds the ticket and until when. Never the token.",
-                          "properties": {
-                            "expires_at": {
-                              "type": "string"
-                            },
-                            "holder": {
-                              "type": "string"
-                            },
-                            "lease_seconds": {
-                              "description": "Lease the claim renews by.",
-                              "type": [
-                                "number",
-                                "null"
-                              ]
-                            },
-                            "scope": {
-                              "anyOf": [
-                                {
-                                  "additionalProperties": false,
-                                  "description": "Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.",
-                                  "properties": {
-                                    "paths": {
-                                      "items": {
-                                        "type": "string"
-                                      },
-                                      "type": "array"
-                                    }
-                                  },
-                                  "required": [
-                                    "paths"
-                                  ],
-                                  "type": "object"
-                                },
-                                {
-                                  "type": "null"
-                                }
-                              ]
-                            },
-                            "session": {
-                              "description": "Holder session; one actor label in two sessions is two holders.",
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            },
-                            "worktree": {
-                              "description": "Absolute worktree path the claim is bound to.",
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            },
-                            "write_count": {
-                              "type": "number"
-                            }
-                          },
-                          "required": [
-                            "holder",
-                            "expires_at",
-                            "write_count",
-                            "scope",
-                            "worktree",
-                            "session",
-                            "lease_seconds"
-                          ],
-                          "type": "object"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "created_at": {
-                      "type": "string"
-                    },
-                    "created_by": {
-                      "type": "string"
-                    },
-                    "created_seq": {
-                      "type": "number"
-                    },
-                    "duplicate_of": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "id": {
-                      "type": "string"
-                    },
-                    "kind": {
-                      "enum": [
-                        "feature",
-                        "research",
-                        "investigation",
-                        "refactor",
-                        "curiosity",
-                        "question",
-                        "other",
-                        "bug",
-                        "chore",
-                        "incident",
-                        "security",
-                        "epic",
-                        "spike",
-                        "log",
-                        "docs",
-                        "decision"
-                      ],
-                      "type": "string"
-                    },
-                    "last_seq": {
-                      "type": "number"
-                    },
-                    "priority": {
-                      "enum": [
-                        "urgent",
-                        "high",
-                        "medium",
-                        "low",
-                        "parked"
-                      ],
-                      "type": "string"
-                    },
-                    "project": {
-                      "description": "Project key; null = legacy, visible in every project.",
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "row_version": {
-                      "type": "number"
-                    },
-                    "status": {
-                      "enum": [
-                        "idea",
-                        "triaged",
-                        "in_progress",
-                        "in_design",
-                        "ready",
-                        "parked",
-                        "blocked",
-                        "needs_decision",
-                        "resolved",
-                        "wont_fix",
-                        "duplicate",
-                        "dropped",
-                        "merged"
-                      ],
-                      "type": "string"
-                    },
-                    "tags": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    },
-                    "title": {
-                      "type": "string"
-                    },
-                    "updated_at": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "kind",
-                    "title",
-                    "body",
-                    "status",
-                    "priority",
-                    "tags",
-                    "assignee",
-                    "duplicate_of",
-                    "created_by",
-                    "created_at",
-                    "updated_at",
-                    "row_version",
-                    "claim",
-                    "project",
-                    "created_seq",
-                    "last_seq"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "description": "{id,kind,title,body,status,priority,tags,assignee,duplicate_of,created_by,created_at,updated_at,row_version,claim,project,created_seq,last_seq}",
+              "type": [
+                "object",
+                "null"
               ]
             },
             "ticket_id": {
@@ -4279,5 +1829,5 @@
     "name": "sea-lite",
     "version": "0.4.0"
   },
-  "sha256": "d24221dabed6a41261f11677b085167f2d8470016266ce12d33eec84faaf6d0a"
+  "sha256": "4a765bc3dbb7769b0f4555ee22d89d63f4367c131e87db152dd56aed6bb791ea"
 }

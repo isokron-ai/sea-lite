@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { ROLES, type Role } from './model/enums.js';
-import { createServer } from './server.js';
+import { createServer, type Profile } from './server.js';
 import type { SeaLite } from './store.js';
 import { VERSION } from './version.js';
 
@@ -206,6 +206,8 @@ export interface HttpServeOptions {
    * same tools and the same per-request identity; `reject` answers them -32022.
    */
   legacy?: 'stateless' | 'reject';
+  /** Tool profile served (`serve --http --core`); default full. */
+  profile?: Profile;
   onerror?: (err: Error) => void;
 }
 
@@ -252,7 +254,7 @@ export function createHttpListener(opts: HttpServeOptions): {
       const id = identityOf(ctx, fallback);
       // No per-request session: an HTTP identity is its token (or the shared bearer's label).
       const view = id.actor === store.actor && id.role === store.role ? store : store.as(id.actor, id.role, { session: null });
-      return createServer(view, { version: opts.version ?? VERSION, bindActor: id.bound });
+      return createServer(view, { version: opts.version ?? VERSION, bindActor: id.bound, ...(opts.profile !== undefined ? { profile: opts.profile } : {}) });
     },
     { legacy: opts.legacy ?? 'stateless', ...(opts.onerror ? { onerror: opts.onerror } : {}) },
   );

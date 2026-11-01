@@ -39,7 +39,8 @@ import {
 import { detectCycle, type DirectedEdge } from '../model/cycle-check.js';
 import { DAG_LINK_TYPES, isTerminalStatus, PRIORITY_RANK, TERMINAL_STATES, sqlIn, type TicketStatus } from '../model/enums.js';
 import { legalNextStates, validateTransition } from '../model/lifecycle.js';
-import type { ApplyInput, CreateInput, GetInput, ListInput, TransitionInput, UpdateInput } from '../model/schemas.js';
+import type { ApplyInput, CreateInput, ExpandedBatch, FencedItem, FinishInput, GetInput, ListInput, TransitionInput, TransitionManyInput, UpdateInput } from '../model/schemas.js';
+import { expandBatch } from '../model/templates.js';
 import { findPossibleDuplicates, type PossibleDuplicate } from './dedup.js';
 
 // ───────────────────────────── create ─────────────────────────────
@@ -321,7 +322,7 @@ const endpoint = (ref: string | undefined, id: string | undefined): string => (r
  * links, and cycles among the batch's own edges. Existing-ticket endpoints
  * (`from_id` / `to_id`) are checked against the store in `apply`.
  */
-export function validateBatch(input: Pick<ApplyInput, 'tickets' | 'links'>): void {
+export function validateBatch(input: ExpandedBatch): void {
   const refs = new Set<string>();
   const problems: Problem[] = [];
   for (const t of input.tickets) {
@@ -373,7 +374,7 @@ function cycleError(path: readonly string[], via: DirectedEdge): SeaError {
  * token in `claims`; no link duplicates an active one; and the union of
  * existing DAG edges and the batch's edges stays acyclic. Returns id → full id.
  */
-function validateExisting(ctx: Ctx, input: ApplyInput): Map<string, string> {
+function validateExisting(ctx: Ctx, input: ExpandedBatch & Pick<ApplyInput, 'claims'>): Map<string, string> {
   const resolved = new Map<string, string>();
   const problems: Problem[] = [];
   const resolveOne = (raw: string): string | null => {
@@ -453,14 +454,15 @@ export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
         return { batch_id: p.batch_id, tickets: p.tickets, links: p.links, head: ctx.chain.head(), replayed: true, dry_run: false };
       }
     }
-    validateBatch(input);
-    const touchesExisting = input.links.some((l) => l.from_id !== undefined || l.to_id !== undefined);
-    const resolved = touchesExisting ? validateExisting(ctx, input) : new Map<string, string>();
+    const plan = { ...expandBatch(input), claims: input.claims };
+    validateBatch(plan);
+    const touchesExisting = plan.links.some((l) => l.from_id !== undefined || l.to_id !== undefined);
+    const resolved = touchesExisting ? validateExisting(ctx, plan) : new Map<string, string>();
     if (input.dry_run) {
       return {
         batch_id: null,
-        tickets: input.tickets.map((t) => ({ ref: t.ref, ticket_id: '(dry_run)', title: t.title })),
-        links: input.links.map((l) => ({
+        tickets: plan.tickets.map((t) => ({ ref: t.ref, ticket_id: '(dry_run)', title: t.title })),
+        links: plan.links.map((l) => ({
           link_id: '(dry_run)',
           from_ref: l.from_ref ?? null,
           to_ref: l.to_ref ?? null,
@@ -476,7 +478,7 @@ export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
     const batch_id = uuid();
     const byRef = new Map<string, string>();
     const tickets: BatchPayload['tickets'] = [];
-    for (const t of input.tickets) {
+    for (const t of plan.tickets) {
       const { row } = insertTicket(
         ctx,
         { title: t.title, body: t.body, kind: t.kind, priority: t.priority, tags: t.tags, assignee: t.assignee, status: t.status },
@@ -486,7 +488,7 @@ export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
       tickets.push({ ref: t.ref, ticket_id: row.id, title: row.title });
     }
     const links: ApplyLink[] = [];
-    for (const l of input.links) {
+    for (const l of plan.links) {
       const from_id = l.from_ref !== undefined ? byRef.get(l.from_ref)! : resolved.get(l.from_id!)!;
       const to_id = l.to_ref !== undefined ? byRef.get(l.to_ref)! : resolved.get(l.to_id!)!;
       let link_id: string;
@@ -516,6 +518,32 @@ export function apply(ctx: Ctx, input: ApplyInput): ApplyResult {
     });
     return { batch_id, tickets, links, head: ctx.chain.head(), replayed: false, dry_run: false };
   });
+}
+
+/** sea_apply's default result: ref → id, a link count, and whether this was a replay. */
+export interface ApplyCompact {
+  created: Record<string, string>;
+  links: number;
+  idempotent_replay: boolean;
+  /** Present on dry_run only, with the expanded plan. */
+  dry_run?: true;
+  plan?: { tickets: { ref: string; title: string }[]; links: string[] };
+}
+
+export function compactApply(r: ApplyResult): ApplyCompact {
+  if (r.dry_run) {
+    return {
+      created: {},
+      links: r.links.length,
+      idempotent_replay: false,
+      dry_run: true,
+      plan: {
+        tickets: r.tickets.map((t) => ({ ref: t.ref, title: t.title })),
+        links: r.links.map((l) => `${l.from_ref ?? l.from_id} ${l.link_type} ${l.to_ref ?? l.to_id}`),
+      },
+    };
+  }
+  return { created: Object.fromEntries(r.tickets.map((t) => [t.ref, t.ticket_id])), links: r.links.length, idempotent_replay: r.replayed };
 }
 
 /** Insert an active link row + event. Caller has validated everything. */
@@ -786,6 +814,7 @@ export function transition(ctx: Ctx, input: TransitionInput): TransitionResult {
         )
         .run(id);
     }
+    if (input.note !== undefined) addNote(ctx, id, input.note);
     return {
       ticket: rowToTicket(mustGetRow(ctx.db, id)),
       ticket_id: id,
@@ -930,4 +959,117 @@ export function list(ctx: Ctx, input: ListInput): ListResult {
       head: ctx.chain.head(),
     };
   });
+}
+
+// ───────────────────────────── bulk transition ─────────────────────────────
+
+export interface TransitionManyItem {
+  ticket_id: string;
+  title: string | null;
+  from: TicketStatus;
+  to: TicketStatus;
+  claim_released: boolean;
+}
+
+export interface TransitionManyResult {
+  results: TransitionManyItem[];
+  count: number;
+  head: ChainHead;
+  replayed: boolean;
+  dry_run: boolean;
+}
+
+/**
+ * Several tickets to one status in one transaction, each fenced by its own
+ * claim token: every ticket is checked first (fence, version, lifecycle) and
+ * if any fails nothing is written and the error lists every failing ticket.
+ * With an idempotency_key, item k uses `<key>#k`, so a repeat replays.
+ */
+export function transitionMany(ctx: Ctx, input: TransitionManyInput): TransitionManyResult {
+  return tx(ctx.db, () => {
+    const one = (k: number, dry_run: boolean): TransitionInput => {
+      const t = input.tickets[k]!;
+      return {
+        ticket_id: t.ticket_id,
+        claim_token: t.claim_token,
+        to: input.to,
+        confirm: true,
+        dry_run,
+        ...(t.expected_version !== undefined ? { expected_version: t.expected_version } : {}),
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+        ...(input.duplicate_of !== undefined ? { duplicate_of: input.duplicate_of } : {}),
+        ...(input.note !== undefined ? { note: input.note } : {}),
+        ...(input.idempotency_key !== undefined ? { idempotency_key: `${input.idempotency_key}#${k}` } : {}),
+      };
+    };
+    const problems: { ticket_id: string; error: string; message: string; details?: Record<string, unknown> }[] = [];
+    const previews: TransitionResult[] = [];
+    const seen = new Set<string>();
+    input.tickets.forEach((t, k) => {
+      try {
+        const p = transition(ctx, one(k, true));
+        if (seen.has(p.ticket_id)) throw new SeaError('invalid_input', `ticket ${p.ticket_id} appears more than once`, { ticket_id: p.ticket_id });
+        seen.add(p.ticket_id);
+        previews.push(p);
+      } catch (e) {
+        if (!(e instanceof SeaError)) throw e;
+        if (input.tickets.length === 1) throw e;
+        const j = e.toJSON() as { error: string; message: string; details?: Record<string, unknown> };
+        problems.push({ ticket_id: t.ticket_id, error: j.error, message: j.message, ...(j.details !== undefined ? { details: j.details } : {}) });
+      }
+    });
+    if (problems.length > 0) {
+      throw new SeaError('batch_invalid', `${problems.length} of ${input.tickets.length} ticket(s) cannot move to ${input.to}; nothing changed`, { problems });
+    }
+    const view = (r: TransitionResult, title: string | null): TransitionManyItem => ({ ticket_id: r.ticket_id, title, from: r.from, to: r.to, claim_released: r.claim_released });
+    const titleOf = (id: string) => (ctx.db.prepare(`SELECT title FROM sea_tickets WHERE id = ?`).get(id) as { title: string } | undefined)?.title ?? null;
+    if (input.dry_run || previews.every((p) => p.replayed)) {
+      return {
+        results: previews.map((p) => view(p, titleOf(p.ticket_id))),
+        count: previews.length,
+        head: ctx.chain.head(),
+        replayed: !input.dry_run,
+        dry_run: input.dry_run,
+      };
+    }
+    const done = input.tickets.map((_, k) => transition(ctx, one(k, false)));
+    return { results: done.map((r) => view(r, titleOf(r.ticket_id))), count: done.length, head: ctx.chain.head(), replayed: false, dry_run: false };
+  });
+}
+
+/**
+ * The fenced tickets of a call that takes either `ticket_id` + `claim_token`
+ * or a bulk `tickets` list (exactly one form).
+ */
+export function fencedItems(args: { ticket_id?: string | undefined; claim_token?: string | undefined; expected_version?: number | undefined; tickets?: FencedItem[] | undefined }): FencedItem[] {
+  if (args.tickets !== undefined) {
+    if (args.ticket_id !== undefined || args.claim_token !== undefined) {
+      throw new SeaError('invalid_input', 'give either ticket_id + claim_token or tickets, not both');
+    }
+    return args.tickets;
+  }
+  if (args.ticket_id === undefined || args.claim_token === undefined) {
+    throw new SeaError('invalid_input', 'give ticket_id + claim_token (one ticket) or tickets: [{ticket_id, claim_token}] (several)');
+  }
+  return [{ ticket_id: args.ticket_id, claim_token: args.claim_token, ...(args.expected_version !== undefined ? { expected_version: args.expected_version } : {}) }];
+}
+
+export interface FinishResult {
+  finished: TransitionManyItem[];
+  note_added: boolean;
+  replayed: boolean;
+  dry_run: boolean;
+}
+
+/** One-call finish: note (optional) + terminal status + claim released, for one ticket or many. */
+export function finish(ctx: Ctx, input: FinishInput): FinishResult {
+  const r = transitionMany(ctx, {
+    tickets: fencedItems(input),
+    to: input.status,
+    dry_run: input.dry_run,
+    ...(input.reason !== undefined ? { reason: input.reason } : {}),
+    ...(input.note !== undefined ? { note: input.note } : {}),
+    ...(input.idempotency_key !== undefined ? { idempotency_key: input.idempotency_key } : {}),
+  });
+  return { finished: r.results, note_added: input.note !== undefined && !r.dry_run && !r.replayed, replayed: r.replayed, dry_run: r.dry_run };
 }

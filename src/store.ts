@@ -188,6 +188,14 @@ export class SeaLite {
   transition(input: S.TransitionInput): tickets.TransitionResult {
     return tickets.transition(this.ctx(input.actor_id), input);
   }
+  /** Several tickets to one status, each fenced by its own token; all or nothing. */
+  transitionMany(input: S.TransitionManyInput): tickets.TransitionManyResult {
+    return tickets.transitionMany(this.ctx(input.actor_id), input);
+  }
+  /** Close one or more held tickets: terminal status (default resolved), claim released, optional note. */
+  finish(input: S.FinishInput): tickets.FinishResult {
+    return tickets.finish(this.ctx(input.actor_id), input);
+  }
   claim(input: S.ClaimInput): claims.ClaimResult {
     return claims.claim(this.ctx(input.actor_id), input);
   }

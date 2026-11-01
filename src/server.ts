@@ -1,10 +1,12 @@
 /**
- * MCP surface (protocol 2026-07-28, @modelcontextprotocol/server v2): fourteen
- * tools and one resource template over a SeaLite store. Every handler is
- * synchronous; the SDK wraps the result. Each tool publishes an
- * `outputSchema` and returns the same JSON as `structuredContent` and as a
- * text block (the spec's backward-compatible form). Errors come back as
- * isError results with a closed `error` code so an agent can branch.
+ * MCP surface (protocol 2026-07-28, @modelcontextprotocol/server v2): fifteen
+ * tools (`full` profile) or the eight an agent needs day to day (`core`), and
+ * one resource template, over a SeaLite store. Every handler is synchronous;
+ * the SDK wraps the result. Each tool publishes a lean `outputSchema`
+ * (model/publish.ts; the strict zod schema still validates every result) and
+ * returns the same JSON as `structuredContent` and as a compact text block
+ * (the spec's backward-compatible form). Errors come back as isError results
+ * with a closed `error` code so an agent can branch.
  *
  * `createServer` builds one McpServer; it is a factory for `serveStdio`,
  * which pins one instance per connection and serves both the 2026-07-28
@@ -28,11 +30,13 @@ import { z } from 'zod';
 
 import { SeaError } from './core/errors.js';
 import { shortSession } from './core/identity.js';
-import { ALL_STATES, isTerminalStatus, LINK_TYPES, PRIORITIES, TICKET_KINDS } from './model/enums.js';
+import { isTerminalStatus } from './model/enums.js';
+import { compactApply, fencedItems } from './handlers/tickets.js';
 import {
   ApplyOutput,
   ClaimOutput,
   CreateOutput,
+  FinishOutput,
   GetOutput,
   HistoryOutput,
   LinkOutput,
@@ -49,6 +53,7 @@ import {
   ApplyInput,
   ClaimInput,
   CreateInput,
+  FinishInput,
   GetInput,
   HistoryInput,
   LinkInput,
@@ -58,11 +63,35 @@ import {
   ReleaseInput,
   ScopeCheckInput,
   StatsInput,
-  TransitionInput,
+  TransitionToolInput,
   UpdateInput,
+  type TransitionInput,
 } from './model/schemas.js';
+import { published } from './model/publish.js';
 import type { SeaLite } from './store.js';
 import { VERSION } from './version.js';
+
+export type Profile = 'core' | 'full';
+export const PROFILES: readonly Profile[] = ['core', 'full'];
+
+/**
+ * Input fields `serve --core` does not advertise (still accepted): rarely
+ * needed day to day, and every one costs context in every session.
+ */
+const CORE_OMIT_ALWAYS = ['actor_id', 'idempotency_key', 'expected_version', 'tickets.expected_version'];
+
+/** The day-to-day set `serve --core` publishes. */
+export const CORE_TOOLS = [
+  'sea_next',
+  'sea_claim',
+  'sea_get',
+  'sea_scope_check',
+  'sea_apply',
+  'sea_transition',
+  'sea_finish',
+  'sea_release',
+  'sea_refresh',
+] as const;
 
 export interface ServerOptions {
   version?: string;
@@ -73,6 +102,8 @@ export interface ServerOptions {
    * a self-asserted label.
    */
   bindActor?: boolean;
+  /** `full` (default): every tool. `core`: CORE_TOOLS with shorter descriptions. */
+  profile?: Profile;
 }
 
 /** Catalog results change only with a release; a client may cache them for an hour, shared. */
@@ -85,8 +116,9 @@ export const MAX_INSTRUCTIONS_CHARS = 512;
 export const CONFIRM_KEY = 'confirm_terminal';
 const ConfirmSchema = z.object({ confirm: z.boolean().describe('true to enter the terminal state; false to leave the ticket as it is.') });
 
+/** Compact JSON text: the text block is what a model reads, so no indentation. */
 function json(value: unknown): CallToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value as Record<string, unknown> };
+  return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value as Record<string, unknown> };
 }
 
 export function errorResult(err: unknown): CallToolResult {
@@ -128,19 +160,34 @@ export function supportsFormElicitation(caps: ClientCapabilities | undefined): b
   return e.form !== undefined || (e.form === undefined && e.url === undefined);
 }
 
-export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServer {
-  const actor = store.actor.length > 40 ? store.actor.slice(0, 37) + '…' : store.actor;
-  // Statuses are not repeated here: sea_transition's description and every
-  // illegal_transition error carry legal_next. Budget: MAX_INSTRUCTIONS_CHARS.
-  const who = store.session !== null ? `${actor}#${shortSession(store.session)}` : actor;
-  const instructions =
-    'Fenced work queue for parallel agents. Loop: sea_next (scope: the paths you will edit) → work → sea_update notes → ' +
-    'sea_transition resolved (confirm: true). Writes need the claim_token from sea_claim/sea_next. Leases renew while you ' +
-    'keep calling sea-lite tools; sea_release when you stop. Scopes of other holders (other actors, or this actor in ' +
-    `another session) never overlap; sea_scope_check before editing a path you did not claim. You are "${who}" (role ${store.role}).`;
-  if (instructions.length > MAX_INSTRUCTIONS_CHARS) {
-    throw new Error(`sea-lite: server instructions are ${instructions.length} chars; the limit is ${MAX_INSTRUCTIONS_CHARS}`);
+const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } as const;
+const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false } as const;
+const READ = { readOnlyHint: true, idempotentHint: true, openWorldHint: false } as const;
+
+function instructionsFor(profile: Profile, who: string, role: string): string {
+  const text =
+    profile === 'core'
+      ? 'Fenced work queue for parallel agents. Loop: sea_next (scope.paths = files you will edit) → work → sea_finish (note). ' +
+        'Writes need the claim_token from sea_next/sea_claim. Leases renew while you call sea-lite tools; sea_release (note) to hand ' +
+        'back. Other holders\' scopes never overlap yours; sea_scope_check before editing a path you did not claim. Plan with sea_apply ' +
+        `(templates for repeated tickets). You are "${who}" (role ${role}).`
+      : 'Fenced work queue for parallel agents. Loop: sea_next (scope: the paths you will edit) → work → sea_update notes → ' +
+        'sea_finish (note). Writes need the claim_token from sea_claim/sea_next. Leases renew while you keep calling sea-lite ' +
+        'tools; sea_release when you stop. Scopes of other holders (other actors, or this actor in another session) never ' +
+        `overlap; sea_scope_check before editing a path you did not claim. You are "${who}" (role ${role}).`;
+  if (text.length > MAX_INSTRUCTIONS_CHARS) {
+    throw new Error(`sea-lite: server instructions are ${text.length} chars; the limit is ${MAX_INSTRUCTIONS_CHARS}`);
   }
+  return text;
+}
+
+export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServer {
+  const profile: Profile = opts.profile ?? 'full';
+  const actor = store.actor.length > 40 ? store.actor.slice(0, 37) + '…' : store.actor;
+  // Statuses are not repeated here: sea_transition's input enum and every
+  // illegal_transition error carry them. Budget: MAX_INSTRUCTIONS_CHARS.
+  const who = store.session !== null ? `${actor}#${shortSession(store.session)}` : actor;
+  const instructions = instructionsFor(profile, who, store.role);
 
   /** Enforce `bindActor`: a bound connection may only act as its own actor. */
   const bind = <T extends { actor_id?: string | undefined }>(args: T): T => {
@@ -157,8 +204,9 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
    * B5: every tool call is activity by its actor, so it renews that actor's
    * live claims (rate-limited inside store.touch; never fails the call).
    */
+  const touch = (args: { actor_id?: string | undefined }): void => store.touch(opts.bindActor === true ? undefined : args.actor_id);
   const run = (args: { actor_id?: string | undefined }, fn: () => unknown): CallToolResult => {
-    store.touch(opts.bindActor === true ? undefined : args.actor_id);
+    touch(args);
     return wrap(fn);
   };
 
@@ -177,70 +225,109 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     },
   );
 
+  /**
+   * Register one tool for this profile: the full description, or the short
+   * `core` one under `serve --core` (a tool without one is full-only). The
+   * zod schemas validate; clients are shown their lean JSON Schema.
+   */
+  const tool = <I extends z.ZodType, O extends z.ZodType>(
+    name: string,
+    def: {
+      title: string;
+      description: string;
+      core?: string;
+      /** Further input fields `--core` does not advertise. */
+      coreOmit?: string[];
+      input: I;
+      output: O;
+      annotations: Record<string, boolean>;
+    },
+    handler: (args: z.output<I>, ctx: ServerContext) => CallToolResult | InputRequiredResult,
+  ): void => {
+    if (profile === 'core' && !(CORE_TOOLS as readonly string[]).includes(name)) return;
+    const core = profile === 'core';
+    const description = core && def.core !== undefined ? def.core : def.description;
+    const omit = core ? [...CORE_OMIT_ALWAYS, ...(def.coreOmit ?? [])] : [];
+    server.registerTool(
+      name,
+      { title: def.title, description, inputSchema: published(def.input, { omit }), outputSchema: published(def.output, { minimal: core }), annotations: def.annotations },
+      handler,
+    );
+  };
+
   // ───────────────────────────── authoring ─────────────────────────────
 
-  server.registerTool(
+  tool(
     'sea_create',
     {
       title: 'Create a ticket',
       description:
-        'Create one ticket (status idea, or triaged to make it dispatchable right away). Returns the ticket plus ' +
-        '`possible_duplicates` — existing tickets with the same or a similar title; the create always goes through, you decide. ' +
-        'Pass `claim_seconds` to claim it in the same call and get a claim_token back. `idempotency_key` makes retries safe. ' +
-        `Kinds: ${TICKET_KINDS.join(' | ')}. Priorities: ${PRIORITIES.join(' | ')}.`,
-      inputSchema: CreateInput,
-      outputSchema: CreateOutput,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+        'Create one ticket (status idea, or triaged = dispatchable now). Returns it plus `possible_duplicates` (similar ' +
+        'titles; the create still happens, you decide). `claim_seconds` also claims it and returns a claim_token.',
+      input: CreateInput,
+      output: CreateOutput,
+      annotations: WRITE,
     },
     (args) => run(args, () => store.create(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_apply',
     {
-      title: 'Create a batch of tickets and links atomically',
+      title: 'Create tickets and links in one batch',
       description:
-        'Author 1–50 tickets and up to 100 links in one all-or-nothing write. Each ticket carries a batch-local `ref`; a link ' +
-        'end is a ref or an existing ticket (`from_id` / `to_id`; a from_id needs its claim_token in `claims`). Rejected as a ' +
-        'whole on duplicate refs, unknown refs or ids, self-loops, duplicate links, or a parent_of/depends_on/blocks cycle ' +
-        'across existing links — the error lists every problem. `dry_run` validates only.',
-      inputSchema: ApplyInput,
-      outputSchema: ApplyOutput,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+        'Create up to 50 tickets and 100 links in one all-or-nothing write. Each ticket has a batch-local `ref`; links join ' +
+        'refs and/or existing ids. `templates` repeat one ticket per `for_each` value, e.g. a 20-step chain: ' +
+        '{for_each: 20, ref: "s{i}", ticket: {title: "Step {i}"}, links: [{from_ref: "{ref}", to_ref: "{prev}", link_type: "depends_on"}]}. ' +
+        'Rejected as a whole, every problem listed, on bad or duplicate refs, unknown ids, self-loops, duplicate links or a ' +
+        'cycle. Returns {created: {ref: id}, links, idempotent_replay}; verbose: true echoes every id.',
+      core:
+        'Create ≤50 tickets + ≤100 links, all or nothing. Tickets have a batch-local `ref`; links join refs or existing ids. ' +
+        '`templates` repeat a ticket per value, e.g. {for_each: 20, ref: "s{i}", ticket: {title: "Step {i}"}, links: [{from_ref: "{ref}", ' +
+        'to_ref: "{prev}", link_type: "depends_on"}]}. An invalid plan writes nothing. Returns {created: {ref: id}, links}.',
+      coreOmit: ['claims', 'verbose'],
+      input: ApplyInput,
+      output: ApplyOutput,
+      annotations: WRITE,
     },
-    (args) => run(args, () => store.apply(bind(args))),
+    (args) =>
+      run(args, () => {
+        const r = store.apply(bind(args));
+        return args.verbose ? r : compactApply(r);
+      }),
   );
 
-  server.registerTool(
+  tool(
     'sea_update',
     {
       title: 'Edit a claimed ticket',
       description:
-        'Change title/body/kind/priority/assignee, add or remove tags, and/or append a note. Fenced: requires the claim_token ' +
-        'of a live claim held by you. `expected_version` (from sea_get / sea_list row_version) rejects the write with ' +
-        'version_conflict if someone changed the ticket since you read it. Notes are the hand-off channel: write what you ' +
-        'found and what is left before you release.',
-      inputSchema: UpdateInput,
-      outputSchema: UpdateOutput,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+        'Edit a ticket you hold (claim_token): title/body/kind/priority/assignee, tags, and/or append a note. Notes are the ' +
+        'hand-off channel. expected_version (row_version from sea_get / sea_list) rejects a write on a ticket changed since.',
+      input: UpdateInput,
+      output: UpdateOutput,
+      annotations: DESTRUCTIVE,
     },
     (args) => run(args, () => store.update(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_transition',
     {
-      title: 'Move a ticket to another status',
+      title: "Change a ticket's status",
       description:
-        `Set status. Fenced (claim_token). Legal moves: work track idea → triaged → in_progress → resolved; any active ticket may ` +
-        `enter parked | blocked | needs_decision (resume only to idea / triaged / in_progress) or a terminal state ` +
-        `resolved | wont_fix | duplicate | dropped | merged (no exit). to=duplicate requires duplicate_of and records a ` +
-        `\`duplicates\` link. Entering a terminal state releases your claim and asks for confirmation unless confirm: true ` +
-        `is passed. On rejection the error carries legal_next. ` +
-        `Known statuses: ${ALL_STATES.join(' | ')}.`,
-      inputSchema: TransitionInput,
-      outputSchema: TransitionOutput,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+        'Set status (claim_token). Work track idea → triaged → in_progress → resolved; any active ticket may enter parked | ' +
+        'blocked | needs_decision (resume to idea / triaged / in_progress) or a terminal state resolved | wont_fix | duplicate ' +
+        '| dropped | merged (no exit; releases the claim; needs confirm: true or the client\'s confirmation). to=duplicate needs ' +
+        'duplicate_of (records a `duplicates` link). `note` appends a note in the same write; `tickets` moves several at once, ' +
+        'all or nothing. Rejections carry legal_next.',
+      core:
+        'Set status (claim_token): idea → triaged → in_progress → resolved, or parked | blocked | needs_decision. Terminal ' +
+        'states (no exit; release the claim) need confirm: true. `note` adds a note; `tickets` moves several. Errors carry legal_next.',
+      coreOmit: ['dry_run', 'duplicate_of'],
+      input: TransitionToolInput,
+      output: TransitionOutput,
+      annotations: DESTRUCTIVE,
     },
     (args, ctx) => {
       try {
@@ -248,166 +335,180 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       } catch (err) {
         return errorResult(err);
       }
-      store.touch(opts.bindActor === true ? undefined : args.actor_id);
+      touch(args);
       return transitionWithConfirmation(store, server, args, ctx);
     },
   );
 
-  server.registerTool(
+  tool(
+    'sea_finish',
+    {
+      title: 'Finish tickets',
+      description:
+        'Done with a ticket: appends `note` (optional), sets a terminal status (default resolved) and releases your claim, in ' +
+        'one write. `tickets` closes several (each with its own claim_token; all or none). Calling it is the confirmation.',
+      core: 'Done: optional `note`, terminal status (default resolved), claim released, one write. `tickets` closes several, all or none.',
+      coreOmit: ['dry_run', 'reason'],
+      input: FinishInput,
+      output: FinishOutput,
+      annotations: DESTRUCTIVE,
+    },
+    (args) => run(args, () => store.finish(bind(args))),
+  );
+
+  tool(
     'sea_link',
     {
       title: 'Add or remove a typed link',
       description:
-        `Add or remove a directed link \`from <link_type> to\`. Types: ${LINK_TYPES.join(' | ')}. Fenced on the from ticket ` +
-        '(claim_token). parent_of / depends_on / blocks are kept acyclic across all existing links; a cycle is rejected with ' +
-        'its path. Remove tombstones the link (history keeps it). `from blocks to` and `from depends_on to` decide what sea_next ' +
-        'may hand out: a ticket is eligible only when every predecessor is terminal.',
-      inputSchema: LinkInput,
-      outputSchema: LinkOutput,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+        'Add or remove a directed link `from <link_type> to`, fenced on from (claim_token). parent_of / depends_on / blocks ' +
+        'stay acyclic (a cycle is rejected with its path); remove tombstones it. sea_next hands a ticket out only when every ' +
+        'ticket it depends_on and every ticket that blocks it is terminal.',
+      input: LinkInput,
+      output: LinkOutput,
+      annotations: DESTRUCTIVE,
     },
     (args) => run(args, () => store.link(bind(args))),
   );
 
   // ───────────────────────────── claims ─────────────────────────────
 
-  server.registerTool(
+  tool(
     'sea_claim',
     {
-      title: 'Claim one or more tickets',
+      title: 'Claim tickets',
       description:
-        'Take a lease on one or more tickets (all-or-nothing; locked in id order so concurrent claimers cannot deadlock). ' +
-        'Returns one claim_token per ticket — keep it, it is shown once and is required for every write. Leases (default 900 s, ' +
-        'max 3600 s) renew while you keep calling sea-lite tools; otherwise they lapse. Fails with already_claimed (naming the ' +
-        'holder and expiry) if any ticket is held by someone else. Claiming a ticket you already hold rotates its token. Pass `scope.paths` (the files ' +
-        'or directories you will edit; a worktree is a scope) to lock them for the lease: refused with scope_conflict, naming ' +
-        'the holder, ticket, overlapping paths and expiry, if they overlap someone else\'s live scope (another actor, or this actor in another session).',
-      inputSchema: ClaimInput,
-      outputSchema: ClaimOutput,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+        'Lease tickets, all or nothing. Returns one claim_token per ticket (shown once; every write needs it). Leases ' +
+        '(default 900 s, max 3600) renew while you call sea-lite tools. already_claimed names the holder and expiry; ' +
+        're-claiming your own rotates the token. `scope.paths` locks the files you will edit (scope_conflict names the ' +
+        'holder, ticket, overlap and expiry).',
+      core: 'Lease named tickets, all or nothing; returns a claim_token each (shown once). `scope.paths` locks files you will edit.',
+      coreOmit: ['scope.worktree'],
+      input: ClaimInput,
+      output: ClaimOutput,
+      annotations: WRITE,
     },
     (args) => run(args, () => store.claim(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_refresh',
     {
       title: 'Extend a claim lease',
-      description:
-        'Heartbeat: set the lease expiry to now + extend_by_seconds (default: the claim\'s lease; ≤ 3600) if later than the ' +
-        "current expiry; never shortens. Holder-only. Any sea-lite call renews your claims anyway. Not chained.",
-      inputSchema: RefreshInput,
-      outputSchema: RefreshOutput,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      description: 'Extend your lease to now + extend_by_seconds (default: its lease; max 3600; never shortens). Any sea-lite call renews your claims anyway.',
+      core: 'Extend your lease (any sea-lite call also renews it).',
+      input: RefreshInput,
+      output: RefreshOutput,
+      annotations: { ...WRITE, idempotentHint: true },
     },
     (args) => run(args, () => store.refresh(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_release',
     {
       title: 'Release a claim',
       description:
-        'Give a ticket back to the queue. Holder: pass claim_token (and ideally a `note` saying where you left off). ' +
-        'Operator (server started with --role operator): `force: true` releases any holder and is recorded as ' +
-        'sea_ticket.claim_force_released with your reason.',
-      inputSchema: ReleaseInput,
-      outputSchema: ReleaseOutput,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+        'Give a ticket back to the queue (claim_token; leave a `note` saying where you stopped). Operator role: force: true ' +
+        'releases any holder, recorded with your reason.',
+      core: 'Give a ticket back unfinished (claim_token); `note` says where you stopped.',
+      coreOmit: ['force', 'reason'],
+      input: ReleaseInput,
+      output: ReleaseOutput,
+      annotations: DESTRUCTIVE,
     },
     (args) => run(args, () => store.release(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_next',
     {
-      title: 'Pick and claim the next ticket',
+      title: 'Claim the next ticket',
       description:
-        'Dispatch: atomically pick and claim the highest-priority unclaimed triaged or in_progress ticket that is assigned ' +
-        'to you or unassigned, is not priority parked, and whose predecessors (tickets that `blocks` it, tickets it ' +
-        '`depends_on`) are all terminal. in_progress beats triaged at equal priority; then oldest (chain order) first. Returns ticket + ' +
-        'claim_token, or ticket: null with reason nothing_eligible. This project only. Call it in a loop. `scope.paths` locks ' +
-        'the paths you will edit for the lease (scope_conflict if they overlap someone else\'s live scope).',
-      inputSchema: NextInput,
-      outputSchema: NextOutput,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+        'Atomically pick and claim the next ticket: unclaimed, triaged or in_progress, assigned to you or nobody, not priority ' +
+        'parked, all predecessors (blocks / depends_on) terminal; highest priority, in_progress before triaged, then oldest. ' +
+        'Returns ticket + claim_token, or ticket: null (nothing_eligible). This project only. `scope.paths` locks the files you will edit.',
+      core:
+        'Claim the next eligible ticket (priority, then age; predecessors done): ticket + claim_token, or ticket: null. ' +
+        '`scope.paths` locks the files you will edit.',
+      coreOmit: ['kind', 'tag', 'include_unassigned', 'scope.worktree'],
+      input: NextInput,
+      output: NextOutput,
+      annotations: WRITE,
     },
     (args) => run(args, () => store.next(bind(args))),
   );
 
   // ───────────────────────────── reads ─────────────────────────────
 
-  server.registerTool(
+  tool(
     'sea_get',
     {
       title: 'Read one ticket',
       description:
-        'Full ticket by id or a unique ≥8-char prefix: fields, row_version (for expected_version), claim holder and expiry ' +
-        "(never the token), active links with the peer ticket's title/status, recent notes, and legal_next statuses.",
-      inputSchema: GetInput,
-      outputSchema: GetOutput,
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+        "One ticket by id or ≥8-char prefix: fields, row_version, claim holder and expiry (never the token), links with the peer's " +
+        'title/status, recent notes, legal_next.',
+      core: 'One ticket by id or ≥8-char prefix: fields, claim, links, notes, legal_next.',
+      input: GetInput,
+      output: GetOutput,
+      annotations: READ,
     },
     (args) => run(args, () => store.get(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_list',
     {
       title: 'List and search tickets',
       description:
-        'Filter by status (default: every non-terminal), kind, priority, assignee ("me" / "none"), tag, claim state ' +
-        '(any / yes / no / mine), and/or full-text `query` over title and body. This project only unless `project` says ' +
-        'otherwise. Paginated with an opaque cursor. ' +
-        '`view: compact` (default) omits bodies. Ordered by priority then recency, or by relevance when querying.',
-      inputSchema: ListInput,
-      outputSchema: ListOutput,
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+        'Filter by status (default: non-terminal), kind, priority, assignee ("me" / "none"), tag, claim state and/or full-text ' +
+        '`query`. This project unless `project` says otherwise. Cursor-paginated; view compact (default) omits bodies.',
+      input: ListInput,
+      output: ListOutput,
+      annotations: READ,
     },
     (args) => run(args, () => store.list(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_history',
     {
       title: 'Chain history for a ticket, or a feed',
       description:
-        'With ticket_id: every chain event about that ticket (its own events and links touching it), oldest first. ' +
-        'Without: a feed of every sea event with seq > since_seq — poll it to watch the queue. `verify` (default true) ' +
-        'recomputes every hash on the chain and reports whether the record is intact.',
-      inputSchema: HistoryInput,
-      outputSchema: HistoryOutput,
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+        'With ticket_id: its chain events (and links touching it), oldest first. Without: every sea event after since_seq — ' +
+        'poll it to watch the queue. `verify` (default true) rechecks every hash.',
+      input: HistoryInput,
+      output: HistoryOutput,
+      annotations: READ,
     },
     (args) => run(args, () => store.history(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_scope_check',
     {
-      title: 'Check paths against live claim scopes',
+      title: 'Check paths against claim scopes',
       description:
-        'Would editing these paths collide with a scope someone else holds right now (another actor, or this actor in another ' +
-        'session)? Returns { ok, conflicts } naming each holder, ticket, the overlapping entries and the expiry. No claim is ' +
-        'taken or needed and your own scopes never conflict. Use before you touch a file outside your claim.',
-      inputSchema: ScopeCheckInput,
-      outputSchema: ScopeCheckOutput,
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+        'Would editing these paths collide with a live scope someone else holds (another actor, or you in another session)? ' +
+        'Returns {ok, conflicts} naming holder, ticket, overlap and expiry. Needs no claim; your own scopes never conflict.',
+      core: 'Would editing these paths collide with someone else\'s live scope? {ok, conflicts}.',
+      input: ScopeCheckInput,
+      output: ScopeCheckOutput,
+      annotations: READ,
     },
     (args) => run(args, () => store.scopeCheck(bind(args))),
   );
 
-  server.registerTool(
+  tool(
     'sea_stats',
     {
       title: 'Per-actor claim accounting',
       description:
-        'Per actor, derived from the chain: claims taken / rotated / released / expired / force-released, lease-seconds held, ' +
-        'status transitions, tickets created, live claims. `since` limits the window (`24h`, `7d`, or ISO time). ' +
-        'scope_conflict refusals are not chained, so they are not counted.',
-      inputSchema: StatsInput,
-      outputSchema: StatsOutput,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        'Per actor, from the chain: claims taken / rotated / released / expired / force-released, lease-seconds held, ' +
+        'transitions, tickets created, live claims. `since`: 24h, 7d or ISO time. scope_conflict refusals are not counted.',
+      input: StatsInput,
+      output: StatsOutput,
+      annotations: { ...READ, destructiveHint: false },
     },
     (args) => run(args, () => store.stats(bind(args))),
   );
@@ -426,7 +527,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     (uri, variables) => {
       const id = String(variables['id'] ?? '');
       const result = store.get({ id });
-      return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(result, null, 2) }] };
+      return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(result) }] };
     },
   );
 
@@ -442,57 +543,75 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
  * a move that would otherwise succeed. A client that did not declare form
  * elicitation cannot be asked (spec: MRTR server requirement 7) and gets
  * `confirmation_required` instead, telling it to pass `confirm: true`.
+ * The bulk form (`tickets`) asks once for the whole set.
  */
 function transitionWithConfirmation(
   store: SeaLite,
   server: McpServer,
-  args: TransitionInput,
+  args: TransitionToolInput,
   ctx: ServerContext,
 ): CallToolResult | InputRequiredResult {
-  if (!isTerminalStatus(args.to) || args.dry_run || args.confirm === true) return wrap(() => store.transition(args));
-
-  let preview: ReturnType<SeaLite['transition']>;
+  let bulk: boolean;
+  let items: ReturnType<typeof fencedItems>;
   try {
-    preview = store.transition({ ...args, dry_run: true });
+    bulk = args.tickets !== undefined;
+    items = fencedItems(args);
   } catch (err) {
     return errorResult(err);
   }
+  const { tickets: _tickets, ticket_id: _id, claim_token: _token, expected_version: _ev, ...shared } = args;
+  const one = (confirm: boolean, dry_run: boolean): TransitionInput => ({
+    ...shared,
+    ticket_id: items[0]!.ticket_id,
+    claim_token: items[0]!.claim_token,
+    ...(items[0]!.expected_version !== undefined ? { expected_version: items[0]!.expected_version } : {}),
+    confirm,
+    dry_run,
+  });
+  const many = (dry_run: boolean) => store.transitionMany({ ...shared, tickets: items, dry_run });
+  const commit = (): CallToolResult => wrap(() => (bulk ? many(args.dry_run) : store.transition(one(true, args.dry_run))));
+  if (!isTerminalStatus(args.to) || args.dry_run || args.confirm === true) return commit();
+
+  // The dry run first: a move that would be rejected anyway reports that error, not a prompt.
+  let preview: { ids: string[]; from: string | null; label: string };
+  try {
+    if (bulk) {
+      const p = many(true);
+      preview = { ids: p.results.map((r) => r.ticket_id), from: null, label: `${p.count} tickets (${p.results.map((r) => `"${r.title ?? r.ticket_id}"`).join(', ')})` };
+    } else {
+      const p = store.transition(one(false, true));
+      preview = { ids: [p.ticket_id], from: p.from, label: `"${p.ticket?.title ?? p.ticket_id}" (${p.ticket_id.slice(0, 8)}) from ${p.from}` };
+    }
+  } catch (err) {
+    return errorResult(err);
+  }
+  const subject = bulk ? `${preview.ids.length} tickets` : preview.ids[0]!;
+  const details = (extra: Record<string, unknown>) => (bulk ? { ticket_ids: preview.ids, to: args.to, ...extra } : { ticket_id: preview.ids[0]!, to: args.to, ...extra });
 
   const answer = inputResponse(ctx.mcpReq.inputResponses, CONFIRM_KEY);
   if (answer.kind === 'elicit' && answer.action !== 'accept') {
     return errorResult(
-      new SeaError('confirmation_declined', `transition of ${preview.ticket_id} to ${args.to} was ${answer.action === 'cancel' ? 'cancelled' : 'declined'}; nothing changed`, {
-        ticket_id: preview.ticket_id,
-        to: args.to,
-        action: answer.action,
-      }),
+      new SeaError('confirmation_declined', `transition of ${subject} to ${args.to} was ${answer.action === 'cancel' ? 'cancelled' : 'declined'}; nothing changed`, details({ action: answer.action })),
     );
   }
   const accepted = acceptedContent(ctx.mcpReq.inputResponses, CONFIRM_KEY, ConfirmSchema);
-  if (accepted?.confirm === true) return wrap(() => store.transition({ ...args, confirm: true }));
+  if (accepted?.confirm === true) return wrap(() => (bulk ? many(false) : store.transition(one(true, false))));
   if (accepted !== undefined) {
-    return errorResult(
-      new SeaError('confirmation_declined', `transition of ${preview.ticket_id} to ${args.to} was not confirmed; nothing changed`, {
-        ticket_id: preview.ticket_id,
-        to: args.to,
-        action: 'accept',
-      }),
-    );
+    return errorResult(new SeaError('confirmation_declined', `transition of ${subject} to ${args.to} was not confirmed; nothing changed`, details({ action: 'accept' })));
   }
   if (!supportsFormElicitation(clientCapabilities(ctx, server))) {
     return errorResult(
       new SeaError(
         'confirmation_required',
         `${args.to} is a terminal state (no exit; releases your claim). Pass confirm: true to enter it.`,
-        { ticket_id: preview.ticket_id, from: preview.from, to: args.to },
+        bulk ? details({}) : { ticket_id: preview.ids[0]!, from: preview.from, to: args.to },
       ),
     );
   }
-  const title = preview.ticket?.title ?? preview.ticket_id;
   return inputRequired({
     inputRequests: {
       [CONFIRM_KEY]: inputRequired.elicit({
-        message: `Move "${title}" (${preview.ticket_id.slice(0, 8)}) from ${preview.from} to ${args.to}? Terminal states have no exit and this releases your claim.`,
+        message: `Move ${preview.label} to ${args.to}? Terminal states have no exit and this releases your claim.`,
         requestedSchema: ConfirmSchema,
       }),
     },

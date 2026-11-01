@@ -1,7 +1,7 @@
 /**
- * zod input schemas for the thirteen tools. The MCP layer passes the `.shape`
- * to registerTool; handlers take the inferred types, so the same schema is
- * the boundary for both.
+ * zod input schemas for the tools. The MCP layer publishes a lean JSON Schema
+ * derived from them (model/publish.ts) and validates with them; handlers take
+ * the inferred types, so the same schema is the boundary for both.
  */
 
 import { z } from 'zod';
@@ -9,37 +9,38 @@ import { z } from 'zod';
 import { DEFAULT_LEASE_SECONDS, MAX_LEASE_SECONDS } from '../core/fence.js';
 import { MAX_SCOPE_PATH_CHARS, MAX_SCOPE_PATHS, MAX_WORKTREE_CHARS } from '../core/scope.js';
 import { ALL_STATES, LINK_TYPES, PRIORITIES, TICKET_KINDS } from './enums.js';
+import { LEAN_AS } from './publish.js';
 
 export const TicketId = z
   .string()
   .min(8)
   .max(36)
-  .describe('Ticket id (uuid) or a unique prefix of at least 8 characters.');
+  .describe('Id or unique ≥8-char prefix.');
 
-export const ClaimToken = z.string().length(64).regex(/^[0-9a-f]+$/).describe('The claim token returned by sea_claim or sea_next.');
+export const ClaimToken = z.string().length(64).regex(/^[0-9a-f]+$/).describe('From sea_claim / sea_next.');
 
 export const ActorId = z
   .string()
   .min(1)
   .max(200)
   .optional()
-  .describe('Who is calling. Defaults to the server --actor. Claims are held per actor; subagents sharing one server should each pass their own.');
+  .describe('Acting actor (default: the server --actor). Subagents sharing one server pass their own.');
 
 export const IdempotencyKey = z
   .string()
   .min(1)
   .max(180)
   .optional()
-  .describe('Replay-safe key. A second call with the same key returns the first result without writing again.');
+  .describe('Replay-safe: a repeat with the same key returns the first result, writes nothing.');
 
 export const ExpectedVersion = z
   .number()
   .int()
   .nonnegative()
   .optional()
-  .describe('Optimistic concurrency: fail with version_conflict unless the ticket row_version equals this.');
+  .describe('Fail with version_conflict unless row_version equals this.');
 
-export const DryRun = z.boolean().default(false).describe('Validate and report what would happen; write nothing.');
+export const DryRun = z.boolean().default(false).describe('Validate only; write nothing.');
 
 export const Kind = z.enum(TICKET_KINDS);
 export const Priority = z.enum(PRIORITIES);
@@ -54,7 +55,7 @@ export const LeaseSeconds = z
   .max(MAX_LEASE_SECONDS)
   .optional()
   .describe(
-    `Lease length in seconds (default ${DEFAULT_LEASE_SECONDS}, max ${MAX_LEASE_SECONDS}). Renewed automatically while you keep calling sea-lite tools; expiry frees the ticket.`,
+    `Lease seconds (default ${DEFAULT_LEASE_SECONDS}, max ${MAX_LEASE_SECONDS}); renewed while you keep calling sea-lite tools.`,
   );
 
 export const ScopeSchema = z
@@ -64,15 +65,15 @@ export const ScopeSchema = z
       .min(1)
       .max(MAX_SCOPE_PATHS)
       .optional()
-      .describe('Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.'),
+      .describe('Repo-relative files or dirs (a dir covers everything beneath), globs, or `.` for the whole repo.'),
     worktree: z
       .string()
       .min(1)
       .max(MAX_WORKTREE_CHARS)
       .optional()
-      .describe('Absolute path of the git worktree you work in. Binds the claim to it: `sea-lite release-worktree <path>` frees it when the worktree is removed.'),
+      .describe('Absolute path of your git worktree; `sea-lite release-worktree` frees the claim when it is removed.'),
   })
-  .describe('The files you are going to touch (paths and/or worktree). Refused with scope_conflict if any path overlaps a live claim held by someone else (another actor, or this actor in another session).');
+  .describe('What you will edit; scope_conflict if someone else holds an overlapping scope.');
 
 export const NewTicketFields = {
   title: z.string().min(1).max(500),
@@ -97,34 +98,68 @@ export const CreateShape = {
 export const CreateInput = z.object(CreateShape);
 export type CreateInput = z.infer<typeof CreateInput>;
 
-export const BatchTicket = z.object({
-  ref: z.string().min(1).max(64).describe('Batch-local handle other entries use to point at this ticket.'),
+/** Caps on a batch after template expansion. */
+export const MAX_BATCH_TICKETS = 50;
+export const MAX_BATCH_LINKS = 100;
+export const MAX_TEMPLATES = 10;
+
+const Ref = z.string().min(1).max(64);
+export const BatchTicketFields = {
   ...NewTicketFields,
   status: z.enum(['idea', 'triaged']).default('idea'),
+};
+export const BatchTicket = z.object({
+  ref: Ref.describe('Batch-local handle that links use.'),
+  ...BatchTicketFields,
 });
-export const BatchLink = z.object({
-  from_ref: z.string().min(1).max(64).optional().describe('A ticket in this batch. Exactly one of from_ref / from_id.'),
-  from_id: TicketId.optional().describe('An existing ticket; needs its claim_token in `claims` (links are fenced on from).'),
-  to_ref: z.string().min(1).max(64).optional().describe('A ticket in this batch. Exactly one of to_ref / to_id.'),
-  to_id: TicketId.optional().describe('An existing ticket (not fenced).'),
+export type BatchTicket = z.infer<typeof BatchTicket>;
+const LinkEnds = {
+  from_ref: Ref.optional(),
+  from_id: TicketId.optional(),
+  to_ref: Ref.optional(),
+  to_id: TicketId.optional(),
   link_type: LinkTypeSchema,
-});
+};
+export const BatchLink = z
+  .object(LinkEnds)
+  .describe('One end each side: *_ref = a ticket in this batch, *_id = an existing ticket (a from_id needs its token in `claims`).');
 export type BatchLink = z.infer<typeof BatchLink>;
 
+export const BatchTemplate = z
+  .object({
+    for_each: z
+      .union([z.array(z.union([z.string().max(200), z.number()])).min(1).max(MAX_BATCH_TICKETS), z.number().int().min(1).max(MAX_BATCH_TICKETS)])
+      .describe('Values to repeat over, or a count n (= values 1..n).'),
+    ref: Ref.describe('Ref per item; must use {i} or {value}, e.g. "t{i}".'),
+    ticket: z.object(BatchTicketFields).meta({ [LEAN_AS]: 'Fields of a `tickets` entry without ref (title required).' }),
+    links: z
+      .array(z.object(LinkEnds))
+      .max(MAX_BATCH_LINKS)
+      .default([])
+      .describe('Per item, entries like `links`; one naming {prev} is skipped for the first item.')
+      .meta({ [LEAN_AS]: '' }),
+  })
+  .describe('One ticket (+ links) per for_each value. In every string: {i} = 1-based index, {value}, {ref} = this item\'s ref, {prev} = the previous item\'s ref.');
+export type BatchTemplate = z.infer<typeof BatchTemplate>;
+
 export const ApplyShape = {
-  tickets: z.array(BatchTicket).min(1).max(50),
-  links: z.array(BatchLink).max(100).default([]),
+  tickets: z.array(BatchTicket).max(MAX_BATCH_TICKETS).default([]),
+  links: z.array(BatchLink).max(MAX_BATCH_LINKS).default([]),
+  templates: z.array(BatchTemplate).max(MAX_TEMPLATES).optional(),
   claims: z
     .array(z.object({ ticket_id: TicketId, claim_token: ClaimToken }))
-    .max(50)
+    .max(MAX_BATCH_TICKETS)
     .optional()
-    .describe('Claim tokens for existing tickets used as from_id (one per ticket).'),
+    .describe('Tokens for existing tickets used as from_id.'),
+  verbose: z.boolean().optional().describe('true: return every ticket and link id in full instead of {created, links, idempotent_replay}.'),
   idempotency_key: IdempotencyKey,
-  dry_run: DryRun,
+  dry_run: DryRun.describe('Validate only; the result shows the expanded plan.'),
   actor_id: ActorId,
 };
 export const ApplyInput = z.object(ApplyShape);
 export type ApplyInput = z.infer<typeof ApplyInput>;
+/** A batch after template expansion: what the handler validates and writes. */
+export type ExpandedBatch = { tickets: BatchTicket[]; links: BatchLink[] };
 
 export const GetShape = {
   id: TicketId,
@@ -157,7 +192,7 @@ export const ListInput = z.object(ListShape);
 export type ListInput = z.infer<typeof ListInput>;
 
 export const ClaimShape = {
-  ticket_ids: z.array(TicketId).min(1).max(50).describe('One or more tickets. All are claimed or none is.'),
+  ticket_ids: z.array(TicketId).min(1).max(50),
   lease_seconds: LeaseSeconds,
   scope: ScopeSchema.optional(),
   actor_id: ActorId,
@@ -174,7 +209,7 @@ export const RefreshShape = {
     .min(1)
     .max(MAX_LEASE_SECONDS)
     .optional()
-    .describe(`New expiry = now + this (default: the claim's own lease; max ${MAX_LEASE_SECONDS}); never shortens an existing lease.`),
+    .describe(`Expiry = now + this (default: the claim's lease); never shortens.`),
   actor_id: ActorId,
 };
 export const RefreshInput = z.object(RefreshShape);
@@ -210,26 +245,72 @@ export const UpdateShape = {
 export const UpdateInput = z.object(UpdateShape);
 export type UpdateInput = z.infer<typeof UpdateInput>;
 
+const Note = z.string().max(10_000);
+
 export const TransitionShape = {
   ticket_id: TicketId,
   claim_token: ClaimToken,
   to: Status,
   reason: z.string().max(2000).optional(),
   duplicate_of: TicketId.optional().describe('Required when to = duplicate; also creates a `duplicates` link.'),
+  note: Note.optional().describe('Also append this note (hand-off) in the same write.'),
   confirm: z
     .boolean()
     .optional()
-    .describe(
-      'Terminal states (resolved | wont_fix | duplicate | dropped | merged) have no exit. Pass true to enter one directly. ' +
-        'When omitted, a client that supports elicitation is asked to confirm (input_required); one that does not gets confirmation_required.',
-    ),
+    .describe('true: enter a terminal state now (else the client is asked, or gets confirmation_required).'),
   expected_version: ExpectedVersion,
   idempotency_key: IdempotencyKey,
   dry_run: DryRun,
   actor_id: ActorId,
 };
+/** One ticket (the store API). The MCP tool takes TransitionToolInput, which also has the bulk form. */
 export const TransitionInput = z.object(TransitionShape);
 export type TransitionInput = z.infer<typeof TransitionInput>;
+
+export const FencedItem = z.object({ ticket_id: TicketId, claim_token: ClaimToken, expected_version: ExpectedVersion });
+export type FencedItem = z.infer<typeof FencedItem>;
+const BulkTickets = z
+  .array(FencedItem)
+  .min(1)
+  .max(MAX_BATCH_TICKETS)
+  .describe('Several tickets (each with its own token) instead of ticket_id + claim_token; all or none.');
+
+export const TransitionToolShape = {
+  ...TransitionShape,
+  ticket_id: TicketId.optional(),
+  claim_token: ClaimToken.optional(),
+  tickets: BulkTickets.optional(),
+};
+export const TransitionToolInput = z.object(TransitionToolShape);
+export type TransitionToolInput = z.infer<typeof TransitionToolInput>;
+
+/** Several tickets to one status, all or nothing (store API behind bulk sea_transition and sea_finish). */
+export const TransitionManyInput = z.object({
+  tickets: z.array(FencedItem).min(1).max(MAX_BATCH_TICKETS),
+  to: Status,
+  reason: z.string().max(2000).optional(),
+  duplicate_of: TicketId.optional(),
+  note: Note.optional(),
+  idempotency_key: IdempotencyKey,
+  dry_run: DryRun,
+  actor_id: ActorId,
+});
+export type TransitionManyInput = z.infer<typeof TransitionManyInput>;
+
+export const FINISH_STATES = ['resolved', 'wont_fix', 'dropped', 'merged'] as const;
+export const FinishShape = {
+  ticket_id: TicketId.optional(),
+  claim_token: ClaimToken.optional(),
+  tickets: BulkTickets.optional(),
+  status: z.enum(FINISH_STATES).default('resolved'),
+  note: Note.optional().describe('Hand-off note appended to each ticket.'),
+  reason: z.string().max(2000).optional(),
+  idempotency_key: IdempotencyKey,
+  dry_run: DryRun,
+  actor_id: ActorId,
+};
+export const FinishInput = z.object(FinishShape);
+export type FinishInput = z.infer<typeof FinishInput>;
 
 export const LinkShape = {
   action: z.enum(['add', 'remove']),

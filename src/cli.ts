@@ -44,7 +44,7 @@ import {
 import { renderDoctor, runDoctor } from './doctor.js';
 import type { ScopeConflict } from './handlers/claims.js';
 import type { ActorStats, StatsResult } from './handlers/stats.js';
-import { createServer } from './server.js';
+import { createServer, PROFILES, type Profile } from './server.js';
 import { DEFAULT_ACTOR, parseRole, parseTracks, SeaLite } from './store.js';
 
 export { VERSION } from './version.js';
@@ -68,6 +68,7 @@ const BOOLEAN_FLAGS = new Set([
   'install',
   'help',
   'mine',
+  'core',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -139,7 +140,8 @@ Hooks and guards:
                      release every live claim bound to a removed worktree
 
 Serving agents:
-  sea-lite serve   [--actor ID] [--session S] [--project KEY|*] [--role agent|operator] [--tracks work,design]
+  sea-lite serve   [--core] [--actor ID] [--session S] [--project KEY|*] [--role agent|operator] [--tracks work,design]
+                     --core (= --profile core): only the day-to-day tools, short descriptions (~11 KB tools/list)
   sea-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--actors-file F]
                    [--allow-origin H,..] [--allow-host H,..] [--project KEY|*] [--legacy stateless|reject]
                      Streamable HTTP on 127.0.0.1:${DEFAULT_HTTP_PORT}/mcp (2026-07-28, and 2025-era clients unless
@@ -159,7 +161,7 @@ Common flags: --data-dir DIR (default $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lit
 Identity: a claim belongs to an actor AND a session. serve takes the session from --session,
   SEA_LITE_SESSION or CLAUDE_CODE_SESSION_ID (else a random instance id) and registers it; other
   commands find the session of the agent they run for (see docs/THREAT-MODEL.md "Identity").
-Env: SEA_LITE_ACTOR, SEA_LITE_SESSION, SEA_LITE_PROJECT, SEA_LITE_ROLE, SEA_LITE_TRACKS.
+Env: SEA_LITE_ACTOR, SEA_LITE_SESSION, SEA_LITE_PROJECT, SEA_LITE_ROLE, SEA_LITE_TRACKS, SEA_LITE_PROFILE.
 `;
 
 // ───────────────────────────── identity / store ─────────────────────────────
@@ -619,8 +621,17 @@ async function main(argv: string[]): Promise<number> {
 
 // ───────────────────────────── serve ─────────────────────────────
 
+/** `--core`, `--profile core|full`, or SEA_LITE_PROFILE; default full. */
+function profileOf(flags: Args['flags']): Profile {
+  if (flags['core'] === true) return 'core';
+  const p = str(flags['profile']) ?? (process.env['SEA_LITE_PROFILE'] || undefined) ?? 'full';
+  if (!(PROFILES as readonly string[]).includes(p)) throw new SeaError('invalid_input', `--profile must be ${PROFILES.join(' or ')}, got "${p}"`);
+  return p as Profile;
+}
+
 async function serveCmd(flags: Args['flags']): Promise<number> {
   const dataDir = dataDirOf(flags);
+  const profile = profileOf(flags);
   const role = str(flags['role']);
   const tracks = str(flags['tracks']);
   const actor = str(flags['actor']) ?? (process.env['SEA_LITE_ACTOR'] || undefined) ?? DEFAULT_ACTOR;
@@ -652,14 +663,14 @@ async function serveCmd(flags: Args['flags']): Promise<number> {
   }
   process.stderr.write(
     `sea-lite ${VERSION} serving on stdio as ${holderLabel(actor, session)}; project ${project ?? '*'}; data dir ${store.kronicle.dataDir}; ` +
-      `role ${store.role}; tracks ${store.lifecycle.tracks.join(',')}\n`,
+      `role ${store.role}; tracks ${store.lifecycle.tracks.join(',')}; tools ${profile}\n`,
   );
   // serveStdio owns the era decision for the connection: a 2026-07-28
   // client (per-request _meta) and a 2025 client (initialize handshake)
   // are both served from the same factory. The store is shared; each
   // pinned instance is a fresh McpServer over it.
   const transport = new StdioServerTransport();
-  const handle = serveStdio(() => createServer(store, { version: VERSION }), {
+  const handle = serveStdio(() => createServer(store, { version: VERSION, profile }), {
     transport,
     onerror: (err) => process.stderr.write(`sea-lite: ${err.message}\n`),
   });
@@ -999,6 +1010,7 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
     actors,
     version: VERSION,
     ...(legacyFlag !== undefined ? { legacy: legacyFlag } : {}),
+    profile: profileOf(flags),
     ...(str(flags['host']) !== undefined ? { host: str(flags['host'])! } : {}),
     ...(port !== undefined ? { port } : {}),
     ...(allowedOrigins.length > 0 ? { allowedOrigins } : {}),

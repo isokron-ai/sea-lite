@@ -5,10 +5,12 @@
  */
 
 import { Client, type ClientCapabilities, type ClientOptions, type ElicitResult } from '@modelcontextprotocol/client';
-import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { fromJsonSchema, InMemoryTransport } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import { z } from 'zod';
 
-import { createServer } from '../src/server.js';
+import * as O from '../src/model/outputs.js';
+import { createServer, type ServerOptions } from '../src/server.js';
 import type { SeaLite } from '../src/store.js';
 
 export interface ToolResult {
@@ -28,6 +30,7 @@ export const TOOLS = [
   'sea_apply',
   'sea_claim',
   'sea_create',
+  'sea_finish',
   'sea_get',
   'sea_history',
   'sea_link',
@@ -50,11 +53,13 @@ export interface ConnectOptions {
   /** Disable multi-round-trip auto-fulfilment so input_required surfaces to the caller. */
   autoFulfill?: boolean;
   name?: string;
+  /** createServer options (e.g. `profile: 'core'`). */
+  server?: ServerOptions;
 }
 
 export async function connectInMemory(store: SeaLite, opts: ConnectOptions = {}): Promise<{ client: Client; close: () => Promise<void> }> {
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-  const handle = serveStdio(() => createServer(store), { transport: serverT });
+  const handle = serveStdio(() => createServer(store, opts.server), { transport: serverT });
   const capabilities: ClientCapabilities = { ...(opts.capabilities ?? {}), ...(opts.elicit ? { elicitation: { form: {} } } : {}) };
   const clientOpts: ClientOptions = {
     capabilities,
@@ -74,4 +79,36 @@ export async function connectInMemory(store: SeaLite, opts: ConnectOptions = {})
       await handle.close();
     },
   };
+}
+
+/**
+ * The strict result contract. tools/list publishes lean output schemas
+ * (model/publish.ts); the full zod schemas, rendered as JSON Schema with
+ * `additionalProperties: false`, are what every result must satisfy. Checked
+ * with the SDK's own JSON Schema validator.
+ */
+export const STRICT_OUTPUTS: Record<string, z.ZodType> = {
+  sea_create: O.CreateOutput,
+  sea_apply: O.ApplyOutput,
+  sea_update: O.UpdateOutput,
+  sea_transition: O.TransitionOutput,
+  sea_finish: O.FinishOutput,
+  sea_link: O.LinkOutput,
+  sea_claim: O.ClaimOutput,
+  sea_refresh: O.RefreshOutput,
+  sea_release: O.ReleaseOutput,
+  sea_next: O.NextOutput,
+  sea_get: O.GetOutput,
+  sea_list: O.ListOutput,
+  sea_history: O.HistoryOutput,
+  sea_scope_check: O.ScopeCheckOutput,
+  sea_stats: O.StatsOutput,
+};
+
+export async function assertStrictOutput(tool: string, res: unknown): Promise<void> {
+  const r = res as ToolResult;
+  if (r.isError) throw new Error(`${tool} returned an error: ${r.content.map((c) => c.text).join('')}`);
+  const v = fromJsonSchema(z.toJSONSchema(STRICT_OUTPUTS[tool]!, { io: 'output' }) as unknown as Parameters<typeof fromJsonSchema>[0]);
+  const out = await v['~standard'].validate(r.structuredContent);
+  if (out.issues) throw new Error(`${tool}: structuredContent breaks the strict output contract: ${out.issues.map((i) => i.message).join('; ')}`);
 }
