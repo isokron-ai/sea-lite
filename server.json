@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.rafe-walker/sea-lite",
-  "description": "Fenced work queue for parallel coding agents: leased claims, typed links, hash-chained history",
+  "description": "Work queue for parallel coding agents: leased path-scoped claims, typed links, hash-chained history",
   "repository": {
     "url": "https://github.com/rafe-walker/sea-lite",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.2.0",
   "websiteUrl": "https://isokron.ai",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "sea-lite",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       },

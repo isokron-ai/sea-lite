@@ -1,7 +1,7 @@
 {
   "name": "sea-lite",
-  "version": "0.1.1",
-  "description": "MCP work queue for parallel coding agents: claim fencing, typed links, atomic batches, hash-chained history (composes with kronicle-lite).",
+  "version": "0.2.0",
+  "description": "MCP work queue for parallel coding agents: claim fencing, path-scoped claims, typed links, atomic batches, hash-chained history (composes with kronicle-lite).",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -18,6 +18,7 @@
   "files": [
     "dist",
     "docs",
+    "hooks",
     "skills",
     "LICENSE",
     "NOTICE",
@@ -33,6 +34,8 @@
     "test": "vitest run",
     "lint": "eslint src test",
     "typecheck": "tsc --noEmit",
+    "catalog:snapshot": "npm run build && mcp-catalog-snap snapshot --server sea-lite",
+    "catalog:check": "npm run build && mcp-catalog-snap check --server sea-lite",
     "prepublishOnly": "npm run build",
     "serve": "node dist/cli.js serve"
   },
@@ -44,6 +47,8 @@
     "claim-fencing",
     "lease",
     "parallel-agents",
+    "file-locking",
+    "scope",
     "sqlite",
     "hash-chain",
     "kronicle-lite"
@@ -68,6 +73,7 @@
     "@types/node": "^22.19.0",
     "@types/picomatch": "^4.0.3",
     "eslint": "^9.39.0",
+    "mcp-catalog-snap": "^0.1.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.0",

@@ -4,6 +4,65 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.2.0] — 2026-10-31
+
+### Changed
+
+- **MCP 2026-07-28.** Built on `@modelcontextprotocol/server` 2.4 (the v2
+  SDK) instead of `@modelcontextprotocol/sdk` 1.x. The stdio server is a
+  dual-era entry: a 2026-07-28 client (per-request `_meta`,
+  `server/discover`) and a 2025 client (`initialize` handshake) are both
+  served by the same process; a v1-SDK client is part of the test suite.
+  `server/discover`, `tools/list` and `resources/templates/list` carry
+  `ttlMs` / `cacheScope` (1 h, public); `resources/read` is private.
+  Every tool publishes an `outputSchema` derived from its real return
+  shape and returns `structuredContent` alongside the text block. Server
+  `instructions` are ≤ 512 characters.
+- **`sea_transition` into a terminal state asks for confirmation.**
+  Terminal states have no exit and release the claim, so unless
+  `confirm: true` is passed the server answers with an `input_required`
+  result (multi round-trip: an embedded form elicitation under the key
+  `confirm_terminal`); the client's retry carries the answer. Declining
+  returns `confirmation_declined` and changes nothing. A client that did
+  not declare the elicitation capability gets `confirmation_required`
+  (a tool error, not a protocol error) telling it to pass `confirm: true`.
+  2025-era clients with elicitation are served through the SDK's legacy
+  shim. Dry runs and non-terminal moves never ask.
+- Tool catalog is now a reviewed artifact: `.mcp-catalog/sea-lite.json`
+  (mcp-catalog-snap), `npm run catalog:check` in CI.
+- zod 4.
+
+### Added
+
+- **Path-scoped claims.** `sea_claim` and `sea_next` accept
+  `scope: { paths: string[] }` — repo-relative prefixes or picomatch globs
+  (`.` = whole repo) naming what the holder will edit. The scope is stored
+  with the claim (`sea_tickets.claim_scope`, schema v2, added additively)
+  and on the `sea_ticket.claimed` payload; release, force release, expiry
+  and terminal transitions clear it; `rebuild` restores it. Claiming a
+  scope that overlaps another actor's live, unexpired scope fails with
+  `scope_conflict` naming every holder, ticket, overlapping pair and
+  expiry. `sea_get` / `sea_list` surface `claim.scope`.
+- `sea_scope_check { paths }` (read-only) → `{ ok, conflicts }`: the hot
+  path for an edit hook; no claim taken; the caller's own scopes never
+  conflict; expired leases are swept first.
+- `sea-lite scope-check --paths a,b [--actor] [--json]` CLI subcommand
+  (exit 1 on a conflict) and `hooks/` — a Claude Code `PreToolUse`
+  example that blocks an `Edit`/`Write` inside someone else's scope.
+- `skills/work-queue/SKILL.md`: claim the paths you will touch, worktree =
+  scope, check scope before editing, confirm terminal moves.
+- README wiring for Cursor, Codex and the GitHub Copilot coding agent
+  (read-only tools that qualify for Copilot: `sea_get`, `sea_list`,
+  `sea_history`, `sea_scope_check`).
+- Error codes `scope_conflict`, `confirmation_required`,
+  `confirmation_declined`.
+
+### Dependencies
+
+- `@modelcontextprotocol/server` ^2.4.0 (replaces `@modelcontextprotocol/sdk`),
+  `zod` ^4.2.0, `picomatch` ^4.0.7 (new; one small runtime dependency for
+  glob matching). `kronicle-lite` stays at `^0.2.0`.
+
 ## [0.1.1] — 2026-10-31
 
 ### Fixed
