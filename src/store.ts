@@ -15,6 +15,7 @@ import * as hist from './handlers/history.js';
 import * as links from './handlers/links.js';
 import * as statsH from './handlers/stats.js';
 import * as tickets from './handlers/tickets.js';
+import { waitForClaim, type Blocker, type WaitInfo } from './core/wait.js';
 import { ROLES, TRACKS, type Role, type Track } from './model/enums.js';
 import { DEFAULT_LIFECYCLE, type LifecycleConfig } from './model/lifecycle.js';
 import type * as S from './model/schemas.js';
@@ -68,6 +69,13 @@ export function parseRole(raw: string | undefined): Role {
   if (raw === undefined || raw === '') return 'agent';
   if (!(ROLES as readonly string[]).includes(raw)) throw new SeaError('invalid_input', `unknown role "${raw}" (valid: ${ROLES.join(', ')})`);
   return raw as Role;
+}
+
+/** Cancellation and progress for a waiting claim (the MCP request's signal and progress token). */
+export interface WaitHooks {
+  signal?: AbortSignal | undefined;
+  onProgress?: ((p: { elapsed_seconds: number; wait_seconds: number; blocked_by: Blocker }) => void) | undefined;
+  progressEveryMs?: number;
 }
 
 export class SeaLite {
@@ -200,6 +208,28 @@ export class SeaLite {
   claim(input: S.ClaimInput): claims.ClaimResult {
     return claims.claim(this.ctx(input.actor_id), input);
   }
+  /**
+   * sea_claim with `wait_seconds`: while the ticket or the scope is held by
+   * someone else, wait (core/wait.ts) instead of failing; `wait_timeout`
+   * names the holder and expiry if it never frees up.
+   */
+  async claimWait(input: S.ClaimInput, opts: WaitHooks = {}): Promise<claims.ClaimResult & { waited?: WaitInfo }> {
+    const r = await waitForClaim(
+      this.db,
+      () => {
+        const ctx = this.ctx(input.actor_id);
+        try {
+          return { ok: true, value: claims.claim(ctx, input) };
+        } catch (e) {
+          const b = claims.blockerOf(ctx, e);
+          if (b === null) throw e;
+          return { ok: false, blocker: b, error: e as SeaError };
+        }
+      },
+      { ...opts, waitSeconds: input.wait_seconds ?? 0, freedBy: (b) => claims.freedBy(this.ctx(input.actor_id), b) },
+    );
+    return r.waited !== null ? { ...r.value, waited: r.waited } : r.value;
+  }
   refresh(input: S.RefreshInput): claims.RefreshResult {
     return claims.refresh(this.ctx(input.actor_id), input);
   }
@@ -208,6 +238,40 @@ export class SeaLite {
   }
   next(input: S.NextInput): claims.NextResult {
     return claims.next(this.ctx(input.actor_id), input);
+  }
+  /**
+   * sea_next with `wait_seconds`: waits while the scope overlaps someone
+   * else's, or while nothing is free but someone else holds work that could
+   * free up (an eligible ticket, or a predecessor of one). An empty queue
+   * returns at once.
+   */
+  async nextWait(input: S.NextInput, opts: WaitHooks = {}): Promise<claims.NextResult & { waited?: WaitInfo }> {
+    const r = await waitForClaim(
+      this.db,
+      () => {
+        const ctx = this.ctx(input.actor_id);
+        try {
+          const v = claims.next(ctx, input);
+          if (v.ticket === null) {
+            const b = claims.busyQueueBlocker(ctx);
+            if (b !== null) {
+              return { ok: false, blocker: b, error: new SeaError('nothing_eligible', 'nothing eligible yet: other holders have work in progress', { busy: b }) };
+            }
+          }
+          return { ok: true, value: v };
+        } catch (e) {
+          const b = claims.blockerOf(ctx, e);
+          if (b === null) throw e;
+          return { ok: false, blocker: b, error: e as SeaError };
+        }
+      },
+      { ...opts, waitSeconds: input.wait_seconds ?? 0, freedBy: (b) => claims.freedBy(this.ctx(input.actor_id), b) },
+    ).catch((e: unknown) => {
+      // Without a wait, a busy queue is the ordinary "nothing eligible" answer, not an error.
+      if (e instanceof SeaError && e.code === 'nothing_eligible') return { value: claims.next(this.ctx(input.actor_id), input), waited: null };
+      throw e;
+    });
+    return r.waited !== null ? { ...r.value, waited: r.waited } : r.value;
   }
   link(input: S.LinkInput): links.LinkResult {
     return links.link(this.ctx(input.actor_id), input);

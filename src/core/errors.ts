@@ -23,6 +23,8 @@ export const ERROR_CODES = [
   'scope_conflict',
   'confirmation_required',
   'confirmation_declined',
+  'wait_timeout',
+  'wait_cancelled',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

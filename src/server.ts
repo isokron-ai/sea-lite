@@ -68,7 +68,7 @@ import {
   type TransitionInput,
 } from './model/schemas.js';
 import { published } from './model/publish.js';
-import type { SeaLite } from './store.js';
+import type { SeaLite, WaitHooks } from './store.js';
 import { VERSION } from './version.js';
 
 export type Profile = 'core' | 'full';
@@ -104,6 +104,8 @@ export interface ServerOptions {
   bindActor?: boolean;
   /** `full` (default): every tool. `core`: CORE_TOOLS with shorter descriptions. */
   profile?: Profile;
+  /** How often a waiting claim sends a progress notification (default 5000 ms). */
+  waitProgressMs?: number;
 }
 
 /** Catalog results change only with a release; a client may cache them for an hour, shared. */
@@ -210,6 +212,42 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     return wrap(fn);
   };
 
+  /**
+   * A claim that may wait (`wait_seconds`): async, cancelled with the request,
+   * and reporting progress every 5 s when the client sent a progressToken
+   * (a client that resets its request timeout on progress then never times
+   * out a long wait).
+   */
+  const runWait = async (args: { actor_id?: string | undefined }, ctx: ServerContext, fn: (hooks: WaitHooks) => Promise<unknown>): Promise<CallToolResult> => {
+    touch(args);
+    const token = ctx.mcpReq._meta?.progressToken;
+    const hooks: WaitHooks = {
+      signal: ctx.mcpReq.signal,
+      progressEveryMs: opts.waitProgressMs ?? 5000,
+      onProgress:
+        token === undefined
+          ? undefined
+          : (p) => {
+              ctx.mcpReq
+                .notify({
+                  method: 'notifications/progress',
+                  params: {
+                    progressToken: token,
+                    progress: p.elapsed_seconds,
+                    total: p.wait_seconds,
+                    message: `waiting: "${p.blocked_by.holder_label}" holds ticket ${p.blocked_by.ticket_id} until ${p.blocked_by.expires_at}`,
+                  },
+                })
+                .catch(() => undefined);
+            },
+    };
+    try {
+      return json(await fn(hooks));
+    } catch (err) {
+      return errorResult(err);
+    }
+  };
+
   const server = new McpServer(
     { name: 'sea-lite', version: opts.version ?? VERSION },
     {
@@ -242,7 +280,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       output: O;
       annotations: Record<string, boolean>;
     },
-    handler: (args: z.output<I>, ctx: ServerContext) => CallToolResult | InputRequiredResult,
+    handler: (args: z.output<I>, ctx: ServerContext) => CallToolResult | InputRequiredResult | Promise<CallToolResult>,
   ): void => {
     if (profile === 'core' && !(CORE_TOOLS as readonly string[]).includes(name)) return;
     const core = profile === 'core';
@@ -382,14 +420,15 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'Lease tickets, all or nothing. Returns one claim_token per ticket (shown once; every write needs it). Leases ' +
         '(default 900 s, max 3600) renew while you call sea-lite tools. already_claimed names the holder and expiry; ' +
         're-claiming your own rotates the token. `scope.paths` locks the files you will edit (scope_conflict names the ' +
-        'holder, ticket, overlap and expiry).',
-      core: 'Lease named tickets, all or nothing; returns a claim_token each (shown once). `scope.paths` locks files you will edit.',
-      coreOmit: ['scope.worktree'],
+        'holder, ticket, overlap and expiry). `wait_seconds` waits for a held ticket or scope to free up instead (≤ 300 s; ' +
+        'wait_timeout names who still holds it).',
+      core: 'Lease named tickets, all or nothing; a claim_token each (shown once). `scope.paths` locks files you will edit.',
+      coreOmit: ['scope.worktree', 'lease_seconds'],
       input: ClaimInput,
       output: ClaimOutput,
       annotations: WRITE,
     },
-    (args) => run(args, () => store.claim(bind(args))),
+    (args, ctx) => (args.wait_seconds ? runWait(args, ctx, (h) => store.claimWait(bind(args), h)) : run(args, () => store.claim(bind(args)))),
   );
 
   tool(
@@ -429,16 +468,17 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       description:
         'Atomically pick and claim the next ticket: unclaimed, triaged or in_progress, assigned to you or nobody, not priority ' +
         'parked, all predecessors (blocks / depends_on) terminal; highest priority, in_progress before triaged, then oldest. ' +
-        'Returns ticket + claim_token, or ticket: null (nothing_eligible). This project only. `scope.paths` locks the files you will edit.',
+        'Returns ticket + claim_token, or ticket: null (nothing_eligible). This project only. `scope.paths` locks the files you will edit. ' +
+        '`wait_seconds` (≤ 300) waits while the scope is held, or while nothing is free but others hold work that may free up.',
       core:
         'Claim the next eligible ticket (priority, then age; predecessors done): ticket + claim_token, or ticket: null. ' +
-        '`scope.paths` locks the files you will edit.',
-      coreOmit: ['kind', 'tag', 'include_unassigned', 'scope.worktree'],
+        '`scope.paths` locks files you will edit.',
+      coreOmit: ['kind', 'tag', 'include_unassigned', 'scope.worktree', 'lease_seconds'],
       input: NextInput,
       output: NextOutput,
       annotations: WRITE,
     },
-    (args) => run(args, () => store.next(bind(args))),
+    (args, ctx) => (args.wait_seconds ? runWait(args, ctx, (h) => store.nextWait(bind(args), h)) : run(args, () => store.next(bind(args)))),
   );
 
   // ───────────────────────────── reads ─────────────────────────────

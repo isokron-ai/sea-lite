@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T15:38:29.490Z",
+  "capturedAt": "2026-11-01T15:54:03.549Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -300,7 +300,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Lease tickets, all or nothing. Returns one claim_token per ticket (shown once; every write needs it). Leases (default 900 s, max 3600) renew while you call sea-lite tools. already_claimed names the holder and expiry; re-claiming your own rotates the token. `scope.paths` locks the files you will edit (scope_conflict names the holder, ticket, overlap and expiry).",
+        "description": "Lease tickets, all or nothing. Returns one claim_token per ticket (shown once; every write needs it). Leases (default 900 s, max 3600) renew while you call sea-lite tools. already_claimed names the holder and expiry; re-claiming your own rotates the token. `scope.paths` locks the files you will edit (scope_conflict names the holder, ticket, overlap and expiry). `wait_seconds` waits for a held ticket or scope to free up instead (≤ 300 s; wait_timeout names who still holds it).",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -340,6 +340,12 @@
               "maxItems": 50,
               "minItems": 1,
               "type": "array"
+            },
+            "wait_seconds": {
+              "description": "If held by someone else, wait up to this many seconds (≤ 300) for it to free up.",
+              "maximum": 300,
+              "minimum": 0,
+              "type": "integer"
             }
           },
           "required": [
@@ -370,6 +376,10 @@
                 "object",
                 "null"
               ]
+            },
+            "waited": {
+              "description": "Present when the call had to wait: how long, who held it, what freed it. {seconds,attempts,blocked_by,freed}",
+              "type": "object"
             },
             "worktree": {
               "type": [
@@ -1106,7 +1116,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Atomically pick and claim the next ticket: unclaimed, triaged or in_progress, assigned to you or nobody, not priority parked, all predecessors (blocks / depends_on) terminal; highest priority, in_progress before triaged, then oldest. Returns ticket + claim_token, or ticket: null (nothing_eligible). This project only. `scope.paths` locks the files you will edit.",
+        "description": "Atomically pick and claim the next ticket: unclaimed, triaged or in_progress, assigned to you or nobody, not priority parked, all predecessors (blocks / depends_on) terminal; highest priority, in_progress before triaged, then oldest. Returns ticket + claim_token, or ticket: null (nothing_eligible). This project only. `scope.paths` locks the files you will edit. `wait_seconds` (≤ 300) waits while the scope is held, or while nothing is free but others hold work that may free up.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -1171,6 +1181,12 @@
             "tag": {
               "description": "Only tickets carrying this tag.",
               "type": "string"
+            },
+            "wait_seconds": {
+              "description": "If held by someone else, wait up to this many seconds (≤ 300) for it to free up.",
+              "maximum": 300,
+              "minimum": 0,
+              "type": "integer"
             }
           },
           "type": "object"
@@ -1209,6 +1225,10 @@
                 "object",
                 "null"
               ]
+            },
+            "waited": {
+              "description": "Present when the call had to wait: how long, who held it, what freed it. {seconds,attempts,blocked_by,freed}",
+              "type": "object"
             }
           },
           "required": [
@@ -1840,5 +1860,5 @@
     "name": "sea-lite",
     "version": "0.4.0"
   },
-  "sha256": "e76170654894db991824e15d0449cf131a068836406d468a6284b1c9b69534dc"
+  "sha256": "66072f5f09cf044df2385bf74aab55d229416766c3a84c6609985c58b5f1782e"
 }

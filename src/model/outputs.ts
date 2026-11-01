@@ -188,12 +188,30 @@ export const LinkOutput = z.object({
   dry_run: z.boolean(),
 });
 
+export const WaitOut = z
+  .object({
+    seconds: z.number(),
+    attempts: z.number(),
+    blocked_by: z.object({
+      kind: z.enum(['already_claimed', 'scope_conflict', 'busy_queue']),
+      ticket_id: z.string(),
+      title: z.string().nullable(),
+      holder: z.string(),
+      holder_session: z.string().nullable(),
+      holder_label: z.string(),
+      expires_at: z.string(),
+    }),
+    freed: z.enum(['released', 'finished', 'lease_expired', 'changed']),
+  })
+  .describe('Present when the call had to wait: how long, who held it, what freed it.');
+
 export const ClaimOutput = z.object({
   claims: z.array(z.object({ ticket_id: z.string(), claim_token: z.string(), expires_at: z.string(), rotated: z.boolean() })),
   lease_seconds: z.number(),
   scope: ScopeOut.nullable(),
   worktree: z.string().nullable(),
   head: HeadOut,
+  waited: WaitOut.optional(),
 });
 
 export const RefreshOutput = z.object({
@@ -218,6 +236,7 @@ export const NextOutput = z.object({
   reason: z.enum(['nothing_eligible']).nullable(),
   considered: z.number(),
   head: HeadOut,
+  waited: WaitOut.optional(),
 });
 
 export const LinkWithPeerOut = LinkViewOut.extend({

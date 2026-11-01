@@ -14,6 +14,22 @@ agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
 
 ### Added
 
+- **`wait_seconds` on `sea_claim` and `sea_next`** (≤ 300; CLI `claim` /
+  `next --wait S`): wait for a held ticket or scope to free up instead of
+  failing. The result gains `waited: {seconds, attempts, blocked_by, freed}`
+  (`freed`: `released` / `finished` / `lease_expired` / `changed`); a wait
+  that never frees up fails with the new `wait_timeout` code naming the
+  holder, ticket and expiry (CLI exit 1); a cancelled request ends it with
+  `wait_cancelled`. `sea_next` also waits while nothing is free but someone
+  else holds work that could free up; an empty queue still answers at once.
+  No lock is held and the store is not polled hard: retries happen only on
+  a change — another process's commit (SQLite `data_version`, 20–250 ms
+  backoff), this process's commit (an in-process notifier, immediate) — or
+  at the blocking lease's expiry. Progress notifications every 5 s when the
+  client sends a progressToken (see README "Client timeouts"). `--core`
+  stops advertising `lease_seconds` on `sea_claim` / `sea_next` (still
+  accepted) to stay within 12 KB with `wait_seconds` added.
+
 - **`serve --core`** (also `--profile core`, `SEA_LITE_PROFILE=core`,
   `serve --http --core`): the nine tools an agent uses day to day —
   `sea_next`, `sea_claim`, `sea_get`, `sea_scope_check`, `sea_apply`,

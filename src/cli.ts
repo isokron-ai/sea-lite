@@ -45,6 +45,7 @@ import { renderDoctor, runDoctor } from './doctor.js';
 import type { ScopeConflict } from './handlers/claims.js';
 import type { ActorStats, StatsResult } from './handlers/stats.js';
 import { createServer, PROFILES, type Profile } from './server.js';
+import type { WaitInfo } from './core/wait.js';
 import { DEFAULT_ACTOR, parseRole, parseTracks, SeaLite } from './store.js';
 
 export { VERSION } from './version.js';
@@ -122,8 +123,9 @@ const HELP = `sea-lite ${VERSION} — a work queue for parallel coding agents th
 
 The queue, by hand (no LLM needed):
   sea-lite create TITLE [--triaged] [--body B] [--kind K] [--priority P] [--tags a,b] [--json]
-  sea-lite next    [--paths a,b] [--lease S] [--json]      claim the next eligible ticket (and lock the paths)
-  sea-lite claim   ID.. [--paths a,b] [--lease S] [--json]  claim tickets (and lock the paths)
+  sea-lite next    [--paths a,b] [--lease S] [--wait S] [--json]      claim the next eligible ticket (and lock the paths)
+  sea-lite claim   ID.. [--paths a,b] [--lease S] [--wait S] [--json]  claim tickets (and lock the paths)
+                     --wait S: if held, wait up to S seconds (≤ 300) for it to free up
   sea-lite release [ID.. | --all] [--note N] [--json]      give claims back (the CLI keeps your tokens)
   sea-lite board   [--all-projects] [--all] [--json]       tickets, holders, locked paths, time left; live sessions
   sea-lite heartbeat [--json] [--hook]                     renew your live claims (--hook: PostToolUse, rate-limited)
@@ -317,6 +319,10 @@ function fmtRow(t: Ticket | TicketCompact): string {
   return `${t.id.slice(0, 8)}  ${t.status.padEnd(14)} ${t.priority.padEnd(7)} ${t.kind.padEnd(13)} ${t.title}${claim}`;
 }
 
+function waitedLine(w: WaitInfo | undefined): string {
+  return w === undefined ? '' : `waited ${w.seconds}s for "${w.blocked_by.holder_label}" (ticket ${w.blocked_by.ticket_id.slice(0, 8)}): ${w.freed.replace('_', ' ')}\n`;
+}
+
 function fmtConflict(c: ScopeConflict): string {
   return (
     `conflict: "${c.holder_label}" holds ${c.held.join(', ')} on ticket ${c.ticket_id.slice(0, 8)} ("${c.title}") until ${c.claim_expires_at}` +
@@ -381,6 +387,7 @@ async function main(argv: string[]): Promise<number> {
       const rel = rawPaths.length > 0 ? repoRelative(rawPaths, flags) : { paths: [], project: projectOf(flags), root: null };
       const { store, identity, dataDir } = openAs(flags, rel.project);
       const lease = num(flags['lease'], 'lease');
+      const wait = num(flags['wait'], 'wait');
       const worktree = str(flags['worktree']);
       const scope =
         rel.paths.length > 0 || worktree !== undefined
@@ -388,7 +395,9 @@ async function main(argv: string[]): Promise<number> {
           : undefined;
       if (cmd === 'claim') {
         if (positional.length === 0) throw new SeaError('invalid_input', 'claim needs one or more ticket ids (or use `sea-lite next`)');
-        const r = store.claim(S.ClaimInput.parse({ ticket_ids: positional, ...(lease !== undefined ? { lease_seconds: lease } : {}), ...(scope ? { scope } : {}) }));
+        const r = await store.claimWait(
+          S.ClaimInput.parse({ ticket_ids: positional, ...(lease !== undefined ? { lease_seconds: lease } : {}), ...(scope ? { scope } : {}), ...(wait !== undefined ? { wait_seconds: wait } : {}) }),
+        );
         rememberTokens(dataDir, identity, r.claims);
         out(flags, { ...r, holder: holderLabel(identity.actor, identity.session) }, () =>
           r.claims
@@ -397,13 +406,14 @@ async function main(argv: string[]): Promise<number> {
                 `claimed ${c.ticket_id.slice(0, 8)} as ${holderLabel(identity.actor, identity.session)} until ${c.expires_at.slice(11, 19)}Z (${fmtLeft(c.expires_at)})` +
                 `${r.scope ? `; locks ${r.scope.paths.join(', ')}` : ''}${c.rotated ? '; token rotated' : ''}\n`,
             )
-            .join(''),
+            .join('') + waitedLine(r.waited),
         );
         return 0;
       }
       const kinds = list(flags['kind']);
-      const r = store.next(
+      const r = await store.nextWait(
         S.NextInput.parse({
+          ...(wait !== undefined ? { wait_seconds: wait } : {}),
           ...(lease !== undefined ? { lease_seconds: lease } : {}),
           ...(scope ? { scope } : {}),
           ...(kinds.length > 0 ? { kind: kinds } : {}),
@@ -414,7 +424,8 @@ async function main(argv: string[]): Promise<number> {
       out(flags, r, () =>
         r.ticket
           ? `claimed ${r.ticket.id.slice(0, 8)}  ${r.ticket.title}  as ${holderLabel(identity.actor, identity.session)} until ${r.expires_at!.slice(11, 19)}Z` +
-            ` (${fmtLeft(r.expires_at!)})${r.ticket.claim?.scope ? `; locks ${r.ticket.claim.scope.paths.join(', ')}` : ''}\n`
+            ` (${fmtLeft(r.expires_at!)})${r.ticket.claim?.scope ? `; locks ${r.ticket.claim.scope.paths.join(', ')}` : ''}\n` +
+            waitedLine(r.waited)
           : `nothing eligible (${r.considered} considered)\n`,
       );
       return 0;
@@ -1033,7 +1044,7 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
 }
 
 /** Codes that mean "someone else holds it" rather than "you asked wrong". */
-const CONFLICT_CODES = new Set(['scope_conflict', 'already_claimed', 'fence_invalid', 'fence_foreign_holder', 'fence_expired', 'version_conflict']);
+const CONFLICT_CODES = new Set(['scope_conflict', 'already_claimed', 'fence_invalid', 'fence_foreign_holder', 'fence_expired', 'version_conflict', 'wait_timeout']);
 
 main(process.argv.slice(2)).then(
   (code) => {

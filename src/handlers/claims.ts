@@ -11,6 +11,7 @@ import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
 import { clampLease, DEFAULT_LEASE_SECONDS, expiryFrom, hasLiveClaim, MAX_LEASE_SECONDS, validateFence } from '../core/fence.js';
 import { holderLabel } from '../core/identity.js';
+import type { Blocker, WaitInfo } from '../core/wait.js';
 import { addNote, mustGetRow, ownsClaim, projectFilter, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
 import {
   findOverlaps,
@@ -440,4 +441,87 @@ export function heartbeat(ctx: Ctx, opts: { quiet?: boolean } = {}): HeartbeatRe
     }
     return { renewed, lapsed, head: ctx.chain.head() };
   });
+}
+
+// ───────────────────────────── waiting (wait_seconds) ─────────────────────────────
+
+/** Turn a refusal into the blocker a waiter waits on; null if waiting cannot help. */
+export function blockerOf(ctx: Ctx, err: unknown): Blocker | null {
+  if (!(err instanceof SeaError)) return null;
+  const titleOf = (id: string) => (ctx.db.prepare(`SELECT title FROM sea_tickets WHERE id = ?`).get(id) as { title: string } | undefined)?.title ?? null;
+  if (err.code === 'already_claimed') {
+    const d = err.details as { ticket_id: string; held_by: string | null; held_by_session: string | null; claim_expires_at: string };
+    const holder = d.held_by ?? '?';
+    return {
+      kind: 'already_claimed',
+      ticket_id: d.ticket_id,
+      title: titleOf(d.ticket_id),
+      holder,
+      holder_session: d.held_by_session ?? null,
+      holder_label: holderLabel(holder, d.held_by_session),
+      expires_at: d.claim_expires_at,
+    };
+  }
+  if (err.code === 'scope_conflict') {
+    const c = (err.details as { conflicts: ScopeConflict[] }).conflicts[0];
+    if (c === undefined) return null;
+    return {
+      kind: 'scope_conflict',
+      ticket_id: c.ticket_id,
+      title: c.title,
+      holder: c.holder,
+      holder_session: c.holder_session,
+      holder_label: c.holder_label,
+      expires_at: c.claim_expires_at,
+    };
+  }
+  return null;
+}
+
+/**
+ * sea_next found nothing eligible: is that because someone else holds work
+ * that could free up (an eligible ticket under a live claim, or a live-claimed
+ * predecessor of an unclaimed eligible ticket)? The earliest-expiring such
+ * claim, or null when the queue is simply empty for this caller.
+ */
+export function busyQueueBlocker(ctx: Ctx): Blocker | null {
+  const pf = projectFilter(ctx);
+  const now = ctx.now.toISOString();
+  const rows = ctx.db
+    .prepare(
+      `SELECT t.id, t.title, t.claim_actor, t.claim_session, t.claim_expires_at FROM sea_tickets t
+        WHERE t.claim_token_hash IS NOT NULL AND t.claim_expires_at > ?${pf.sql ? ` AND ${pf.sql}` : ''}
+          AND (
+            (t.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)}) AND t.priority <> 'parked')
+            OR EXISTS (SELECT 1 FROM sea_links l JOIN sea_tickets c ON c.id = l.to_id
+                        WHERE l.state = 'active' AND l.link_type = 'blocks' AND l.from_id = t.id
+                          AND c.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)}) AND c.claim_token_hash IS NULL)
+            OR EXISTS (SELECT 1 FROM sea_links l JOIN sea_tickets c ON c.id = l.from_id
+                        WHERE l.state = 'active' AND l.link_type = 'depends_on' AND l.to_id = t.id
+                          AND c.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)}) AND c.claim_token_hash IS NULL)
+          )
+        ORDER BY t.claim_expires_at, t.id`,
+    )
+    .all(now, ...pf.params) as { id: string; title: string; claim_actor: string; claim_session: string | null; claim_expires_at: string }[];
+  const r = rows.find((x) => !ownsClaim(ctx, x.claim_actor, x.claim_session));
+  if (r === undefined) return null;
+  return {
+    kind: 'busy_queue',
+    ticket_id: r.id,
+    title: r.title,
+    holder: r.claim_actor,
+    holder_session: r.claim_session ?? null,
+    holder_label: holderLabel(r.claim_actor, r.claim_session),
+    expires_at: r.claim_expires_at,
+  };
+}
+
+/** After a successful wait: what happened to the first blocker. */
+export function freedBy(ctx: Ctx, b: Blocker): WaitInfo['freed'] {
+  const row = ctx.db.prepare(`SELECT * FROM sea_tickets WHERE id = ?`).get(b.ticket_id) as TicketRow | undefined;
+  if (row === undefined) return 'changed';
+  if ((TERMINAL_STATES as readonly string[]).includes(row.status)) return 'finished';
+  const stillHers = row.claim_token_hash !== null && row.claim_actor === b.holder && (row.claim_session ?? null) === b.holder_session;
+  if (stillHers) return 'changed';
+  return ctx.now.getTime() >= Date.parse(b.expires_at) ? 'lease_expired' : 'released';
 }

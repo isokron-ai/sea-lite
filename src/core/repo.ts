@@ -15,6 +15,7 @@ import { isExpired } from './fence.js';
 import { sameOwner } from './identity.js';
 import { parseScopeJson } from './scope.js';
 import type { LinkRow, NoteRow, TicketRow } from './types.js';
+import { notifyChange } from './wait.js';
 
 export interface Ctx {
   readonly db: Db;
@@ -178,5 +179,8 @@ export function checkVersion(row: TicketRow, expected: number | undefined): void
 
 /** Run `fn` in one BEGIN IMMEDIATE transaction. Synchronous by construction. */
 export function tx<T>(db: Db, fn: () => T): T {
-  return db.transaction(fn).immediate();
+  const out = db.transaction(fn).immediate();
+  // Committed (or a nested savepoint released): wake in-process waiters (core/wait.ts).
+  if (!db.inTransaction) notifyChange(db);
+  return out;
 }

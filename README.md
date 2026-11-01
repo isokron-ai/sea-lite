@@ -295,14 +295,14 @@ Also: `sea-lite list`, `show ID`, `stats --since 7d`, `rebuild`,
 | `sea_apply` | 1–50 tickets + ≤ 100 links, all-or-nothing. A link end is a batch `ref` or an existing ticket (`from_id` fenced by its token in `claims`; `to_id` unfenced). `templates` expand server-side into tickets and links (see [Templated batches](#templated-batches)); the caps count the expanded batch. Rejects duplicate refs, unknown refs/ids, self-loops, duplicate links and cycles (over existing links too) with a list of every problem. Returns `{created: {ref: id}, links: n, idempotent_replay}`; `verbose: true` returns every ticket and link id (the 0.4.0 result). `dry_run` returns the expanded plan. |
 | `sea_get` | Ticket by id or ≥ 8-char prefix: fields, `row_version`, claim holder/expiry (never the token), active links with peer title/status, notes, `legal_next`. |
 | `sea_list` | Filters (status, kind, priority, assignee `me`/`none`, tag, claimed `any`/`yes`/`no`/`mine`), FTS5 `query`, cursor paging, `compact`/`full`. This project's tickets (plus legacy ones without a project) unless `project` names another or `*`. |
-| `sea_claim` | Lease one or a set of tickets (all-or-nothing, locked in id order). Returns a token per ticket. Re-claiming your own ticket rotates the token. `scope.paths` locks the paths you will edit for the lease; `scope_conflict` if they overlap someone else's live scope. `scope.worktree` binds the claim to a git worktree. |
+| `sea_claim` | Lease one or a set of tickets (all-or-nothing, locked in id order). Returns a token per ticket. Re-claiming your own ticket rotates the token. `scope.paths` locks the paths you will edit for the lease; `scope_conflict` if they overlap someone else's live scope. `scope.worktree` binds the claim to a git worktree.  `wait_seconds` waits for a held ticket or scope instead of failing (see [Waiting](#waiting-for-a-claim-wait_seconds)). |
 | `sea_refresh` | Extend a lease to now + N (default: the claim's own lease, ≤ 3600); never shortens; holder-only. Not chained. Rarely needed: any sea-lite call by the holder renews its claims. |
 | `sea_release` | Holder gives the ticket back (with a hand-off `note`). `force: true` for operators (`--role operator`), recorded as a force release. |
 | `sea_update` | Title/body/kind/priority/assignee, tags add/remove, append a note. Fenced; `expected_version` (OCC); `idempotency_key`; `dry_run`. |
 | `sea_transition` | Move status. Fenced. Rejections carry `legal_next`. `duplicate` needs `duplicate_of` and records a `duplicates` link. Terminal states release the claim (and scope) and ask for confirmation: `confirm: true`, or answer the `input_required` prompt. `note` appends a note in the same write. **Bulk**: `tickets: [{ticket_id, claim_token}, …]` instead of `ticket_id` + `claim_token` moves up to 50 tickets, each fenced by its own token, all or nothing (`batch_invalid` lists every failing ticket); one confirmation covers the set. |
 | `sea_finish` | End your work in one call. Required `outcome`: `done` → `resolved`, `blocked` → `blocked` (not terminal; resumable; already-blocked stays blocked), `abandoned` → `dropped`. Required `note` (what shipped or why; ≤ 1000 chars), optional `commit` (sha, 7–64 hex). The claim and scope are released in every case. The note is stored on the ticket as `done @ 3f2a9c1: …`, and the chain records `outcome` / `commit` on the status event and `finish: {outcome, commit, from, to}` on the note event, so `sea_history` shows why. `tickets: [...]` finishes several, each fenced by its own token, all or nothing. Calling it is the confirmation (no prompt). |
 | `sea_link` | `add` / `remove` a typed link, fenced on `from`. `parent_of` / `depends_on` / `blocks` stay acyclic across existing links. Remove tombstones. |
-| `sea_next` | Pick + claim the highest-priority unclaimed `triaged`/`in_progress` ticket assigned to me or unassigned whose predecessors are all terminal. Takes `scope.paths` like `sea_claim`. |
+| `sea_next` | Pick + claim the highest-priority unclaimed `triaged`/`in_progress` ticket assigned to me or unassigned whose predecessors are all terminal. Takes `scope.paths` like `sea_claim`. `wait_seconds` waits for a held scope or busy queue (see [Waiting](#waiting-for-a-claim-wait_seconds)). |
 | `sea_history` | Events for one ticket, or a `since_seq` feed of all sea events, with chain verification status. |
 | `sea_scope_check` | Read-only: would editing these paths collide with someone else's live scope? `{ ok, conflicts }` (holder, session, ticket title, overlap, expiry). No claim needed. |
 | `sea_stats` | Read-only, per actor, derived from the chain: claims taken / rotated / released / expired / force-released, lease-seconds held, transitions, tickets created, live claims. `since: 24h \| 7d \| ISO`. |
@@ -390,6 +390,38 @@ each depending on the one before (21 tickets, 39 links), in one call:
 Result: `{"created":{"epic":"…","m1":"…",…,"m20":"…"},"links":39,"idempotent_replay":false}`.
 Re-sending it with the same `idempotency_key` replays that result
 (`idempotent_replay: true`) instead of creating 21 more tickets.
+
+### Waiting for a claim (`wait_seconds`)
+
+`sea_claim` and `sea_next` take `wait_seconds` (≤ 300; CLI `--wait S`).
+Instead of failing with `already_claimed` / `scope_conflict` at once, the
+call waits for the ticket or scope to free up and then claims it. The
+result carries `waited: {seconds, attempts, blocked_by: {kind, ticket_id,
+title, holder, holder_label, expires_at}, freed}`, where `freed` is
+`released`, `finished` (the holder closed the ticket), `lease_expired` or
+`changed`. If it never frees up the call fails with `wait_timeout`, naming
+the holder, ticket and expiry that still block it (CLI exit 1). `sea_next`
+also waits when nothing is free but someone else holds work that could free
+up (an eligible ticket, or a predecessor of one); an empty queue still
+answers `nothing_eligible` at once. Refusals waiting cannot fix (unknown
+ticket, bad input) fail at once.
+
+How it waits, without hammering the store: nothing is locked while waiting.
+A waiter retries only when something changed: another process committed
+(SQLite `PRAGMA data_version`, one counter read, polled with a 20 → 250 ms
+backoff), this process committed (an in-process notifier wakes it
+immediately), or the blocking lease reached its expiry. A release in
+another process is picked up within about 250 ms; in the same process,
+immediately.
+
+**Client timeouts.** A wait is one MCP request, so it must fit the client's
+request timeout. The TypeScript SDK's default is 60 s; other clients
+differ. When the client sends a `progressToken`, sea-lite sends a progress
+notification every 5 s naming who it is waiting on, and a client that
+resets its timeout on progress (`resetTimeoutOnProgress` in the TypeScript
+SDK) will then sit through the whole wait. Otherwise keep `wait_seconds`
+below your client's timeout. Cancelling the request ends the wait
+(`wait_cancelled`).
 
 ## Scopes: locking the files, not just the ticket
 

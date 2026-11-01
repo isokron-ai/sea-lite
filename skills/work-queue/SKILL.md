@@ -63,7 +63,9 @@ claims it (and your paths) in one step.
 
 To take a specific ticket instead, `sea_claim` with its id and your scope.
 If it is held, the error names the holder and the expiry; do not retry in a
-loop — move on.
+loop — move on, or pass `wait_seconds` (≤ 300, and below your client's
+request timeout) to wait for it to free up instead of polling with sleeps.
+The same works for `sea_next` when your scope is held.
 
 ## 2. Work under the fence
 

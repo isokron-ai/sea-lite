@@ -58,6 +58,14 @@ export const LeaseSeconds = z
     `Lease seconds (default ${DEFAULT_LEASE_SECONDS}, max ${MAX_LEASE_SECONDS}); renewed while you keep calling sea-lite tools.`,
   );
 
+export const WaitSeconds = z
+  .number()
+  .int()
+  .min(0)
+  .max(300)
+  .optional()
+  .describe('If held by someone else, wait up to this many seconds (≤ 300) for it to free up.');
+
 export const ScopeSchema = z
   .object({
     paths: z
@@ -223,6 +231,7 @@ export const ClaimShape = {
   ticket_ids: z.array(TicketId).min(1).max(50),
   lease_seconds: LeaseSeconds,
   scope: ScopeSchema.optional(),
+  wait_seconds: WaitSeconds,
   actor_id: ActorId,
 };
 export const ClaimInput = z.object(ClaimShape);
@@ -375,6 +384,7 @@ export const NextShape = {
   tag: z.string().optional().describe('Only tickets carrying this tag.'),
   include_unassigned: z.boolean().default(true).describe('Consider unassigned tickets as well as ones assigned to me.'),
   scope: ScopeSchema.optional(),
+  wait_seconds: WaitSeconds,
   actor_id: ActorId,
 };
 export const NextInput = z.object(NextShape);
