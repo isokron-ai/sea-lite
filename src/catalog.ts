@@ -18,7 +18,7 @@ import { canonicalize, sha256Hex } from 'kronicle-lite';
 import { createServer } from './server.js';
 import { SeaLite } from './store.js';
 
-export const CATALOG_FINGERPRINT = 'd24221dabed6a41261f11677b085167f2d8470016266ce12d33eec84faaf6d0a';
+export const CATALOG_FINGERPRINT = 'e76170654894db991824e15d0449cf131a068836406d468a6284b1c9b69534dc';
 /** Package version the fingerprint above was pinned for. */
 export const CATALOG_VERSION = '0.4.0';
 

@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { MAX_INSTRUCTIONS_CHARS } from '../src/server.js';
 import { SeaLite } from '../src/store.js';
-import { connectInMemory, parse, TOOLS, type ToolResult } from './mcp-helpers.js';
+import { assertStrictOutput, connectInMemory, parse, TOOLS, type ToolResult } from './mcp-helpers.js';
 
 describe('MCP server (in-process transport, 2026-07-28 era)', () => {
   let store: SeaLite;
@@ -45,7 +45,7 @@ describe('MCP server (in-process transport, 2026-07-28 era)', () => {
     expect(d.cacheScope).toBe('public');
   });
 
-  it('lists the thirteen tools deterministically with input + output schemas, descriptions and a cache hint', async () => {
+  it('lists the fifteen tools deterministically with input + output schemas, descriptions and a cache hint', async () => {
     const first = await client.listTools();
     expect(first.tools.map((t) => t.name).sort()).toEqual(TOOLS);
     expect(first.ttlMs).toBeGreaterThan(0);
@@ -135,31 +135,51 @@ describe('MCP server (in-process transport, 2026-07-28 era)', () => {
     expect(empty).toMatchObject({ ticket: null, reason: 'nothing_eligible' });
   });
 
-  it('every tool returns structuredContent that validates against its published outputSchema (server and client both check)', async () => {
-    // The v2 client validates structuredContent against the cached tools/list outputSchema and throws on a mismatch;
-    // the server refuses to send a non-conforming result. Exercising every success path pins the schemas.
-    const a = parse<{ ticket: { id: string } }>(await client.callTool({ name: 'sea_create', arguments: { title: 'schema A', status: 'triaged' } }));
-    const b = parse<{ tickets: { ticket_id: string }[] }>(
-      await client.callTool({
-        name: 'sea_apply',
-        arguments: { tickets: [{ ref: 'x', title: 'schema B' }, { ref: 'y', title: 'schema C' }], links: [{ from_ref: 'x', to_ref: 'y', link_type: 'parent_of' }] },
-      }),
-    );
-    const claim = parse<{ claims: { claim_token: string }[] }>(await client.callTool({ name: 'sea_claim', arguments: { ticket_ids: [a.ticket.id] } }));
+  it('every tool returns structuredContent that validates against its published outputSchema and the strict contract', async () => {
+    // The v2 client validates structuredContent against the cached (lean) tools/list outputSchema and throws on a
+    // mismatch; the server refuses to send a result its zod schema rejects; assertStrictOutput checks the full zod
+    // contract with additionalProperties: false. Exercising every success path pins all three.
+    const call = async <T,>(name: string, args: Record<string, unknown>): Promise<T> => {
+      const res = await client.callTool({ name, arguments: args });
+      await assertStrictOutput(name, res);
+      return parse<T>(res);
+    };
+    const a = await call<{ ticket: { id: string } }>('sea_create', { title: 'schema A', status: 'triaged' });
+    const b = await call<{ created: Record<string, string>; links: number }>('sea_apply', {
+      tickets: [{ ref: 'x', title: 'schema B' }, { ref: 'y', title: 'schema C' }],
+      links: [{ from_ref: 'x', to_ref: 'y', link_type: 'parent_of' }],
+    });
+    expect(b.links).toBe(1);
+    const verbose = await call<{ tickets: { ticket_id: string }[] }>('sea_apply', { tickets: [{ ref: 'v', title: 'schema V' }], verbose: true });
+    expect(verbose.tickets[0]!.ticket_id).toHaveLength(36);
+    const dry = await call<{ dry_run: boolean; plan: { tickets: unknown[] } }>('sea_apply', {
+      templates: [{ for_each: 2, ref: 'd{i}', ticket: { title: 'dry {i}' } }],
+      dry_run: true,
+    });
+    expect(dry.plan.tickets).toHaveLength(2);
+    const claim = await call<{ claims: { claim_token: string }[] }>('sea_claim', { ticket_ids: [a.ticket.id] });
     const token = claim.claims[0]!.claim_token;
-    await client.callTool({ name: 'sea_refresh', arguments: { ticket_id: a.ticket.id, claim_token: token, extend_by_seconds: 600 } });
-    await client.callTool({ name: 'sea_link', arguments: { action: 'add', from_id: a.ticket.id, to_id: b.tickets[0]!.ticket_id, link_type: 'relates_to', claim_token: token } });
-    await client.callTool({ name: 'sea_link', arguments: { action: 'remove', from_id: a.ticket.id, to_id: b.tickets[0]!.ticket_id, link_type: 'relates_to', claim_token: token } });
-    await client.callTool({ name: 'sea_update', arguments: { ticket_id: a.ticket.id, claim_token: token, note: 'n', dry_run: true } });
-    await client.callTool({ name: 'sea_transition', arguments: { ticket_id: a.ticket.id, claim_token: token, to: 'in_progress', dry_run: true } });
-    const got = parse<{ ticket: { claim: { holder: string } }; legal_next: string[] }>(await client.callTool({ name: 'sea_get', arguments: { id: a.ticket.id } }));
+    await call('sea_refresh', { ticket_id: a.ticket.id, claim_token: token, extend_by_seconds: 600 });
+    await call('sea_link', { action: 'add', from_id: a.ticket.id, to_id: b.created['x'], link_type: 'relates_to', claim_token: token });
+    await call('sea_link', { action: 'remove', from_id: a.ticket.id, to_id: b.created['x'], link_type: 'relates_to', claim_token: token });
+    await call('sea_update', { ticket_id: a.ticket.id, claim_token: token, note: 'n', dry_run: true });
+    await call('sea_transition', { ticket_id: a.ticket.id, claim_token: token, to: 'in_progress', dry_run: true });
+    await call('sea_transition', { tickets: [{ ticket_id: a.ticket.id, claim_token: token }], to: 'in_progress', dry_run: true });
+    await call('sea_finish', { ticket_id: a.ticket.id, claim_token: token, outcome: 'done', note: 'n', dry_run: true });
+    const got = await call<{ ticket: { claim: { holder: string } }; legal_next: string[] }>('sea_get', { id: a.ticket.id });
     expect(got.ticket.claim.holder).toBe('agent-1');
-    const full = parse<{ tickets: { body?: string }[] }>(await client.callTool({ name: 'sea_list', arguments: { view: 'full', include_terminal: true } }));
+    const full = await call<{ tickets: { body?: string }[] }>('sea_list', { view: 'full', include_terminal: true });
     expect(full.tickets.length).toBeGreaterThanOrEqual(3);
     expect(full.tickets[0]).toHaveProperty('body');
-    const rel = parse<{ ticket: { claim: null } }>(await client.callTool({ name: 'sea_release', arguments: { ticket_id: a.ticket.id, claim_token: token, note: 'bye' } }));
+    await call('sea_list', {});
+    await call('sea_scope_check', { paths: ['src'] });
+    await call('sea_stats', {});
+    const rel = await call<{ ticket: { claim: null } }>('sea_release', { ticket_id: a.ticket.id, claim_token: token, note: 'bye' });
     expect(rel.ticket.claim).toBeNull();
-    const feed = parse<{ mode: string; truncated: boolean }>(await client.callTool({ name: 'sea_history', arguments: { since_seq: 0, limit: 2, verify: false } }));
+    const nx = await call<{ ticket: { id: string }; claim_token: string }>('sea_next', {});
+    await call('sea_transition', { ticket_id: nx.ticket.id, claim_token: nx.claim_token, to: 'in_progress' });
+    await call('sea_finish', { ticket_id: nx.ticket.id, claim_token: nx.claim_token, outcome: 'done', note: 'done' });
+    const feed = await call<{ mode: string; truncated: boolean }>('sea_history', { since_seq: 0, limit: 2, verify: false });
     expect(feed).toMatchObject({ mode: 'feed', truncated: true });
   });
 

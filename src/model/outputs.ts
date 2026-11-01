@@ -100,7 +100,20 @@ export const CreateOutput = z.object({
   dry_run: z.boolean(),
 });
 
-export const ApplyOutput = z.object({
+/** sea_apply default: ref → ticket id, link count, replay flag (and the expanded plan on dry_run). */
+export const ApplyCompactOutput = z.object({
+  created: z.record(z.string(), z.string()).describe('ref → ticket id.'),
+  links: z.number().describe('Links written.'),
+  idempotent_replay: z.boolean(),
+  dry_run: z.literal(true).optional(),
+  plan: z
+    .object({ tickets: z.array(z.object({ ref: z.string(), title: z.string() })), links: z.array(z.string()) })
+    .optional()
+    .describe('dry_run only: the expanded plan; links as "from link_type to".'),
+});
+
+/** sea_apply with verbose: true (the 0.4.0 result). */
+export const ApplyVerboseOutput = z.object({
   batch_id: z.string().nullable(),
   tickets: z.array(z.object({ ref: z.string(), ticket_id: z.string(), title: z.string() })),
   links: z.array(
@@ -118,6 +131,8 @@ export const ApplyOutput = z.object({
   dry_run: z.boolean(),
 });
 
+export const ApplyOutput = z.union([ApplyCompactOutput, ApplyVerboseOutput]);
+
 export const UpdateOutput = z.object({
   ticket: TicketOut.nullable(),
   ticket_id: z.string(),
@@ -129,7 +144,7 @@ export const UpdateOutput = z.object({
   dry_run: z.boolean(),
 });
 
-export const TransitionOutput = z.object({
+export const TransitionOneOutput = z.object({
   ticket: TicketOut.nullable(),
   ticket_id: z.string(),
   from: Status,
@@ -138,6 +153,27 @@ export const TransitionOutput = z.object({
   duplicates_link_id: z.string().nullable(),
   legal_next: z.array(Status),
   head: HeadOut,
+  replayed: z.boolean(),
+  dry_run: z.boolean(),
+});
+
+const MovedOut = z.object({ ticket_id: z.string(), title: z.string().nullable(), from: Status, to: Status, claim_released: z.boolean() });
+
+export const TransitionManyOutput = z.object({
+  results: z.array(MovedOut),
+  count: z.number(),
+  head: HeadOut,
+  replayed: z.boolean(),
+  dry_run: z.boolean(),
+});
+
+/** One ticket: the 0.4.0 result; bulk (`tickets`): one row per ticket. */
+export const TransitionOutput = z.union([TransitionOneOutput, TransitionManyOutput]);
+
+export const FinishOutput = z.object({
+  outcome: z.enum(['done', 'blocked', 'abandoned']),
+  finished: z.array(MovedOut),
+  commit: z.string().nullable(),
   replayed: z.boolean(),
   dry_run: z.boolean(),
 });

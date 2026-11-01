@@ -102,6 +102,19 @@ and `sea_link` is stored on the chain event as `sea:<key>` (kronicle-lite's
 the key up; on a hit it returns a result reconstructed from the stored
 payload with `replayed: true` and writes nothing. Reusing a key for a
 different operation is an `invalid_input` error, not a silent replay.
+A bulk `sea_transition` keys item k as `<key>#k`, one
+`sea_ticket.status_set` event each; `sea_finish` keys item k's finish note
+(`sea_ticket.note_added` with `finish: {outcome, commit, from, to}`) as
+`<key>#k`. A templated `sea_apply` is keyed like
+any batch: the key replays the expanded batch it first wrote (templates are
+expanded before anything is chained, so no event records a template).
+
+A key is bound to its request: the keyed event's payload carries
+`request_hash` (sha256 of the RFC 8785 JSON of the operation and the
+request, minus the key, `dry_run`, `verbose`, `confirm`, claim tokens and the
+caller; ticket ids resolved; `sea_apply` after template expansion). A reuse
+whose hash differs is `invalid_input` (`reason: "request_mismatch"`),
+never a replay. Events from before request hashes carry none and replay.
 
 Claims are not keyed: a repeated `sea_claim` by the current holder rotates
 the token, which is the useful behaviour for a retry.
@@ -140,8 +153,10 @@ the token, which is the useful behaviour for a retry.
   checked in that order; any conflict throws and the transaction rolls back,
   so either every ticket in the set is claimed or none is.
 - Entering a terminal status releases the claim (`claim_auto_released`).
-- Fenced tools: `sea_update`, `sea_transition`, `sea_link` (on `from`),
-  `sea_refresh`, `sea_release` (holder path). `sea_release force: true`
+- Fenced tools: `sea_update`, `sea_transition`, `sea_finish`, `sea_link`
+  (on `from`), `sea_refresh`, `sea_release` (holder path). A bulk
+  `sea_transition` / `sea_finish` fences each ticket with its own token, in
+  one transaction: one failure and nothing is written. `sea_release force: true`
   bypasses the fence and requires `--role operator`.
 
 ## Claim scopes

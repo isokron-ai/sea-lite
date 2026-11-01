@@ -4,6 +4,122 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased]
+
+Lean on context and fewer calls to plan and close work. Measured by
+agent-memory-bench Track A (sea-lite 0.4.0 → this branch): `tools/list`
+59.3 KB → 31.5 KB (full) / 11.7 KB (`--core`); S14 (1 epic + 20 tickets,
+39 links) `sea_apply` ~4.8k → ~1.6k tokens (13.4 KB → 1.0 KB returned),
+~0.4k with a template (617 B written); S3a–d and S13 verdicts unchanged.
+
+### Added
+
+- **`serve --core`** (also `--profile core`, `SEA_LITE_PROFILE=core`,
+  `serve --http --core`): the nine tools an agent uses day to day —
+  `sea_next`, `sea_claim`, `sea_get`, `sea_scope_check`, `sea_apply`,
+  `sea_transition`, `sea_finish`, `sea_release`, `sea_refresh` — with short
+  descriptions; `actor_id`, `idempotency_key`, `expected_version`,
+  `sea_next`'s filters, operator-only `force` and a few more are not
+  advertised (still accepted), and result schemas are field names and types
+  only. `tools/list` ~11.7 KB. Its server instructions name the six tools it
+  leaves out (`sea_create`, `sea_update`, `sea_link`, `sea_list`,
+  `sea_history`, `sea_stats`) and how to get them (`serve` without
+  `--core`, or `SEA_LITE_PROFILE=full`). The full profile stays the default.
+- **Templates in `sea_apply`**: `templates: [{for_each, ref, ticket,
+  links}]` repeats one ticket and its links per value (`for_each` is an
+  array of strings/numbers or a count n). `{i}` (1-based), `{value}`,
+  `{ref}` (this item's expanded ref) and `{prev}` (the expanded ref of the
+  previous item of the same template, item i−1; a link naming it is skipped
+  for item 1) are substituted in every string, so a 20-step chain is
+  written once. Expansion is server-side, deterministic and happens
+  before validation: the 50-ticket / 100-link caps, the cycle check,
+  `dry_run` and `idempotency_key` all see the expanded batch. New
+  `batch_invalid` problem codes: `bad_template`, `too_many_tickets`,
+  `too_many_links`, `invalid_expansion`, `empty_batch`.
+- **`sea_apply` errors name exactly what failed.** Every `batch_invalid`
+  problem has `where` (`tickets[2] (a)`, `links[4]`, `templates[0] item 3
+  (t03)`, `templates[0] item 3 (t03) links[1]`, `claims[0]`) and the
+  structured `template` / `item` (1-based) / `ref` / `link` indexes, and its
+  message starts with that location; a duplicate ref or link names the
+  first occurrence too; the cap errors give each part's expanded count. A
+  `cycle` error gives the path by refs and `closed_by`, the link that closes
+  it. Still all or nothing.
+- **`sea_finish`**: end your work in one call, claim and scope released.
+  Required `outcome`: `done` → `resolved`; `blocked` → `blocked` (not
+  terminal, resumable; an already-blocked ticket stays blocked); `abandoned`
+  → `dropped`. Required `note` (non-empty, ≤ 1000 chars); optional `commit`
+  (sha, 7–64 hex). Recorded on the chain — `outcome` and `commit` on the
+  status_set event, `finish: {outcome, commit, from, to}` on the note event —
+  and on the ticket as the note `done @ 3f2a9c1: …`, so `sea_get` and
+  `sea_history` show why. `tickets: [...]` finishes several, each fenced by
+  its own token, all or nothing. No confirmation round trip: calling it is
+  the confirmation. With `idempotency_key`, item k's note is keyed `<key>#k`
+  and a repeat replays. Store API `finish()`.
+- **Bulk `sea_transition`**: `tickets: [{ticket_id, claim_token,
+  expected_version?}, …]` (≤ 50) instead of `ticket_id` + `claim_token`.
+  Each ticket is fenced by its own token; every ticket is checked first and
+  if any fails nothing is written (`batch_invalid` lists each failing ticket
+  with its own error). One confirmation covers a terminal move of the set.
+  With `idempotency_key`, item k replays under `<key>#k`. Store API
+  `transitionMany()`.
+- `sea_transition` takes `note` (appended in the same transaction).
+
+### Fixed
+
+- **A reused `idempotency_key` with a different request is refused, never
+  replayed.** In 0.4.0 a second `sea_apply` (or `sea_create`, `sea_update`,
+  `sea_transition`, `sea_link`) under a key already used returned the first
+  call's result even when the request differed — e.g. a 3-ticket batch under
+  the key of an earlier 10-ticket batch came back as the 10 tickets and
+  created nothing. Every keyed write now stores `request_hash` (sha256 of the
+  canonical JSON of the operation and its request) on the keyed event; a
+  reuse with a different hash is `invalid_input` — `idempotency_key "K"
+  reused with a different request; nothing was written`, with
+  `details.reason: "request_mismatch"` and the key's `first_seq`. The same
+  request still replays, from any process, session or actor. The hash
+  ignores the key, `dry_run`, `verbose`, `confirm` and claim tokens, uses
+  full ticket ids (a prefix and the full id are the same request), and is
+  taken after template expansion (the same templates, or the same plan
+  written out, are the same request). Bulk `sea_transition` and
+  `sea_finish` bind every item's `<key>#k` to the whole request, so a reuse
+  with more tickets is refused instead of moving the extra ones. Keys
+  written before this change carry no hash and still replay. Reusing a key
+  for another operation stays `invalid_input` (`reason: "other_operation"`).
+
+### Changed
+
+- **`sea_apply` returns `{created: {ref: id}, links: n, idempotent_replay}`
+  by default** (~1 KB for a 21-ticket plan; 0.4.0 echoed every ticket and
+  link id, 13.4 KB). `verbose: true` returns the 0.4.0 result; `dry_run`
+  returns `{…, dry_run: true, plan: {tickets: [{ref, title}], links: ["from
+  link_type to", …]}}`, the expanded plan. `tickets` may now be empty when
+  `templates` supply the tickets.
+- **Lean `tools/list`** in every profile (59.3 KB → 31.5 KB for the full
+  fifteen tools): descriptions rewritten shorter, no `$schema`, no string
+  length / pattern constraints and no safe-integer bounds in the published
+  input schemas; result schemas publish the top-level fields in full and
+  nested objects as a field list (`{id,kind,title,…}`), enums as their base
+  type, and a two-shape result as one merged object. The server still
+  validates every argument and every result against the full zod schemas,
+  and the tests check each tool's result against the strict contract
+  (`additionalProperties: false`) with the SDK's own validator.
+- Tool results (and the `sea://tickets/{id}` resource) are compact JSON
+  text instead of pretty-printed; `structuredContent` is unchanged.
+- `sea_transition`'s published input lists `ticket_id` / `claim_token` as
+  optional (one of them or `tickets` is required; checked server-side). The
+  store's `transition()` signature is unchanged.
+- The catalog fingerprint is re-pinned (`CATALOG_FINGERPRINT`).
+
+### Documentation
+
+- README: profiles, templated batches (with an example), `sea_finish`,
+  bulk transitions; the tool table and the agent loop updated.
+- Heartbeat: sea-lite keeps renewing a holder's leases on every sea-lite
+  call (unchanged). For long stretches without one, cc-anchor's PostToolUse
+  heartbeat hook is the recommended keep-alive (README, hooks/README.md,
+  the work-queue skill); `sea-lite heartbeat --hook` remains for setups
+  without cc-anchor. Wire one, not both.
+
 ## [0.4.0] — 2026-11-01
 
 Fixes the adoption-audit blockers: the default Claude Code setup had no
