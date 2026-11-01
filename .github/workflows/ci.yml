@@ -15,6 +15,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         node: [20, 22]
+        # better-sqlite3 ships no Windows prebuild for Node 20 and the runner has
+        # no Visual Studio to compile it; Node 20 is EOL, so Windows tests 22 only.
+        exclude:
+          - os: windows-latest
+            node: 20
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
