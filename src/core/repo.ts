@@ -12,6 +12,7 @@ import type { Role } from '../model/enums.js';
 import { EVENT } from './events.js';
 import { SeaError, notFound } from './errors.js';
 import { isExpired } from './fence.js';
+import { parseScopeJson } from './scope.js';
 import type { LinkRow, NoteRow, TicketRow } from './types.js';
 
 export interface Ctx {
@@ -70,6 +71,7 @@ export function sweepExpired(ctx: Ctx, row: TicketRow): TicketRow {
       ticket_id: row.id,
       claim_token_hash: row.claim_token_hash,
       claim_actor: row.claim_actor,
+      scope: parseScopeJson(row.claim_scope),
       expired_at: row.claim_expires_at,
       noticed_at: ctx.now.toISOString(),
       noticed_by: ctx.actor,
@@ -78,7 +80,7 @@ export function sweepExpired(ctx: Ctx, row: TicketRow): TicketRow {
   ctx.db
     .prepare(
       `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL,
-         claim_write_count = 0, last_seq = ? WHERE id = ?`,
+         claim_write_count = 0, claim_scope = NULL, last_seq = ? WHERE id = ?`,
     )
     .run(r.event.seq, row.id);
   return mustGetRow(ctx.db, row.id);

@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { SEA_SCHEMA_META_KEY } from '../src/db/schema.js';
+import { SEA_SCHEMA_META_KEY, SEA_SCHEMA_VERSION } from '../src/db/schema.js';
 import { claimedTicket, fresh } from './helpers.js';
 
 function snapshot(db: ReturnType<typeof fresh>['store']['db']) {
@@ -58,7 +58,7 @@ describe('rebuild from chain', () => {
     expect(r.events_seen).toBe(r.events_applied);
     expect(r.tickets).toBe((before.tickets as unknown[]).length);
     expect(snapshot(store.db)).toEqual(before);
-    expect(store.db.prepare(`SELECT value FROM meta WHERE key = ?`).get(SEA_SCHEMA_META_KEY)).toEqual({ value: '1' });
+    expect(store.db.prepare(`SELECT value FROM meta WHERE key = ?`).get(SEA_SCHEMA_META_KEY)).toEqual({ value: String(SEA_SCHEMA_VERSION) });
     expect(store.verify().ok).toBe(true);
 
     // The chain is untouched and the old token still works.

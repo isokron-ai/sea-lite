@@ -35,6 +35,7 @@ export const TOOLS = [
   'sea_next',
   'sea_refresh',
   'sea_release',
+  'sea_scope_check',
   'sea_transition',
   'sea_update',
 ];

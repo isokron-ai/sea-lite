@@ -13,11 +13,16 @@ import { Kind, LinkTypeSchema, Priority, Status } from './schemas.js';
 
 export const HeadOut = z.object({ seq: z.number(), hash: z.string() }).describe('Chain head after the call.');
 
+export const ScopeOut = z
+  .object({ paths: z.array(z.string()) })
+  .describe('Repo-relative paths (prefixes or globs) the holder has locked for the life of the claim.');
+
 export const ClaimViewOut = z
   .object({
     holder: z.string(),
     expires_at: z.string(),
     write_count: z.number(),
+    scope: ScopeOut.nullable(),
   })
   .describe('Who holds the ticket and until when. Never the token.');
 
@@ -145,6 +150,7 @@ export const LinkOutput = z.object({
 export const ClaimOutput = z.object({
   claims: z.array(z.object({ ticket_id: z.string(), claim_token: z.string(), expires_at: z.string(), rotated: z.boolean() })),
   lease_seconds: z.number(),
+  scope: ScopeOut.nullable(),
   head: HeadOut,
 });
 
@@ -223,4 +229,20 @@ export const HistoryOutput = z.object({
       })
       .nullable(),
   }),
+});
+
+export const ScopeConflictOut = z.object({
+  ticket_id: z.string(),
+  holder: z.string(),
+  claim_expires_at: z.string(),
+  held: z.array(z.string()).describe("The holder's scope entries that overlap."),
+  overlapping: z.array(z.object({ requested: z.string(), held: z.string() })),
+});
+
+export const ScopeCheckOutput = z.object({
+  ok: z.boolean(),
+  paths: z.array(z.string()).describe('The request, normalized.'),
+  conflicts: z.array(ScopeConflictOut),
+  swept_expired: z.number(),
+  head: HeadOut,
 });

@@ -1,5 +1,5 @@
 /**
- * zod input schemas for the twelve tools. The MCP layer passes the `.shape`
+ * zod input schemas for the thirteen tools. The MCP layer passes the `.shape`
  * to registerTool; handlers take the inferred types, so the same schema is
  * the boundary for both.
  */
@@ -7,6 +7,7 @@
 import { z } from 'zod';
 
 import { MAX_LEASE_SECONDS } from '../core/fence.js';
+import { MAX_SCOPE_PATH_CHARS, MAX_SCOPE_PATHS } from '../core/scope.js';
 import { ALL_STATES, LINK_TYPES, PRIORITIES, TICKET_KINDS } from './enums.js';
 
 export const TicketId = z
@@ -53,6 +54,16 @@ export const LeaseSeconds = z
   .max(MAX_LEASE_SECONDS)
   .optional()
   .describe(`Lease length in seconds (default 300, max ${MAX_LEASE_SECONDS}). Refresh before it lapses; expiry frees the ticket.`);
+
+export const ScopeSchema = z
+  .object({
+    paths: z
+      .array(z.string().min(1).max(MAX_SCOPE_PATH_CHARS))
+      .min(1)
+      .max(MAX_SCOPE_PATHS)
+      .describe('Repo-relative paths. A plain path locks itself and everything beneath it; a glob (picomatch: `*` within a segment, `**` across) locks what it matches; `.` is the whole repo.'),
+  })
+  .describe('The files you are going to touch. Refused with scope_conflict if any path overlaps a live claim held by another actor.');
 
 export const NewTicketFields = {
   title: z.string().min(1).max(500),
@@ -125,6 +136,7 @@ export type ListInput = z.infer<typeof ListInput>;
 export const ClaimShape = {
   ticket_ids: z.array(TicketId).min(1).max(50).describe('One or more tickets. All are claimed or none is.'),
   lease_seconds: LeaseSeconds,
+  scope: ScopeSchema.optional(),
   actor_id: ActorId,
 };
 export const ClaimInput = z.object(ClaimShape);
@@ -216,6 +228,7 @@ export const NextShape = {
   kind: z.array(Kind).optional().describe('Only these kinds.'),
   tag: z.string().optional().describe('Only tickets carrying this tag.'),
   include_unassigned: z.boolean().default(true).describe('Consider unassigned tickets as well as ones assigned to me.'),
+  scope: ScopeSchema.optional(),
   actor_id: ActorId,
 };
 export const NextInput = z.object(NextShape);
@@ -230,3 +243,14 @@ export const HistoryShape = {
 };
 export const HistoryInput = z.object(HistoryShape);
 export type HistoryInput = z.infer<typeof HistoryInput>;
+
+export const ScopeCheckShape = {
+  paths: z
+    .array(z.string().min(1).max(MAX_SCOPE_PATH_CHARS))
+    .min(1)
+    .max(MAX_SCOPE_PATHS)
+    .describe('Files or globs you are about to edit (repo-relative).'),
+  actor_id: ActorId,
+};
+export const ScopeCheckInput = z.object(ScopeCheckShape);
+export type ScopeCheckInput = z.infer<typeof ScopeCheckInput>;

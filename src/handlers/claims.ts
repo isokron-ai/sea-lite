@@ -1,6 +1,8 @@
 /**
  * Claims: acquire (one or a set, all-or-nothing), refresh (row only, not
- * chained), release (holder, or operator force), and next (pick + claim).
+ * chained), release (holder, or operator force), next (pick + claim), and
+ * the scope check. A claim may carry a scope — the paths the holder will
+ * touch — and no two actors may hold overlapping live scopes (core/scope.ts).
  */
 
 import type { ChainHead } from 'kronicle-lite';
@@ -9,19 +11,77 @@ import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
 import { clampLease, expiryFrom, hasLiveClaim, MAX_LEASE_SECONDS, validateFence } from '../core/fence.js';
 import { addNote, mustGetRow, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
+import { findOverlaps, normalizeScope, parseScopeJson, type OverlapPair, type Scope } from '../core/scope.js';
 import { rowToTicket, type NoteRow, type Ticket, type TicketRow } from '../core/types.js';
 import { NEXT_ELIGIBLE_STATES, PRIORITY_RANK, sqlIn, TERMINAL_STATES } from '../model/enums.js';
-import type { ClaimInput, NextInput, RefreshInput, ReleaseInput } from '../model/schemas.js';
+import type { ClaimInput, NextInput, RefreshInput, ReleaseInput, ScopeCheckInput } from '../model/schemas.js';
 import { placeClaim } from './tickets.js';
 
 export interface ClaimResult {
   claims: { ticket_id: string; claim_token: string; expires_at: string; rotated: boolean }[];
   lease_seconds: number;
+  /** The normalized scope every claim in the set carries, or null. */
+  scope: Scope | null;
   head: ChainHead;
+}
+
+/** One live claim by another actor whose scope overlaps the request. */
+export interface ScopeConflict {
+  ticket_id: string;
+  holder: string;
+  claim_expires_at: string;
+  /** The holder's scope entries that overlap. */
+  held: string[];
+  overlapping: OverlapPair[];
+}
+
+/**
+ * Every live, scoped claim held by someone other than `ctx.actor` (and not
+ * on `excludeIds`) that overlaps `paths`. Callers sweep expired leases first
+ * so a lapsed scope never blocks anyone.
+ */
+export function findScopeConflicts(ctx: Ctx, paths: readonly string[], excludeIds: ReadonlySet<string> = new Set()): ScopeConflict[] {
+  const rows = ctx.db
+    .prepare(
+      `SELECT id, claim_actor, claim_expires_at, claim_scope FROM sea_tickets
+        WHERE claim_scope IS NOT NULL AND claim_token_hash IS NOT NULL AND claim_expires_at > ? AND claim_actor <> ?
+        ORDER BY claim_expires_at, id`,
+    )
+    .all(ctx.now.toISOString(), ctx.actor) as { id: string; claim_actor: string; claim_expires_at: string; claim_scope: string }[];
+  const conflicts: ScopeConflict[] = [];
+  for (const r of rows) {
+    if (excludeIds.has(r.id)) continue;
+    const held = parseScopeJson(r.claim_scope);
+    if (!held) continue;
+    const overlapping = findOverlaps(paths, held.paths);
+    if (overlapping.length === 0) continue;
+    conflicts.push({
+      ticket_id: r.id,
+      holder: r.claim_actor,
+      claim_expires_at: r.claim_expires_at,
+      held: [...new Set(overlapping.map((o) => o.held))],
+      overlapping,
+    });
+  }
+  return conflicts;
+}
+
+/** Throw scope_conflict naming every holder, ticket, overlapping path and expiry. */
+export function assertScopeFree(ctx: Ctx, scope: Scope, excludeIds: ReadonlySet<string> = new Set()): void {
+  const conflicts = findScopeConflicts(ctx, scope.paths, excludeIds);
+  if (conflicts.length === 0) return;
+  const first = conflicts[0]!;
+  const more = conflicts.length > 1 ? ` (+${conflicts.length - 1} more)` : '';
+  throw new SeaError(
+    'scope_conflict',
+    `scope overlaps a live claim: "${first.holder}" holds ${first.held.join(', ')} on ticket ${first.ticket_id} until ${first.claim_expires_at}${more}`,
+    { requested: scope.paths, conflicts },
+  );
 }
 
 export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
   const lease = clampLease(input.lease_seconds);
+  const scope: Scope | null = input.scope ? { paths: normalizeScope(input.scope.paths) } : null;
   return tx(ctx.db, () => {
     // Resolve, de-duplicate, and lock in one order so two processes claiming
     // overlapping sets cannot deadlock on each other's partial progress.
@@ -39,13 +99,41 @@ export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
       }
       rows.push(row);
     }
+    if (scope) {
+      sweepAllExpired(ctx);
+      assertScopeFree(ctx, scope, new Set(ids));
+    }
     const claims: ClaimResult['claims'] = [];
     for (const row of rows) {
       const rotated = row.claim_token_hash !== null && row.claim_actor === ctx.actor;
-      const c = placeClaim(ctx, row, lease, ids.length > 1 ? { set: ids } : {});
+      const c = placeClaim(ctx, row, lease, ids.length > 1 ? { set: ids } : {}, scope);
       claims.push({ ticket_id: row.id, claim_token: c.token, expires_at: c.expires_at, rotated });
     }
-    return { claims, lease_seconds: lease, head: ctx.chain.head() };
+    return { claims, lease_seconds: lease, scope, head: ctx.chain.head() };
+  });
+}
+
+export interface ScopeCheckResult {
+  ok: boolean;
+  /** The request, normalized. */
+  paths: string[];
+  conflicts: ScopeConflict[];
+  swept_expired: number;
+  head: ChainHead;
+}
+
+/**
+ * The hot path for an edit hook: would these paths collide with someone
+ * else's live scope? No claim is taken or needed; the caller's own scopes
+ * are never conflicts. One short transaction (expired leases are swept so
+ * the answer is honest).
+ */
+export function scopeCheck(ctx: Ctx, input: ScopeCheckInput): ScopeCheckResult {
+  const paths = normalizeScope(input.paths);
+  return tx(ctx.db, () => {
+    const swept = sweepAllExpired(ctx);
+    const conflicts = findScopeConflicts(ctx, paths);
+    return { ok: conflicts.length === 0, paths, conflicts, swept_expired: swept, head: ctx.chain.head() };
   });
 }
 
@@ -101,6 +189,7 @@ export function release(ctx: Ctx, input: ReleaseInput): ReleaseResult {
           ticket_id: id,
           claim_token_hash: row.claim_token_hash,
           previous_holder: row.claim_actor,
+          scope: parseScopeJson(row.claim_scope),
           released_by: ctx.actor,
           reason: input.reason ?? null,
           write_count: row.claim_write_count,
@@ -122,6 +211,7 @@ export function release(ctx: Ctx, input: ReleaseInput): ReleaseResult {
         ticket_id: id,
         claim_token_hash: row.claim_token_hash,
         claim_actor: row.claim_actor,
+        scope: parseScopeJson(row.claim_scope),
         reason: input.reason ?? null,
         write_count: row.claim_write_count,
       },
@@ -136,7 +226,7 @@ function clearClaim(ctx: Ctx, id: string, seq: number): void {
   ctx.db
     .prepare(
       `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0,
-         last_seq = ? WHERE id = ?`,
+         claim_scope = NULL, last_seq = ? WHERE id = ?`,
     )
     .run(seq, id);
 }
@@ -159,8 +249,12 @@ export interface NextResult {
  */
 export function next(ctx: Ctx, input: NextInput): NextResult {
   const lease = clampLease(input.lease_seconds);
+  const scope: Scope | null = input.scope ? { paths: normalizeScope(input.scope.paths) } : null;
   return tx(ctx.db, () => {
     sweepAllExpired(ctx);
+    // The scope is what the caller will touch regardless of which ticket comes
+    // back, so a conflict refuses the dispatch rather than skipping tickets.
+    if (scope) assertScopeFree(ctx, scope);
     const where: string[] = [
       `t.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)})`,
       `t.claim_token_hash IS NULL`,
@@ -190,7 +284,7 @@ export function next(ctx: Ctx, input: NextInput): NextResult {
       | TicketRow
       | undefined;
     if (!row) return { ticket: null, claim_token: null, expires_at: null, reason: 'nothing_eligible', considered, head: ctx.chain.head() };
-    const c = placeClaim(ctx, row, lease, { via: 'sea_next' });
+    const c = placeClaim(ctx, row, lease, { via: 'sea_next' }, scope);
     return {
       ticket: rowToTicket(mustGetRow(ctx.db, row.id)),
       claim_token: c.token,

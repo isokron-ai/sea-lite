@@ -1,5 +1,5 @@
 /**
- * MCP surface (protocol 2026-07-28, @modelcontextprotocol/server v2): twelve
+ * MCP surface (protocol 2026-07-28, @modelcontextprotocol/server v2): thirteen
  * tools and one resource template over a SeaLite store. Every handler is
  * synchronous; the SDK wraps the result. Each tool publishes an
  * `outputSchema` and returns the same JSON as `structuredContent` and as a
@@ -28,7 +28,6 @@ import { z } from 'zod';
 
 import { SeaError } from './core/errors.js';
 import { ALL_STATES, isTerminalStatus, LINK_TYPES, PRIORITIES, TICKET_KINDS } from './model/enums.js';
-import { enabledStates } from './model/lifecycle.js';
 import {
   ApplyOutput,
   ClaimOutput,
@@ -40,6 +39,7 @@ import {
   NextOutput,
   RefreshOutput,
   ReleaseOutput,
+  ScopeCheckOutput,
   TransitionOutput,
   UpdateOutput,
 } from './model/outputs.js';
@@ -54,6 +54,7 @@ import {
   NextInput,
   RefreshInput,
   ReleaseInput,
+  ScopeCheckInput,
   TransitionInput,
   UpdateInput,
 } from './model/schemas.js';
@@ -118,16 +119,17 @@ export function supportsFormElicitation(caps: ClientCapabilities | undefined): b
 }
 
 export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServer {
-  const statuses = enabledStates(store.lifecycle).join(' | ');
   const actor = store.actor.length > 40 ? store.actor.slice(0, 37) + '…' : store.actor;
-  const core =
-    'Fenced work queue for parallel agents. Loop: sea_next → work → sea_update (notes) → sea_transition resolved ' +
-    '(confirm: true, or answer the prompt). Writes need the claim_token from sea_claim/sea_next; only the holder writes ' +
-    'while its lease is live (sea_refresh extends, sea_release returns the ticket). Events land on the kronicle-lite ' +
-    `chain. Actor "${actor}" (role ${store.role}).`;
-  const withStatuses = `${core} Statuses: ${statuses}.`;
-  // Statuses are repeated in the tool descriptions; drop them before exceeding the budget.
-  const instructions = withStatuses.length <= MAX_INSTRUCTIONS_CHARS ? withStatuses : core;
+  // Statuses are not repeated here: sea_transition's description and every
+  // illegal_transition error carry legal_next. Budget: MAX_INSTRUCTIONS_CHARS.
+  const instructions =
+    'Fenced work queue for parallel agents. Loop: sea_next (scope: the paths you will edit) → work → sea_update notes → ' +
+    'sea_transition resolved (confirm: true, or answer the prompt). Writes need the claim_token from sea_claim/sea_next; ' +
+    'only the holder writes while its lease is live (sea_refresh extends, sea_release returns the ticket). Scopes of ' +
+    `different actors never overlap; run sea_scope_check before editing a path you did not claim. Actor "${actor}" (role ${store.role}).`;
+  if (instructions.length > MAX_INSTRUCTIONS_CHARS) {
+    throw new Error(`sea-lite: server instructions are ${instructions.length} chars; the limit is ${MAX_INSTRUCTIONS_CHARS}`);
+  }
 
   const server = new McpServer(
     { name: 'sea-lite', version: opts.version ?? VERSION },
@@ -238,7 +240,9 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'Take a lease on one or more tickets (all-or-nothing; locked in id order so concurrent claimers cannot deadlock). ' +
         'Returns one claim_token per ticket — keep it, it is shown once and is required for every write. Leases are at most ' +
         '600 s; refresh with sea_refresh or let them lapse. Fails with already_claimed (naming the holder and expiry) if any ' +
-        'ticket is held by someone else. Claiming a ticket you already hold rotates its token.',
+        'ticket is held by someone else. Claiming a ticket you already hold rotates its token. Pass `scope.paths` (the files ' +
+        'or directories you will edit; a worktree is a scope) to lock them for the lease: refused with scope_conflict, naming ' +
+        'the holder, ticket, overlapping paths and expiry, if they overlap another actor\'s live scope.',
       inputSchema: ClaimInput,
       outputSchema: ClaimOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -283,7 +287,8 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
         'Dispatch: atomically pick and claim the highest-priority unclaimed triaged or in_progress ticket that is assigned ' +
         'to you or unassigned, is not priority parked, and whose predecessors (tickets that `blocks` it, tickets it ' +
         '`depends_on`) are all terminal. in_progress beats triaged at equal priority; then oldest (chain order) first. Returns ticket + ' +
-        'claim_token, or ticket: null with reason nothing_eligible. Call it in a loop.',
+        'claim_token, or ticket: null with reason nothing_eligible. Call it in a loop. `scope.paths` locks the paths you will ' +
+        'edit for the lease (scope_conflict if they overlap another actor\'s live scope).',
       inputSchema: NextInput,
       outputSchema: NextOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -335,6 +340,21 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     (args) => wrap(() => store.history(args)),
+  );
+
+  server.registerTool(
+    'sea_scope_check',
+    {
+      title: 'Check paths against live claim scopes',
+      description:
+        'Would editing these paths collide with a scope another actor holds right now? Returns { ok, conflicts } naming each ' +
+        'holder, ticket, the overlapping entries and the expiry. No claim is taken or needed and your own scopes never ' +
+        'conflict. Meant for an edit hook (PreToolUse on Edit/Write) and for checking before you touch a file outside your claim.',
+      inputSchema: ScopeCheckInput,
+      outputSchema: ScopeCheckOutput,
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    (args) => wrap(() => store.scopeCheck(args)),
   );
 
   // ───────────────────────────── resource ─────────────────────────────

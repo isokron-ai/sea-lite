@@ -3,11 +3,14 @@
  * projection of chain events (`sea_ticket.*`, `sea_link.*`); `sea-lite
  * rebuild` drops and replays them. The meta key `sea_schema_version` is ours;
  * kronicle-lite's `schema_version` is untouched.
+ *
+ * v2 (0.2.0): `sea_tickets.claim_scope` — JSON array of the paths a live claim
+ * locks (see core/scope.ts). Added with ALTER TABLE on older stores.
  */
 
 import { ALL_STATES, LINK_STATES, LINK_TYPES, PRIORITIES, sqlIn, TICKET_KINDS } from '../model/enums.js';
 
-export const SEA_SCHEMA_VERSION = 1;
+export const SEA_SCHEMA_VERSION = 2;
 export const SEA_SCHEMA_META_KEY = 'sea_schema_version';
 
 export const SEA_TABLES = ['sea_tickets_fts', 'sea_notes', 'sea_links', 'sea_tickets'] as const;
@@ -31,6 +34,7 @@ CREATE TABLE IF NOT EXISTS sea_tickets (
   claim_actor       TEXT,
   claim_expires_at  TEXT,
   claim_write_count INTEGER NOT NULL DEFAULT 0,
+  claim_scope       TEXT,
   created_seq       INTEGER NOT NULL,
   last_seq          INTEGER NOT NULL
 );
@@ -85,6 +89,15 @@ CREATE TRIGGER IF NOT EXISTS sea_tickets_fts_au AFTER UPDATE OF title, body ON s
   INSERT INTO sea_tickets_fts(ticket_id, title, body) VALUES (new.id, new.title, new.body);
 END;
 `;
+
+/**
+ * Additive migrations, keyed by the schema version they bring the store up
+ * to. Each statement must be safe to run on a store that already has the
+ * change (checked via PRAGMA table_info before running).
+ */
+export const SEA_MIGRATIONS: readonly { version: number; table: string; column: string; sql: string }[] = [
+  { version: 2, table: 'sea_tickets', column: 'claim_scope', sql: `ALTER TABLE sea_tickets ADD COLUMN claim_scope TEXT` },
+];
 
 export const SEA_DROP_SQL = `
 DROP TRIGGER IF EXISTS sea_tickets_fts_ai;

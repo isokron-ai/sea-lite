@@ -1,4 +1,5 @@
 import type { LinkType, Priority, TicketKind, TicketStatus } from '../model/enums.js';
+import { parseScopeJson, type Scope } from './scope.js';
 
 /** Row shape of sea_tickets. */
 export interface TicketRow {
@@ -19,6 +20,7 @@ export interface TicketRow {
   claim_actor: string | null;
   claim_expires_at: string | null;
   claim_write_count: number;
+  claim_scope: string | null; // JSON array of normalized paths, or NULL
   created_seq: number;
   last_seq: number;
 }
@@ -51,6 +53,8 @@ export interface ClaimView {
   holder: string;
   expires_at: string;
   write_count: number;
+  /** Paths the holder locked with the claim, or null for an unscoped claim. */
+  scope: Scope | null;
 }
 
 /** What tools return. The token hash never leaves the row/chain. */
@@ -122,7 +126,7 @@ export function rowToTicket(r: TicketRow): Ticket {
     row_version: r.row_version,
     claim:
       r.claim_token_hash !== null && r.claim_actor !== null && r.claim_expires_at !== null
-        ? { holder: r.claim_actor, expires_at: r.claim_expires_at, write_count: r.claim_write_count }
+        ? { holder: r.claim_actor, expires_at: r.claim_expires_at, write_count: r.claim_write_count, scope: parseScopeJson(r.claim_scope) }
         : null,
     created_seq: r.created_seq,
     last_seq: r.last_seq,

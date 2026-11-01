@@ -1,6 +1,6 @@
 /**
  * SeaLite — opens (or adopts) a kronicle-lite store, adds the sea tables to
- * the same SQLite file, and exposes the twelve operations as synchronous
+ * the same SQLite file, and exposes the thirteen operations as synchronous
  * methods. The MCP server and the CLI both talk to this.
  */
 
@@ -8,7 +8,7 @@ import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kro
 
 import { SeaError } from './core/errors.js';
 import type { Ctx } from './core/repo.js';
-import { SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
+import { SEA_MIGRATIONS, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
 import * as claims from './handlers/claims.js';
 import * as hist from './handlers/history.js';
 import * as links from './handlers/links.js';
@@ -133,6 +133,9 @@ export class SeaLite {
   history(input: S.HistoryInput): hist.HistoryResult {
     return hist.history(this.ctx(input.actor_id), input);
   }
+  scopeCheck(input: S.ScopeCheckInput): claims.ScopeCheckResult {
+    return claims.scopeCheck(this.ctx(input.actor_id), input);
+  }
 
   rebuild(): RebuildResult {
     return rebuild(this.db, this.chain);
@@ -146,9 +149,16 @@ export function ensureSeaSchema(db: Db): void {
   db.pragma('busy_timeout = 5000');
   db.exec(SEA_SCHEMA_SQL);
   const row = db.prepare(`SELECT value FROM meta WHERE key = ?`).get(SEA_SCHEMA_META_KEY) as { value: string } | undefined;
-  if (!row) {
-    db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)`).run(SEA_SCHEMA_META_KEY, String(SEA_SCHEMA_VERSION));
-  } else if (Number(row.value) > SEA_SCHEMA_VERSION) {
+  if (row && Number(row.value) > SEA_SCHEMA_VERSION) {
     throw new Error(`sea-lite: store has sea_schema_version ${row.value}, newer than this build (${SEA_SCHEMA_VERSION}); upgrade sea-lite`);
   }
+  // Additive column migrations for stores created by an older build. CREATE
+  // TABLE IF NOT EXISTS above is a no-op on them, so add what is missing.
+  db.transaction(() => {
+    for (const m of SEA_MIGRATIONS) {
+      const cols = db.prepare(`PRAGMA table_info(${m.table})`).all() as { name: string }[];
+      if (!cols.some((c) => c.name === m.column)) db.exec(m.sql);
+    }
+    db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`).run(SEA_SCHEMA_META_KEY, String(SEA_SCHEMA_VERSION));
+  }).immediate();
 }

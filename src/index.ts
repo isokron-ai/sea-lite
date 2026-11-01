@@ -6,7 +6,7 @@
 export { SeaLite, ensureSeaSchema, parseRole, parseTracks, DEFAULT_ACTOR, type SeaLiteOptions } from './store.js';
 export { createServer, errorResult, type ServerOptions } from './server.js';
 export { rebuild, verifySea, applySeaEvent, type RebuildResult, type SeaVerifyResult } from './rebuild.js';
-export { SEA_SCHEMA_SQL, SEA_DROP_SQL, SEA_SCHEMA_VERSION, SEA_SCHEMA_META_KEY, SEA_TABLES } from './db/schema.js';
+export { SEA_SCHEMA_SQL, SEA_DROP_SQL, SEA_SCHEMA_VERSION, SEA_SCHEMA_META_KEY, SEA_TABLES, SEA_MIGRATIONS } from './db/schema.js';
 export * from './model/enums.js';
 export * from './model/lifecycle.js';
 export * from './model/cycle-check.js';
@@ -27,7 +27,21 @@ export { EVENT, SEA_EVENT_TYPES, SEA_EVENT_PREFIXES, IDEMPOTENCY_PREFIX, isSeaEv
 export type { Ticket, TicketCompact, TicketRow, LinkRow, LinkView, NoteRow, ClaimView } from './core/types.js';
 export type { Ctx } from './core/repo.js';
 export type { CreateResult, ApplyResult, UpdateResult, TransitionResult, GetResult, ListResult, LinkWithPeer } from './handlers/tickets.js';
-export type { ClaimResult, RefreshResult, ReleaseResult, NextResult } from './handlers/claims.js';
+export type { ClaimResult, RefreshResult, ReleaseResult, NextResult, ScopeCheckResult, ScopeConflict } from './handlers/claims.js';
+export { findScopeConflicts, assertScopeFree } from './handlers/claims.js';
+export {
+  normalizeScope,
+  normalizeScopePath,
+  entriesOverlap,
+  findOverlaps,
+  isGlobEntry,
+  parseScopeJson,
+  MAX_SCOPE_PATHS,
+  MAX_SCOPE_PATH_CHARS,
+  WHOLE_REPO,
+  type Scope,
+  type OverlapPair,
+} from './core/scope.js';
 export type { LinkResult } from './handlers/links.js';
 export type { HistoryResult, HistoryEntry } from './handlers/history.js';
 export { findPossibleDuplicates, titleMatchExpression, type PossibleDuplicate } from './handlers/dedup.js';

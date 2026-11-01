@@ -20,6 +20,7 @@ export const ERROR_CODES = [
   'forbidden',
   'batch_invalid',
   'nothing_eligible',
+  'scope_conflict',
   'confirmation_required',
   'confirmation_declined',
 ] as const;

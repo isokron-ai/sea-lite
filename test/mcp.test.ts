@@ -45,7 +45,7 @@ describe('MCP server (in-process transport, 2026-07-28 era)', () => {
     expect(d.cacheScope).toBe('public');
   });
 
-  it('lists the twelve tools deterministically with input + output schemas, descriptions and a cache hint', async () => {
+  it('lists the thirteen tools deterministically with input + output schemas, descriptions and a cache hint', async () => {
     const first = await client.listTools();
     expect(first.tools.map((t) => t.name).sort()).toEqual(TOOLS);
     expect(first.ttlMs).toBeGreaterThan(0);

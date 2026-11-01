@@ -28,6 +28,7 @@ kronicle-lite's `schema_version`.
 | `claim_actor` | holder label |
 | `claim_expires_at` | lease expiry (ISO-8601) |
 | `claim_write_count` | fenced writes made under the current claim |
+| `claim_scope` | JSON array of normalized repo-relative paths the claim locks, or NULL (since schema v2; added with `ALTER TABLE` on older stores) |
 | `created_seq`, `last_seq` | chain seq of the creating event and the latest event touching the row |
 
 Indexes: `(status, priority, created_at)`, partial `(claim_expires_at)` where
@@ -63,10 +64,10 @@ chain, inside the same `BEGIN IMMEDIATE` transaction as the row change. The
 | `sea_ticket.created` | `ticket_id kind title body status priority tags assignee created_by created_at` (+ `batch_id ref` from apply) | insert row, `row_version=1`, `created_seq=last_seq=seq` |
 | `sea_ticket.updated` | `ticket_id changes{…} tags row_version updated_at` | apply `changes` (title/body/kind/priority/assignee), set `tags`, `row_version`, `updated_at`, `last_seq`, `claim_write_count+1` |
 | `sea_ticket.status_set` | `ticket_id from to reason duplicate_of duplicates_link_id row_version updated_at claim_auto_released claim_token_hash` | set status (+ `duplicate_of`), bump; clear claim when `claim_auto_released` |
-| `sea_ticket.claimed` | `ticket_id claim_token_hash claim_actor expires_at lease_seconds rotated` (+ `set` / `via` / `on_create`) | set claim fields, `claim_write_count=0`, `last_seq` |
-| `sea_ticket.claim_released` | `ticket_id claim_token_hash claim_actor reason write_count` | clear claim, `last_seq` |
-| `sea_ticket.claim_force_released` | `ticket_id claim_token_hash previous_holder released_by reason write_count` | clear claim, `last_seq` |
-| `sea_ticket.claim_expired` | `ticket_id claim_token_hash claim_actor expired_at noticed_at noticed_by` | clear claim, `last_seq` |
+| `sea_ticket.claimed` | `ticket_id claim_token_hash claim_actor expires_at lease_seconds rotated scope` (+ `set` / `via` / `on_create`) | set claim fields and `claim_scope` (`scope.paths`, or NULL), `claim_write_count=0`, `last_seq` |
+| `sea_ticket.claim_released` | `ticket_id claim_token_hash claim_actor scope reason write_count` | clear claim (and scope), `last_seq` |
+| `sea_ticket.claim_force_released` | `ticket_id claim_token_hash previous_holder scope released_by reason write_count` | clear claim (and scope), `last_seq` |
+| `sea_ticket.claim_expired` | `ticket_id claim_token_hash claim_actor scope expired_at noticed_at noticed_by` | clear claim (and scope), `last_seq` |
 | `sea_ticket.note_added` | `ticket_id note_id body created_at` | insert note, `last_seq` |
 | `sea_link.created` | `link_id from_id to_id link_type created_at` (+ `from_row_version reason` via sea_link; `batch_id` via apply; `via` via transition) | insert active link; when `from_row_version` present, bump the from ticket |
 | `sea_link.tombstoned` | `link_id target_id from_id to_id link_type reason tombstoned_at from_row_version` | mark tombstoned; bump the from ticket |
@@ -118,6 +119,38 @@ the token, which is the useful behaviour for a retry.
 - Fenced tools: `sea_update`, `sea_transition`, `sea_link` (on `from`),
   `sea_refresh`, `sea_release` (holder path). `sea_release force: true`
   bypasses the fence and requires `--role operator`.
+
+## Claim scopes
+
+A claim may carry a scope: the repo-relative paths the holder is going to
+touch (`sea_claim` / `sea_next` `scope.paths`). Entries are normalized
+(forward slashes, no `./`, no `..`, no absolute paths, trailing `/` dropped
+except where it marks a dotted name as a directory), deduplicated and
+sorted, so the chain payload is canonical. `.` is the whole repository.
+
+An entry without glob characters is a **prefix**: the path itself and, when
+it looks like a directory (no file extension on the last segment, or a
+trailing `/`), everything beneath it. An entry with `* ? [ ] { }` is a
+**glob** in picomatch syntax: exactly the paths it matches; `*` does not
+cross `/`, `**` does.
+
+Two scopes **overlap** when any entry of one can name the same file as any
+entry of the other. The rule is segment-wise: literal segments must be
+equal; a pattern segment must match the literal it faces; `**` is tried
+against every suffix; a directory prefix that runs out while the other entry
+continues overlaps (the other path is inside its subtree), a glob or a file
+that runs out does not. Two pattern segments are disjoint only when their
+literal heads or tails disagree (`*.ts` vs `*.md`), otherwise they are taken
+to overlap (`*.ts` vs `*.test.ts`).
+
+A claim whose scope overlaps a live, unexpired scope held by a **different
+actor** is refused with `scope_conflict` (holder, ticket, overlapping pairs,
+expiry — every conflicting holder is listed). The same actor may hold
+overlapping scopes across tickets; a scoped claim on a set applies one scope
+to every ticket in the set. Release, force release, lazy expiry and a
+terminal transition clear the scope with the claim; `rebuild` restores live
+scopes from `sea_ticket.claimed` payloads. `sea_scope_check` answers "would
+these paths collide with someone else's scope?" without taking a claim.
 
 ## Optimistic concurrency
 

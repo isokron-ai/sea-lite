@@ -7,6 +7,7 @@
  *   sea-lite show ID [--data-dir DIR] [--json]
  *   sea-lite rebuild [--data-dir DIR]        drop + replay sea tables from the chain
  *   sea-lite verify  [--data-dir DIR]        chain verify + sea rows whose chain_seq is missing
+ *   sea-lite scope-check --paths a,b [--actor ID] [--json]   exit 1 if another actor's live scope overlaps
  */
 
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
@@ -61,6 +62,9 @@ Usage:
   sea-lite show ID [--data-dir DIR] [--json]
   sea-lite rebuild [--data-dir DIR]     drop the sea tables and replay them from the chain
   sea-lite verify  [--data-dir DIR]     recompute every chain hash; list sea rows pointing at missing events
+  sea-lite scope-check [--paths a,b | PATH...] [--actor ID] [--json]
+                                        exit 0 if no other actor's live claim scope overlaps, 1 if one does
+                                        (for a PreToolUse edit hook; see hooks/README.md)
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite (shared with kronicle-lite).
 Env: SEA_LITE_ACTOR, SEA_LITE_ROLE, SEA_LITE_TRACKS.
@@ -182,6 +186,25 @@ async function main(argv: string[]): Promise<number> {
       const store = openStore(flags);
       const r = store.verify();
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      store.close();
+      return r.ok ? 0 : 1;
+    }
+    case 'scope-check': {
+      const fromFlag = str(flags['paths']);
+      const paths = [...(fromFlag ? fromFlag.split(',') : []), ...positional].map((p) => p.trim()).filter((p) => p.length > 0);
+      if (paths.length === 0) throw new SeaError('invalid_input', 'scope-check needs --paths a,b or positional paths');
+      const store = openStore(flags);
+      const r = store.scopeCheck({ paths });
+      if (flags['json'] === true) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      else if (r.ok) process.stdout.write(`ok: ${r.paths.join(', ')} overlap no live scope of another actor (actor ${store.actor})\n`);
+      else {
+        for (const c of r.conflicts) {
+          process.stdout.write(
+            `conflict: "${c.holder}" holds ${c.held.join(', ')} on ticket ${c.ticket_id.slice(0, 8)} until ${c.claim_expires_at}` +
+              ` (${c.overlapping.map((o) => `${o.requested} ↔ ${o.held}`).join('; ')})\n`,
+          );
+        }
+      }
       store.close();
       return r.ok ? 0 : 1;
     }

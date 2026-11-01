@@ -9,6 +9,7 @@ import type { ChainHead } from 'kronicle-lite';
 import { SeaError } from '../core/errors.js';
 import { EVENT, idemKey } from '../core/events.js';
 import { clampLease, expiryFrom, hashToken, newClaimToken, validateFence } from '../core/fence.js';
+import type { Scope } from '../core/scope.js';
 import {
   activeLinksFor,
   addNote,
@@ -155,6 +156,7 @@ export function placeClaim(
   row: TicketRow,
   lease_seconds: number,
   extra: Record<string, unknown> = {},
+  scope: Scope | null = null,
 ): { token: string; expires_at: string; seq: number } {
   const token = newClaimToken();
   const token_hash = hashToken(token);
@@ -171,15 +173,16 @@ export function placeClaim(
       expires_at,
       lease_seconds,
       rotated,
+      scope,
       ...extra,
     },
   });
   ctx.db
     .prepare(
-      `UPDATE sea_tickets SET claim_token_hash = ?, claim_actor = ?, claim_expires_at = ?, claim_write_count = 0,
+      `UPDATE sea_tickets SET claim_token_hash = ?, claim_actor = ?, claim_expires_at = ?, claim_write_count = 0, claim_scope = ?,
          last_seq = ? WHERE id = ?`,
     )
-    .run(token_hash, ctx.actor, expires_at, r.event.seq, row.id);
+    .run(token_hash, ctx.actor, expires_at, scope ? JSON.stringify(scope.paths) : null, r.event.seq, row.id);
   return { token, expires_at, seq: r.event.seq };
 }
 
@@ -649,7 +652,10 @@ export function transition(ctx: Ctx, input: TransitionInput): TransitionResult {
       .run(input.to, duplicate_of, row_version, updated_at, r.event.seq, id);
     if (willRelease) {
       ctx.db
-        .prepare(`UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0 WHERE id = ?`)
+        .prepare(
+          `UPDATE sea_tickets SET claim_token_hash = NULL, claim_actor = NULL, claim_expires_at = NULL, claim_write_count = 0, claim_scope = NULL
+             WHERE id = ?`,
+        )
         .run(id);
     }
     return {
