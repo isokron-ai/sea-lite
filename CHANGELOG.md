@@ -4,7 +4,7 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [0.3.0] — unreleased
+## [0.3.0] — 2026-11-01
 
 ### Added
 
