@@ -41,7 +41,8 @@ not null, `(assignee)`, `(project)`.
 **Project keys** (core/project.ts): the normalized `origin` remote of the
 repository (`github.com/owner/repo`), else the absolute path of its main
 working tree (linked worktrees resolve through `commondir`), else the
-directory itself. Read from `.git` files; git is not spawned. `list`,
+directory itself. Path keys use `/` separators on every OS (`C:/Users/me/repo`
+on Windows). Read from `.git` files; git is not spawned. `list`,
 `next` and scope checks see the current project's tickets plus those with
 NULL `project`; `get` / `claim` by id and the history feed are not
 filtered; `sea_list { project: "*" }` / `--all-projects` see everything.

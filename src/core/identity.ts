@@ -124,7 +124,11 @@ function parentOf(pid: number): number | null {
   }
 }
 
-/** Ancestor pids of `pid`, nearest first, stopping before pid 1 (at most `max`). Empty on Windows. */
+/**
+ * Ancestor pids of `pid`, nearest first, stopping before pid 1 (at most `max`).
+ * Windows has no process-tree lookup here: only the current process's direct
+ * parent (`process.ppid`) is known, and nothing for any other pid.
+ */
 export function ancestors(pid: number = process.pid, max = 16): number[] {
   const out: number[] = [];
   let cur: number | null = pid === process.pid ? process.ppid : parentOf(pid);

@@ -64,7 +64,9 @@ Where sessions come from:
   `release`, …) resolve the session they act for: the given key
   (`--session`, `SEA_LITE_SESSION`, `CLAUDE_CODE_SESSION_ID`) when it names
   a live registered server; else the live registered server that has
-  `CLAUDE_PID` among its ancestors; else the key itself; else none (a human
+  `CLAUDE_PID` among its ancestors (on Windows only a server's direct parent
+  is recorded, so this join holds only when Claude Code spawned the server
+  itself; the key lookup is unaffected); else the key itself; else none (a human
   at a terminal: `SEA_LITE_ACTOR` or the OS user, no session). A command
   given a session but no `--actor` speaks for the whole session: every
   claim of that session is its own, whatever actor label a subagent used.

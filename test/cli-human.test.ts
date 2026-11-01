@@ -11,6 +11,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { keyPath } from './helpers.js';
+
 const CLI = join(process.cwd(), 'dist', 'cli.js');
 
 let base: string;
@@ -86,12 +88,12 @@ describe('human CLI (G2)', () => {
     git(['init', '-q', other], base);
     sl(['create', 'there', '--triaged'], {}, other);
     const here = JSON.parse(sl(['board', '--json']).out) as { project: string; tickets: { title: string }[] };
-    expect(here.project).toBe(repo);
+    expect(here.project).toBe(keyPath(repo));
     expect(here.tickets.map((t) => t.title)).toEqual(['here']);
     const all = JSON.parse(sl(['board', '--json', '--all-projects']).out) as { tickets: { title: string }[] };
     expect(all.tickets.map((t) => t.title).sort()).toEqual(['here', 'there']);
     const who = JSON.parse(sl(['whoami', '--json'], { SEA_LITE_ACTOR: 'alice' }).out) as Record<string, unknown>;
-    expect(who).toMatchObject({ actor: 'alice', session: null, project: repo });
+    expect(who).toMatchObject({ actor: 'alice', session: null, project: keyPath(repo) });
   });
 });
 
@@ -111,7 +113,7 @@ describe('scope-check hook contract (B2)', () => {
       schema: 'sea-lite.scope-check/1',
       ok: false,
       paths: ['src/auth/login.ts'],
-      project: repo,
+      project: keyPath(repo),
       identity: { actor: 'agent-b', session: 'sess-b' },
       conflicts: [{ ticket_id: id, title: 'held', holder: 'agent-a', holder_session: 'sess-a', holder_label: 'agent-a#sessa', held: ['src/auth'] }],
     });

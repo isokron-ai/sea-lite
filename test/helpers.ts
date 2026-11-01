@@ -21,6 +21,15 @@ export function claimedTicket(store: SeaLite, actor = 'alice', title = 'Fix the 
   return { id: c.ticket.id, token: cl.claims[0]!.claim_token, ticket: c.ticket };
 }
 
+/**
+ * A directory as a path-based project key spells it: `/` separators on every
+ * OS (core/project.ts), so the same repository has one key whichever way its
+ * path was written. The identity on POSIX, so assertions there are unchanged.
+ */
+export function keyPath(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
 export function codeOf(fn: () => unknown): string {
   try {
     fn();

@@ -14,6 +14,10 @@
  *   2. otherwise the absolute path of the main working tree (worktrees of the
  *      same repository resolve through `commondir` to the same path);
  *   3. otherwise (not a git repository) the absolute directory itself.
+ *
+ * Path keys (2 and 3) are always spelled with `/` separators, on Windows too
+ * (`C:/Users/me/repo`, never `C:\Users\me\repo`): a key is compared as a
+ * string, so one repository must have exactly one spelling.
  */
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';

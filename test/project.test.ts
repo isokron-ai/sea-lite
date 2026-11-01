@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EVENT } from '../src/core/events.js';
 import { findRepo, normalizeRemote, originUrl, projectKeyFor, resolveProject } from '../src/core/project.js';
 import { SeaLite } from '../src/store.js';
-import { Clock } from './helpers.js';
+import { Clock, keyPath } from './helpers.js';
 
 const NEW = { body: '', kind: 'bug' as const, priority: 'high' as const, tags: [], status: 'triaged' as const, dry_run: false };
 
@@ -114,8 +114,8 @@ describe('project keys', () => {
 
     expect(findRepo(join(main, 'src', 'deep', 'new-file.ts'))?.root).toBe(main);
     expect(findRepo(join(wt, 'src'))?.root).toBe(wt);
-    expect(projectKeyFor(join(main, 'src'))).toBe(main);
-    expect(projectKeyFor(join(wt, 'src', 'missing.ts'))).toBe(main);
+    expect(projectKeyFor(join(main, 'src'))).toBe(keyPath(main));
+    expect(projectKeyFor(join(wt, 'src', 'missing.ts'))).toBe(keyPath(main));
 
     writeFileSync(join(main, '.git', 'config'), '[remote "origin"]\n\turl = git@github.com:o/r.git\n');
     expect(projectKeyFor(wt)).toBe('github.com/o/r');
@@ -123,7 +123,7 @@ describe('project keys', () => {
 
     const plain = join(dir, 'plain');
     mkdirSync(plain);
-    expect(projectKeyFor(plain)).toBe(plain);
+    expect(projectKeyFor(plain)).toBe(keyPath(plain));
 
     expect(resolveProject(undefined, { CLAUDE_PROJECT_DIR: wt }, '/')).toBe('github.com/o/r');
     expect(resolveProject('*', {}, wt)).toBeNull();
