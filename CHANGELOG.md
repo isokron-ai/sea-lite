@@ -4,6 +4,95 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.4.0] — unreleased
+
+Fixes the adoption-audit blockers: the default Claude Code setup had no
+collision protection between sessions, the hook contract was unusable from
+a real hook, unrelated repositories shared one queue, and leases lapsed
+under working agents.
+
+### Fixed
+
+- **Two sessions with one actor label now collide-protect each other
+  (B1).** Every Claude Code session ran as the same actor (`--actor claude`
+  per this README, or the default `local-agent`), and a holder's own scopes
+  never conflict, so two sessions could both lock `src/auth`. A claim now
+  records the holder's **session** and ownership needs actor and session to
+  match. `serve` takes the session from `--session`, `SEA_LITE_SESSION` or
+  `CLAUDE_CODE_SESSION_ID` (set by Claude Code for stdio MCP servers), else
+  a random `inst-xxxxxxxx` per process, and registers it in
+  `<data dir>/sessions/` (`0600`) so hooks find it — by session id, or by
+  `CLAUDE_PID` ancestry after `/clear`. Re-claiming in the same session
+  stays idempotent. `ScopeConflict` gains `title`, `holder_session`,
+  `holder_label` (`claude#9b1d0c22`), `expires_in_seconds`; `ClaimView`
+  gains `session`, `lease_seconds`; `already_claimed` details gain
+  `held_by_session`.
+- **`scope-check` is usable from a hook (B2).** Absolute paths inside the
+  repository are accepted and made repo-relative (symlinks resolved); a
+  path outside is `invalid_input` with `details.reason: "outside_repo"`.
+  `--json` prints a documented, versioned object
+  (`schema: "sea-lite.scope-check/1"`, with `project` and the resolved
+  `identity`); `--actor` / `--session` select the identity; given only a
+  session, every claim of that session is the caller's own. **Exit 2 (not
+  1) on bad input**, so a hook can tell an error from a conflict.
+  `scope-check --hook` is a complete Claude Code PreToolUse hook.
+- **Unrelated repositories no longer share a queue (B3).** Tickets carry a
+  project key (normalized `origin` remote, else the main working tree's
+  path; worktrees share their repository's key), stamped at creation.
+  `sea_list`, `sea_next` and scope checks see the current project plus
+  legacy tickets without a key; `sea_list { project }` / `--all-projects`
+  list across projects. `serve` derives the project from
+  `CLAUDE_PROJECT_DIR` or the working directory (`--project` /
+  `SEA_LITE_PROJECT` override, `*` = every project); `serve --http`
+  defaults to every project.
+- **Leases no longer lapse under a working agent (B5).** Default lease 900 s
+  (was 300), maximum 3600 s (was 600). Every MCP tool call renews the
+  caller's live claims by their own lease (row only, at most every 30 s);
+  `sea-lite heartbeat [--hook]` does the same for a PostToolUse hook
+  (rate-limited, reports lapsed claims). A lapsed claim is never revived.
+  `sea_refresh`'s `extend_by_seconds` defaults to the claim's lease.
+- **The README tour works from a fresh install.** It used to show
+  `0 ticket(s)` and `not_found`; it is now run line by line by the test
+  suite.
+
+### Added
+
+- **Human CLI**: `create`, `claim ID.. --paths`, `next --paths`,
+  `release [ID.. | --all]` (the CLI keeps its claim tokens in
+  `<data dir>/cli-claims.json`, `0600`), `board` (tickets, holders, locked
+  paths, time left, live servers; `--json`, `--all-projects`), `heartbeat`,
+  `whoami`. `list` / `show` show holder labels and projects.
+- **`sea-lite precommit [--install]`**: a git pre-commit guard that refuses
+  a commit staging files inside someone else's live claim — enforcement
+  that works for Cursor, Codex, Copilot and humans, and catches Bash-tool
+  edits the editor hook cannot see. `hooks/pre-commit` for hook managers.
+- **2025-era clients over HTTP (H2)**: `serve --http` serves `initialize`
+  clients (Cursor today) through the SDK's stateless legacy fallback, with
+  the same bearer and per-actor identity rules. `--legacy reject` restores
+  the modern-only endpoint.
+- Library: `SeaLite({ session, project })`, `store.heartbeat()`,
+  `store.touch()`, identity and project helpers exported.
+
+### Changed
+
+- Schema v4 (additive `ALTER TABLE`): `sea_tickets.claim_session`,
+  `claim_lease_seconds`, `project`. Chain compatibility: `claim_session`
+  (on `sea_ticket.claimed`) and `project` (on `sea_ticket.created`) are
+  optional payload fields, absent when unknown; no hash, cursor or event
+  type changes. Claims taken before 0.4.0 carry no session and lapse within
+  10 minutes of the upgrade.
+- CLI exit codes: 1 means a conflict (scope, claim, fence) or a failed
+  check; 2 means bad input or any other error (was 1 for every error).
+- One-shot CLI commands act as the resolved identity (see README
+  "Identity"); a human at a terminal defaults to `SEA_LITE_ACTOR` or the OS
+  user name instead of `local-agent`.
+- Tool descriptions and server instructions describe sessions, projects and
+  renewal; the catalog fingerprint changed accordingly.
+- Docs: README "Identity" and "Enforcement" sections (the edit hook does
+  not see Bash-tool edits), THREAT-MODEL "Identity" (labels and sessions
+  are self-asserted on stdio; per-actor HTTP tokens are the authenticated
+  path), `hooks/README.md` rewritten around the real contract.
+
 ## [0.3.0] — 2026-11-01
 
 ### Added

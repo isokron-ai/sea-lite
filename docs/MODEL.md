@@ -30,10 +30,21 @@ kronicle-lite's `schema_version`.
 | `claim_write_count` | fenced writes made under the current claim |
 | `claim_scope` | JSON array of normalized repo-relative paths the claim locks, or NULL (since schema v2; added with `ALTER TABLE` on older stores) |
 | `claim_worktree` | Normalized absolute worktree path the claim is bound to, or NULL (since schema v3; added with `ALTER TABLE` on older stores) |
+| `claim_session` | the holder's session, or NULL for a session-less (or pre-0.4) holder (since schema v4) |
+| `claim_lease_seconds` | the lease the claim was taken with; heartbeats renew by it (since schema v4) |
+| `project` | project key the ticket was created in, or NULL for a legacy ticket (visible in every project) (since schema v4) |
 | `created_seq`, `last_seq` | chain seq of the creating event and the latest event touching the row |
 
 Indexes: `(status, priority, created_at)`, partial `(claim_expires_at)` where
-not null, `(assignee)`.
+not null, `(assignee)`, `(project)`.
+
+**Project keys** (core/project.ts): the normalized `origin` remote of the
+repository (`github.com/owner/repo`), else the absolute path of its main
+working tree (linked worktrees resolve through `commondir`), else the
+directory itself. Read from `.git` files; git is not spawned. `list`,
+`next` and scope checks see the current project's tickets plus those with
+NULL `project`; `get` / `claim` by id and the history feed are not
+filtered; `sea_list { project: "*" }` / `--all-projects` see everything.
 
 ### `sea_links`
 
@@ -65,7 +76,7 @@ chain, inside the same `BEGIN IMMEDIATE` transaction as the row change. The
 | `sea_ticket.created` | `ticket_id kind title body status priority tags assignee created_by created_at` (+ `batch_id ref` from apply) | insert row, `row_version=1`, `created_seq=last_seq=seq` |
 | `sea_ticket.updated` | `ticket_id changes{…} tags row_version updated_at` | apply `changes` (title/body/kind/priority/assignee), set `tags`, `row_version`, `updated_at`, `last_seq`, `claim_write_count+1` |
 | `sea_ticket.status_set` | `ticket_id from to reason duplicate_of duplicates_link_id row_version updated_at claim_auto_released claim_token_hash` | set status (+ `duplicate_of`), bump; clear claim when `claim_auto_released` |
-| `sea_ticket.claimed` | `ticket_id claim_token_hash claim_actor expires_at lease_seconds rotated scope` (+ `worktree` when bound; `set` / `via` / `on_create`) | set claim fields, `claim_scope` (`scope.paths`, or NULL) and `claim_worktree`, `claim_write_count=0`, `last_seq` |
+| `sea_ticket.claimed` | `ticket_id claim_token_hash claim_actor expires_at lease_seconds rotated scope` (+ `worktree` when bound; + `claim_session` when the holder has one; `set` / `via` / `on_create`) | set claim fields, `claim_scope` (`scope.paths`, or NULL), `claim_worktree`, `claim_session`, `claim_lease_seconds` (from `lease_seconds`), `claim_write_count=0`, `last_seq` |
 | `sea_ticket.claim_released` | `ticket_id claim_token_hash claim_actor scope reason write_count` (+ `worktree via` from `release-worktree`, where `actor_id` is the caller and `claim_actor` the holder) | clear claim (and scope), `last_seq` |
 | `sea_ticket.claim_force_released` | `ticket_id claim_token_hash previous_holder scope released_by reason write_count` | clear claim (and scope), `last_seq` |
 | `sea_ticket.claim_expired` | `ticket_id claim_token_hash claim_actor scope expired_at noticed_at noticed_by` | clear claim (and scope), `last_seq` |
@@ -105,9 +116,20 @@ the token, which is the useful behaviour for a retry.
      (a leaked token);
   3. `fence_invalid` — claim row has no expiry (corrupt);
   4. `fence_expired` — `claim_expires_at <= now`.
-- Leases: `sea_claim` / `sea_next` / `sea_create(claim_seconds)` take 1–600 s
-  (default 300). `sea_refresh` sets expiry to `max(current, now + n)`,
-  `n ≤ 600`.
+- Ownership: a claim is the caller's own when `claim_actor` equals the
+  caller's actor **and** `claim_session` equals the caller's session (NULL
+  equals only NULL). A hook view (CLI `scope-check` / `precommit` /
+  `heartbeat` given a session but no actor) owns every claim of its
+  session. `already_claimed`, token rotation, `claimed: mine`, scope
+  conflicts and heartbeats use this rule; `validateFence` compares the
+  actor only (the token is the proof of possession).
+- Leases: `sea_claim` / `sea_next` / `sea_create(claim_seconds)` take
+  1–3600 s (default 900; before 0.4.0: 1–600, default 300). `sea_refresh`
+  sets expiry to `max(current, now + n)`, `n ≤ 3600`, default the claim's
+  own lease. Renewal on activity: every MCP tool call renews the caller's
+  live claims to `max(current, now + claim_lease_seconds)` (at most once per
+  30 s per actor and session), as does `sea-lite heartbeat`. Row only, not
+  chained; a lapsed claim is swept, never renewed.
 - Lazy expiry: any handler that loads a ticket row first runs `sweepExpired`.
   If the lease has lapsed it clears the claim and appends
   `sea_ticket.claim_expired` once (the cleared row cannot trigger it again).
@@ -144,10 +166,11 @@ that runs out does not. Two pattern segments are disjoint only when their
 literal heads or tails disagree (`*.ts` vs `*.md`), otherwise they are taken
 to overlap (`*.ts` vs `*.test.ts`).
 
-A claim whose scope overlaps a live, unexpired scope held by a **different
-actor** is refused with `scope_conflict` (holder, ticket, overlapping pairs,
-expiry — every conflicting holder is listed). The same actor may hold
-overlapping scopes across tickets; a scoped claim on a set applies one scope
+A claim whose scope overlaps a live, unexpired scope **held by someone
+else** (see Ownership above) on a ticket of the same project (or a legacy
+ticket) is refused with `scope_conflict` (holder, holder session, ticket
+and title, overlapping pairs, expiry — every conflicting holder is listed).
+One holder may hold overlapping scopes across tickets; a scoped claim on a set applies one scope
 to every ticket in the set. Release, force release, lazy expiry and a
 terminal transition clear the scope with the claim; `rebuild` restores live
 scopes from `sea_ticket.claimed` payloads. `sea_scope_check` answers "would

@@ -72,9 +72,15 @@ loop — move on.
   you after a compaction) picks up.
 - Pass `expected_version` on writes when you are acting on something you
   read a while ago; a `version_conflict` means re-read first.
-- If the work will run longer than the lease (default 300 s), call
-  `sea_refresh` before it lapses. A lapsed lease means the ticket is free
-  for anyone, and your old token is dead.
+- Leases (default 900 s) renew while you keep calling sea-lite tools (and
+  through the PostToolUse heartbeat when the hooks are installed). Before a
+  single step that may run longer than the lease with no tool call (a long
+  build), `sea_refresh` or claim with a longer `lease_seconds` (≤ 3600). A
+  lapsed lease means the ticket is free for anyone, and your old token is
+  dead.
+- Edits you make through Bash (`sed -i`, redirects, formatters) are not
+  checked by the edit hook; the pre-commit guard checks them at commit
+  time. Keep them inside your claimed paths.
 
 ## 3. Hand off
 
