@@ -1,0 +1,10 @@
+#!/bin/sh
+# sea-lite precommit: refuse committing files inside another agent's live
+# sea-lite claim. Works for every client (Cursor, Codex, Copilot, humans),
+# and catches edits that bypassed an editor hook (Bash-tool sed, formatters).
+#
+# Install: `sea-lite precommit --install` (writes .git/hooks/pre-commit), or
+# copy this file there, or call `sea-lite precommit` from your hook manager
+# (husky, lefthook, pre-commit). Bypass once: git commit --no-verify
+if command -v sea-lite >/dev/null 2>&1; then exec sea-lite precommit; fi
+exec npx -y sea-lite@0.4.0 precommit

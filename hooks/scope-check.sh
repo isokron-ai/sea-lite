@@ -1,55 +1,30 @@
 #!/usr/bin/env bash
-# PreToolUse hook for Claude Code (matcher: Edit|Write|MultiEdit).
+# PreToolUse hook for Claude Code (matcher: Edit|Write|MultiEdit|NotebookEdit).
 #
-# Reads the hook event from stdin, takes the file the agent is about to
-# edit, makes it repo-relative, and asks sea-lite whether another actor's
-# live claim scope covers it. A conflict exits 2, which blocks the edit and
-# feeds the holder / ticket / expiry back to the agent so it can claim the
-# path, pick other work, or wait.
+# `sea-lite scope-check --hook` is the whole hook: it reads the hook JSON on
+# stdin (tool_input.file_path, session_id), finds the identity this Claude
+# Code session's sea-lite server claims under (docs/THREAT-MODEL.md
+# "Identity"), and exits 2 with the holder / ticket / expiry on stderr when
+# the file lies inside someone else's live claim. Claude Code blocks the
+# edit and shows the agent that reason. A file outside any git repository,
+# or a tool call without a file, is let through.
+#
+# This hook only sees file-editing tools. Edits made through the Bash tool
+# (sed -i, redirects, formatters, codegen) bypass it; `sea-lite precommit`
+# catches those at commit time.
 #
 # Env (all optional):
-#   SEA_LITE_ACTOR          your actor label (must match the one your
-#                           sea-lite MCP server runs with, or your own
-#                           claims will read as conflicts)
-#   KRONICLE_LITE_DATA_DIR  the shared store
-#   SEA_LITE_BIN            command to run (default: npx -y sea-lite)
+#   SEA_LITE_BIN            command to run (default: sea-lite on PATH, else
+#                           npx -y sea-lite@0.4.0 — pin what you install)
+#   KRONICLE_LITE_DATA_DIR  the shared store, if not ~/.kronicle-lite
 #   SEA_LITE_HOOK_FAIL_OPEN set to 1 to let the edit through when sea-lite
-#                           itself cannot be reached (default: block)
+#                           itself fails (default: block)
 set -u
-
-input="$(cat)"
-root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-# Node does the path work so Windows paths (C:\repo\src\x.ts, mixed
-# separators, drive-letter case) relativize the same way POSIX ones do.
-# Prints the repo-relative path with forward slashes, or nothing when the
-# event is not a file edit or the file is outside the repo.
-rel="$(printf '%s' "$input" | node -e '
-  const path = require("path"); const root = process.argv[1];
-  let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
-    try {
-      const t = JSON.parse(s).tool_input || {};
-      const f = t.file_path || t.notebook_path || "";
-      if (!f) return;
-      const rel = path.relative(root, path.resolve(root, f));
-      if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return; // outside the repo: not ours to fence
-      process.stdout.write(rel.split(path.sep).join("/"));
-    } catch { /* not JSON: nothing to check */ }
-  });' "$root")"
-[ -z "$rel" ] && exit 0
-
-bin="${SEA_LITE_BIN:-npx -y sea-lite}"
-out="$($bin scope-check --paths "$rel" ${SEA_LITE_ACTOR:+--actor "$SEA_LITE_ACTOR"} 2>&1)"
-code=$?
-case $code in
-  0) exit 0 ;;
-  1)
-    printf 'sea-lite scope conflict on %s:\n%s\nClaim the path (sea_claim / sea_next with scope.paths), wait for the lease to lapse, or take other work.\n' "$rel" "$out" >&2
-    exit 2 ;;
-  *)
-    if [ "${SEA_LITE_HOOK_FAIL_OPEN:-0}" = "1" ]; then
-      printf 'sea-lite scope-check unavailable (%s); allowing edit\n' "$out" >&2
-      exit 0
-    fi
-    printf 'sea-lite scope-check failed (exit %s): %s\n' "$code" "$out" >&2
-    exit 2 ;;
-esac
+if [ -n "${SEA_LITE_BIN:-}" ]; then
+  # shellcheck disable=SC2086 # SEA_LITE_BIN may be a command with arguments
+  exec $SEA_LITE_BIN scope-check --hook
+elif command -v sea-lite >/dev/null 2>&1; then
+  exec sea-lite scope-check --hook
+else
+  exec npx -y sea-lite@0.4.0 scope-check --hook
+fi
