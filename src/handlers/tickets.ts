@@ -14,11 +14,13 @@ import {
   activeLinksFor,
   addNote,
   checkVersion,
+  jsonBytes,
   mustGetRow,
   notesFor,
   ownsClaim,
   projectFilter,
   resolveId,
+  RESPONSE_BUDGET_DEFAULT,
   sweepAllExpired,
   sweepExpired,
   tx,
@@ -927,6 +929,8 @@ export interface ListResult {
   tickets: (Ticket | TicketCompact)[];
   count: number;
   next_cursor: string | null;
+  /** 0.6.1: present (true) when the byte budget, not `limit`, ended the page; next_cursor continues it. */
+  budget_truncated?: true;
   swept_expired: number;
   head: ChainHead;
 }
@@ -1004,14 +1008,38 @@ export function list(ctx: Ctx, input: ListInput): ListResult {
       }
     }
     const offset = decodeCursor(input.cursor);
-    const sql = `SELECT t.* FROM ${fromSql}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${orderSql} LIMIT ? OFFSET ?`;
-    const rows = ctx.db.prepare(sql).all(...params, input.limit + 1, offset) as TicketRow[];
-    const page = rows.slice(0, input.limit);
-    const tickets = page.map((r) => (input.view === 'full' ? rowToTicket(r) : toCompact(rowToTicket(r))));
+    // Ids first (the sort never carries bodies), then each row on its own, so a page reads only what it returns.
+    const sql = `SELECT t.id FROM ${fromSql}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${orderSql} LIMIT ? OFFSET ?`;
+    const ids = (ctx.db.prepare(sql).all(...params, input.limit + 1, offset) as { id: string }[]).map((x) => x.id);
+    const byId = ctx.db.prepare(`SELECT * FROM sea_tickets WHERE id = ?`);
+    // P2-03: a byte budget per response. The page stops before the ticket
+    // that would exceed the budget (at least one, so a page always advances; one ticket is bounded by the
+    // input schemas), so neither the rows nor the response grow with `limit` × body size.
+    const budget = ctx.maxResponseBytes ?? RESPONSE_BUDGET_DEFAULT;
+    const tickets: (Ticket | TicketCompact)[] = [];
+    let used = 0;
+    let more = false;
+    let budgetCut = false;
+    for (const id of ids) {
+      if (tickets.length === input.limit) {
+        more = true;
+        break;
+      }
+      const r = byId.get(id) as TicketRow;
+      const t = input.view === 'full' ? rowToTicket(r) : toCompact(rowToTicket(r));
+      const size = jsonBytes(t) + 1;
+      if (tickets.length > 0 && used + size > budget) {
+        more = budgetCut = true;
+        break;
+      }
+      tickets.push(t);
+      used += size;
+    }
     return {
       tickets,
       count: tickets.length,
-      next_cursor: rows.length > input.limit ? encodeCursor(offset + input.limit) : null,
+      next_cursor: more ? encodeCursor(offset + tickets.length) : null,
+      ...(budgetCut ? { budget_truncated: true as const } : {}),
       swept_expired: swept,
       head: ctx.chain.head(),
     };

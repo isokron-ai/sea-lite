@@ -54,9 +54,30 @@ export interface SeaLiteOptions {
   tracks?: readonly Track[];
   /** Clock override (tests). */
   now?: () => Date;
+  /**
+   * 0.6.1 (P2-03): byte budget for one sea_list / sea_history response's
+   * items (UTF-8 JSON). A page stops before the item that would exceed it and
+   * says so (next_cursor / truncated). Default SEA_LITE_MAX_RESPONSE_BYTES, else
+   * DEFAULT_MAX_RESPONSE_BYTES (256 KiB).
+   */
+  maxResponseBytes?: number;
 }
 
 export const DEFAULT_ACTOR = 'local-agent';
+
+/** Default byte budget of one sea_list / sea_history response (P2-03). */
+export const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
+/** The budget can be lowered freely but not raised past what a stdio client can read (10 MiB lines). */
+export const MAX_RESPONSE_BYTES_LIMIT = 4 * 1024 * 1024;
+
+export function parseResponseBudget(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_MAX_RESPONSE_BYTES;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1024 || n > MAX_RESPONSE_BYTES_LIMIT) {
+    throw new SeaError('invalid_input', `SEA_LITE_MAX_RESPONSE_BYTES must be an integer from 1024 to ${MAX_RESPONSE_BYTES_LIMIT}, got "${raw}"`);
+  }
+  return n;
+}
 
 /** Minimum gap between two activity-driven lease renewals for one actor. */
 export const TOUCH_INTERVAL_MS = 30_000;
@@ -100,6 +121,7 @@ export class SeaLite {
   readonly sessionWide: boolean;
   private readonly ownsKronicle: boolean;
   private readonly clock: () => Date;
+  readonly maxResponseBytes: number;
 
   constructor(opts: SeaLiteOptions = {}) {
     if (opts.kronicle) {
@@ -120,6 +142,7 @@ export class SeaLite {
     this.role = opts.role ?? parseRole(process.env['SEA_LITE_ROLE']);
     this.lifecycle = { tracks: opts.tracks ?? parseTracks(process.env['SEA_LITE_TRACKS']) };
     this.clock = opts.now ?? (() => new Date());
+    this.maxResponseBytes = opts.maxResponseBytes ?? parseResponseBudget(process.env['SEA_LITE_MAX_RESPONSE_BYTES']);
     ensureSeaSchema(this.db);
   }
 
@@ -147,6 +170,7 @@ export class SeaLite {
       lifecycle: this.lifecycle,
       ownsKronicle: false,
       clock: this.clock,
+      maxResponseBytes: this.maxResponseBytes,
       lastTouch: this.lastTouch,
     });
     return view;
@@ -164,6 +188,7 @@ export class SeaLite {
       role: this.role,
       lifecycle: this.lifecycle,
       now: this.clock(),
+      maxResponseBytes: this.maxResponseBytes,
     };
   }
 

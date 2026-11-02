@@ -41,6 +41,16 @@ export interface Ctx {
   readonly role: Role;
   readonly lifecycle: LifecycleConfig;
   readonly now: Date;
+  /** Byte budget of one sea_list / sea_history page (P2-03); default DEFAULT_MAX_RESPONSE_BYTES. */
+  readonly maxResponseBytes?: number;
+}
+
+/** 256 KiB: see store.ts DEFAULT_MAX_RESPONSE_BYTES (kept here so handlers need not import the store). */
+export const RESPONSE_BUDGET_DEFAULT = 256 * 1024;
+
+/** UTF-8 size of a value's JSON: what it adds to a response (each item is bounded by the input schemas). */
+export function jsonBytes(v: unknown): number {
+  return Buffer.byteLength(JSON.stringify(v), 'utf8');
 }
 
 /** Is the claim on this row held by the caller? (See Ctx.session / Ctx.sessionWide.) */

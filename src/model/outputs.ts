@@ -256,6 +256,7 @@ export const ListOutput = z.object({
   tickets: z.array(z.union([TicketCompactOut, TicketOut])),
   count: z.number(),
   next_cursor: z.string().nullable(),
+  budget_truncated: z.literal(true).optional().describe('The response byte budget ended this page before limit; next_cursor continues.'),
   swept_expired: z.number(),
   head: HeadOut,
 });
@@ -276,7 +277,8 @@ export const HistoryOutput = z.object({
   events: z.array(HistoryEntryOut),
   count: z.number(),
   last_seq: z.number().nullable(),
-  truncated: z.boolean(),
+  truncated: z.boolean().describe('More events follow: call again with since_seq = last_seq.'),
+  budget_truncated: z.literal(true).optional().describe('The response byte budget, not limit, ended this page.'),
   head: HeadOut,
   chain: z.object({
     verified: z.boolean().nullable(),
