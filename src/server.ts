@@ -166,17 +166,23 @@ const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: fal
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false } as const;
 const READ = { readOnlyHint: true, idempotentHint: true, openWorldHint: false } as const;
 
-function instructionsFor(profile: Profile, who: string, role: string): string {
+function instructionsFor(profile: Profile, actor: string, session: string | null, role: string): string {
+  // L2-06 (0.6.1): the session is shown apart from the actor, and said to be sea-lite's only: agents that saw
+  // "actor#session" here passed it as their kronicle-lite actor_id, splitting pending items and lineage by session.
+  const who =
+    session !== null
+      ? `You are "${actor}" (role ${role}; session ${session}: sea-lite only, not in a kronicle-lite actor_id).`
+      : `You are "${actor}" (role ${role}).`;
   const text =
     profile === 'core'
-      ? 'Fenced work queue for parallel agents. Loop: sea_next (scope.paths = files to edit) → work → sea_finish (outcome, ' +
-        'note). Writes need the claim_token from sea_next/sea_claim; leases renew on any sea-lite call. sea_scope_check ' +
-        'before editing a path you did not claim. Plan with sea_apply (templates). Core profile: no sea_create, sea_update, ' +
-        `sea_link, sea_list, sea_history, sea_stats: serve without --core (SEA_LITE_PROFILE=full) has them. You are "${who}" (role ${role}).`
+      ? 'Fenced work queue for parallel agents. Loop: sea_next (scope.paths: files to edit) → work → sea_finish (outcome, ' +
+        'note). Writes need the claim_token (sea_next/sea_claim); leases renew on any call. sea_scope_check before ' +
+        'editing unclaimed paths. Plan with sea_apply. Not in core: sea_create, sea_update, sea_link, sea_list, ' +
+        `sea_history, sea_stats (serve without --core, SEA_LITE_PROFILE=full). ${who}`
       : 'Fenced work queue for parallel agents. Loop: sea_next (scope: the paths you will edit) → work → sea_update notes → ' +
-        'sea_finish (outcome, note). Writes need the claim_token from sea_claim/sea_next. Leases renew while you keep calling sea-lite ' +
-        'tools; sea_release when you stop. Scopes of other holders (other actors, or this actor in another session) never ' +
-        `overlap; sea_scope_check before editing a path you did not claim. You are "${who}" (role ${role}).`;
+        'sea_finish (outcome, note). Writes need the claim_token from sea_claim/sea_next. Leases renew on any call; ' +
+        'sea_release when you stop. Scopes of other holders (other actors, or this actor in another session) never ' +
+        `overlap; sea_scope_check before editing unclaimed paths. ${who}`;
   if (text.length > MAX_INSTRUCTIONS_CHARS) {
     throw new Error(`sea-lite: server instructions are ${text.length} chars; the limit is ${MAX_INSTRUCTIONS_CHARS}`);
   }
@@ -185,11 +191,10 @@ function instructionsFor(profile: Profile, who: string, role: string): string {
 
 export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServer {
   const profile: Profile = opts.profile ?? 'full';
-  const actor = store.actor.length > 40 ? store.actor.slice(0, 37) + '…' : store.actor;
+  const actor = store.actor.length > 24 ? store.actor.slice(0, 23) + '…' : store.actor;
   // Statuses are not repeated here: sea_transition's input enum and every
   // illegal_transition error carry them. Budget: MAX_INSTRUCTIONS_CHARS.
-  const who = store.session !== null ? `${actor}#${shortSession(store.session)}` : actor;
-  const instructions = instructionsFor(profile, who, store.role);
+  const instructions = instructionsFor(profile, actor, store.session !== null ? shortSession(store.session) : null, store.role);
 
   /** Enforce `bindActor`: a bound connection may only act as its own actor. */
   const bind = <T extends { actor_id?: string | undefined }>(args: T): T => {

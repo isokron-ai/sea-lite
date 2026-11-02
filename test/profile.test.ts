@@ -64,10 +64,24 @@ describe('profiles', () => {
     expect(full.instructions).toMatch(/sea_finish/);
   });
 
-  it('instructions stay within budget for the longest actor and a session in both profiles', () => {
-    const store = new SeaLite({ memory: true, actor: 'x'.repeat(200), session: 'f'.repeat(64) });
-    closers.push(() => store.close());
-    for (const profile of ['core', 'full'] as const) expect(() => createServer(store, { profile })).not.toThrow();
+  it('instructions stay within budget for the longest actor and a session in both profiles and roles', () => {
+    for (const role of ['agent', 'operator'] as const) {
+      // 0.6.0 overflowed (513 chars) for an operator with a long actor in the core profile.
+      const store = new SeaLite({ memory: true, actor: 'x'.repeat(200), session: 'f'.repeat(64), role });
+      closers.push(() => store.close());
+      for (const profile of ['core', 'full'] as const) expect(() => createServer(store, { profile }), `${role} ${profile}`).not.toThrow();
+    }
+  });
+
+  it('L2-06: the session is shown apart from the actor and kept out of kronicle-lite actor_ids', async () => {
+    for (const profile of ['core', 'full'] as const) {
+      const store = new SeaLite({ memory: true, actor: 'agent-A', session: 'sess-1234abcd' });
+      const { client, close } = await connectInMemory(store, { server: { profile } });
+      closers.push(() => store.close(), close);
+      const text = (await client.discover()).instructions ?? '';
+      expect(text, profile).toContain('You are "agent-A" (role agent; session sess1234: sea-lite only, not in a kronicle-lite actor_id).');
+      expect(text, profile).not.toMatch(/agent-A#/);
+    }
   });
 
   it('documents {prev} as the expanded ref of the previous item of the same template', async () => {

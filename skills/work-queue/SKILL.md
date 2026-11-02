@@ -118,6 +118,8 @@ still hold a ticket:
 2. If kronicle-lite is also installed, `get_system_state` with your last
    cursor shows every ticket, status and link change since you last looked.
    Treat that delta as authority over your memory of the queue.
+   The sea-lite session id (`agent-A#1a2b3c4d`) is for sea-lite calls only:
+   keep your kronicle-lite `actor_id` stable (`agent-A`), never add the session suffix.
 3. `sea_history { ticket_id }` is the full record if you need to know what
    happened while you were away.
 

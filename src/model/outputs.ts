@@ -297,7 +297,7 @@ export const ScopeConflictOut = z.object({
   title: z.string(),
   holder: z.string(),
   holder_session: z.string().nullable(),
-  holder_label: z.string().describe('actor#session, for humans.'),
+  holder_label: z.string().describe('actor#session, for humans; not an actor_id (sea-lite or kronicle-lite).'),
   claim_expires_at: z.string(),
   expires_in_seconds: z.number(),
   held: z.array(z.string()).describe("The holder's scope entries that overlap."),
