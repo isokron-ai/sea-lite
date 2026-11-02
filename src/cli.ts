@@ -11,8 +11,8 @@
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { defaultDataDir } from 'kronicle-lite';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { SeaError } from './core/errors.js';
@@ -307,19 +307,61 @@ function readCliClaims(dataDir: string): Record<string, CliClaim> {
 }
 
 function writeCliClaims(dataDir: string, claims: Record<string, CliClaim>): void {
-  mkdirSync(dataDir, { recursive: true });
   const file = join(dataDir, CLI_CLAIMS_FILE);
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   writeFileSync(tmp, JSON.stringify({ v: 1, claims }, null, 2) + '\n', { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, file);
 }
 
+/** A lock older than this is a crashed holder's: taken over. Every holder is one short read-modify-write. */
+const CLI_CLAIMS_LOCK_STALE_MS = 30_000;
+const CLI_CLAIMS_LOCK_WAIT_MS = 30_000;
+
+/**
+ * C2-02 (0.6.1): read-modify-write of cli-claims.json under an exclusive lock
+ * file (`open(O_CREAT|O_EXCL)`, retried), so concurrent CLI claims and
+ * releases never drop each other's tokens (40 concurrent claims lost up to 34
+ * tokens on 0.6.0). The write itself stays temp file + rename.
+ */
+function updateCliClaims(dataDir: string, change: (claims: Record<string, CliClaim>) => void): void {
+  mkdirSync(dataDir, { recursive: true });
+  const lock = join(dataDir, `${CLI_CLAIMS_FILE}.lock`);
+  const deadline = Date.now() + CLI_CLAIMS_LOCK_WAIT_MS;
+  let fd: number | null = null;
+  while (fd === null) {
+    try {
+      fd = openSync(lock, 'wx', 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > CLI_CLAIMS_LOCK_STALE_MS) unlinkSync(lock);
+      } catch {
+        // gone already: retry at once
+      }
+      if (Date.now() > deadline) throw new SeaError('wait_timeout', `${lock} is held by another sea-lite process; remove it if no sea-lite command is running`, { lock });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5 + Math.floor(Math.random() * 20));
+    }
+  }
+  try {
+    const claims = readCliClaims(dataDir);
+    change(claims);
+    writeCliClaims(dataDir, claims);
+  } finally {
+    closeSync(fd);
+    try {
+      unlinkSync(lock);
+    } catch {
+      // taken over as stale: nothing to remove
+    }
+  }
+}
+
 function rememberTokens(dataDir: string, who: ResolvedIdentity, got: { ticket_id: string; claim_token: string; expires_at: string }[]): void {
   if (got.length === 0) return;
-  const claims = readCliClaims(dataDir);
-  for (const g of got) claims[g.ticket_id] = { token: g.claim_token, actor: who.actor, session: who.session, expires_at: g.expires_at };
-  writeCliClaims(dataDir, claims);
+  updateCliClaims(dataDir, (claims) => {
+    for (const g of got) claims[g.ticket_id] = { token: g.claim_token, actor: who.actor, session: who.session, expires_at: g.expires_at };
+  });
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
@@ -485,9 +527,11 @@ async function main(argv: string[]): Promise<number> {
           if (e instanceof SeaError && /^fence_/.test(e.code)) results.push({ ticket_id: id, released: false, reason: e.code });
           else throw e;
         }
-        delete held[id];
       }
-      writeCliClaims(dataDir, held);
+      // Forget only the tokens this command used, re-read under the lock (another CLI may have added its own since).
+      updateCliClaims(dataDir, (claims) => {
+        for (const id of ids) if (claims[id]?.token === held[id]?.token) delete claims[id];
+      });
       out(flags, { released: results }, () =>
         results.length === 0
           ? 'nothing to release\n'
