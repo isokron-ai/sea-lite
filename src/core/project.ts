@@ -30,11 +30,19 @@ export interface RepoInfo {
   commonDir: string | null;
 }
 
+/**
+ * realpath of `p`; a path that does not exist (yet) is the realpath of its
+ * nearest existing ancestor plus the missing tail, so `<link>/new` and
+ * `<real>/new` get one key, as they do in kronicle-lite 0.8.0's project keys
+ * (0.6.0 kept the missing path as spelled).
+ */
 function real(p: string): string {
+  const abs = resolve(p);
   try {
-    return realpathSync(p);
+    return realpathSync(abs);
   } catch {
-    return resolve(p);
+    const up = dirname(abs);
+    return up === abs ? abs : join(real(up), basename(abs));
   }
 }
 

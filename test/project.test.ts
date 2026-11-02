@@ -5,7 +5,7 @@
  * explicit cross-project listing still works.
  */
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -128,5 +128,26 @@ describe('project keys', () => {
     expect(resolveProject(undefined, { CLAUDE_PROJECT_DIR: wt }, '/')).toBe('github.com/o/r');
     expect(resolveProject('*', {}, wt)).toBeNull();
     expect(resolveProject(undefined, { SEA_LITE_PROJECT: 'explicit' }, wt)).toBe('explicit');
+  });
+
+  it('one key whichever spelling: through a directory link, for existing and missing paths (kronicle-lite 0.8.0 recipe)', (ctx) => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'sea-key-')));
+    const real = join(dir, 'real');
+    mkdirSync(join(real, 'repo', '.git'), { recursive: true });
+    mkdirSync(join(real, 'repo', 'src'), { recursive: true });
+    writeFileSync(join(real, 'repo', '.git', 'config'), '[core]\n\tbare = false\n');
+    mkdirSync(join(real, 'plain'), { recursive: true });
+    try {
+      symlinkSync(process.platform === 'win32' ? real : 'real', join(dir, 'link'), process.platform === 'win32' ? 'junction' : undefined);
+    } catch {
+      ctx.skip();
+    }
+    const link = join(dir, 'link');
+    for (const p of ['repo', join('repo', 'src'), join('repo', 'src', 'missing.ts'), 'plain', join('plain', 'new'), join('plain', 'missing', 'x.ts')]) {
+      expect(projectKeyFor(join(link, p)), p).toBe(projectKeyFor(join(real, p)));
+    }
+    // 0.6.0 kept a missing path in a non-git directory as spelled: <link>/plain/new.
+    expect(projectKeyFor(join(link, 'plain', 'new'))).toBe(keyPath(join(real, 'plain', 'new')));
+    expect(resolveProject(undefined, { CLAUDE_PROJECT_DIR: join(link, 'repo') }, '/')).toBe(keyPath(join(real, 'repo')));
   });
 });
