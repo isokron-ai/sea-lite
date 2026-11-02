@@ -28,6 +28,7 @@ import {
 } from './core/identity.js';
 import { findRepo, projectKeyFor, resolveProject } from './core/project.js';
 import { MAX_SCOPE_PATHS } from './core/scope.js';
+import { MAX_STDIO_LINE_BYTES, StdioLineGuard } from './stdio-guard.js';
 import type { TicketCompact, Ticket } from './core/types.js';
 import { ALL_STATES, type TicketStatus } from './model/enums.js';
 import * as S from './model/schemas.js';
@@ -697,7 +698,13 @@ async function serveCmd(flags: Args['flags']): Promise<number> {
   // client (per-request _meta) and a 2025 client (initialize handshake)
   // are both served from the same factory. The store is shared; each
   // pinned instance is a fresh McpServer over it.
-  const transport = new StdioServerTransport();
+  // P2-05 / F11: an over-limit stdin line is answered with a JSON-RPC error instead of closing the server.
+  const guard = new StdioLineGuard(
+    (line) => process.stdout.write(line),
+    (msg) => process.stderr.write(msg + '\n'),
+  );
+  process.stdin.pipe(guard);
+  const transport = new StdioServerTransport(guard, process.stdout, { maxBufferSize: MAX_STDIO_LINE_BYTES + 1024 * 1024 });
   const handle = serveStdio(() => createServer(store, { version: VERSION, profile }), {
     transport,
     onerror: (err) => process.stderr.write(`sea-lite: ${err.message}\n`),
