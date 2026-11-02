@@ -4,6 +4,9 @@
  * claims, scope checks, sea_next scopes and the pre-commit guard, so two live
  * claims can never cover the same files under two spellings. Links that
  * escape the repository are refused. Also F15: `scope-check -- PATH`.
+ * 0.6.1 (H2-23): a dangling link names the file a write through it would
+ * create (its target, resolved lexically), and `..` that stays inside the
+ * repository is resolved as the OS would (`src/../src/x` is `src/x`).
  */
 
 import { Client } from '@modelcontextprotocol/client';
@@ -46,6 +49,12 @@ beforeEach(() => {
     link(process.platform === 'win32' ? repo : '.', 'rootlink');
     link(join(base, 'outside'), 'escape');
     link(process.platform === 'win32' ? join(repo, 'nowhere') : 'nowhere', 'dangling', 'file');
+    // H2-23a: dangling links into the claimable tree, a chain of them, a loop, and one out of the repo.
+    link(process.platform === 'win32' ? join(repo, 'src', 'handlers', 'nope.ts') : 'src/handlers/nope.ts', 'dclaim', 'file');
+    link(process.platform === 'win32' ? join(repo, 'dclaim') : 'dclaim', 'dchain', 'file');
+    link(process.platform === 'win32' ? join(repo, 'loopB') : 'loopB', 'loopA', 'file');
+    link(process.platform === 'win32' ? join(repo, 'loopA') : 'loopA', 'loopB', 'file');
+    link(join(base, 'outside', 'nope.ts'), 'dout', 'file');
     canLink = true;
   } catch {
     canLink = false;
@@ -67,8 +76,35 @@ describe('canonicalScopePath', () => {
     // Real paths and paths that do not exist are unchanged.
     expect(canonicalScopePath(repo, 'src/handlers/claims.ts')).toBe('src/handlers/claims.ts');
     expect(canonicalScopePath(repo, 'docs/new.md')).toBe('docs/new.md');
-    // A dangling link points nowhere: kept as written.
-    expect(canonicalScopePath(repo, 'dangling')).toBe('dangling');
+    // 0.6.1 (H2-23a): a dangling link names its target, resolved lexically (0.6.0 kept 'dangling').
+    expect(canonicalScopePath(repo, 'dangling')).toBe('nowhere');
+  });
+
+  it('H2-23a: a dangling link is the file a write through it would create; chains follow; loops and escapes do not hang', (ctx) => {
+    if (!canLink) ctx.skip();
+    expect(canonicalScopePath(repo, 'dclaim')).toBe('src/handlers/nope.ts');
+    expect(canonicalScopePath(repo, 'dchain')).toBe('src/handlers/nope.ts');
+    expect(canonicalScopePath(repo, 'hlink/../dclaim')).toBe('src/dclaim'); // `..` after a link: the target's parent
+    expect(canonicalScopePath(repo, 'loopA')).toBe('loopA');
+    expect(canonicalScopePath(repo, 'loopA/x.ts')).toBe('loopA/x.ts');
+    expect(() => canonicalScopePath(repo, 'dout')).toThrow(expect.objectContaining({ code: 'invalid_input', details: expect.objectContaining({ reason: 'outside_repo' }) }));
+    if (process.platform !== 'win32') {
+      // A dangling directory link: a new file beneath it lands in the target directory.
+      link('src/handlers/newdir', 'ddir');
+      expect(canonicalScopePath(repo, 'ddir/x.ts')).toBe('src/handlers/newdir/x.ts');
+    }
+  });
+
+  it('H2-23b: `..` inside the repository resolves on disk, through links as the OS does', (ctx) => {
+    if (!canLink) ctx.skip();
+    expect(normalizeScope(['src/../src/handlers/claims.ts'], repo)).toEqual(['src/handlers/claims.ts']);
+    expect(normalizeScope(['hlink/../x.ts'], repo)).toEqual(['src/x.ts']); // lexically it would be x.ts
+    expect(normalizeScope(['src/new/../handlers'], repo)).toEqual(['src/handlers']);
+    expect(normalizeScope(['src/..'], repo)).toEqual(['.']);
+    expect(normalizeScope(['src/../src/**/*.ts'], repo)).toEqual(['src/**/*.ts']);
+    expect(codeOf(() => normalizeScope(['src/../..'], repo))).toBe('invalid_input');
+    // Without a root it stays lexical.
+    expect(normalizeScope(['hlink/../x.ts'], null)).toEqual(['x.ts']);
   });
 
   it('a link escaping the repository is invalid_input (outside_repo)', (ctx) => {
@@ -102,6 +138,10 @@ describe('store with a repository root', () => {
       expect(codeOf(() => b.claim({ ticket_ids: [t2], scope: { paths: ['flink'] } }))).toBe('scope_conflict');
       expect(codeOf(() => b.next({ include_unassigned: true, scope: { paths: ['hlink/claims.ts'] } }))).toBe('scope_conflict');
       expect(codeOf(() => b.claim({ ticket_ids: [t2], scope: { paths: ['escape'] } }))).toBe('invalid_input');
+      // H2-23: a dangling link into the claim, and `..` that stays in the repo, both conflict.
+      expect(b.scopeCheck({ paths: ['dclaim'] })).toMatchObject({ ok: false, paths: ['src/handlers/nope.ts'] });
+      expect(b.scopeCheck({ paths: ['src/../src/handlers/claims.ts'] })).toMatchObject({ ok: false, paths: ['src/handlers/claims.ts'] });
+      expect(codeOf(() => b.claim({ ticket_ids: [t2], scope: { paths: ['dchain'] } }))).toBe('scope_conflict');
     } finally {
       s.close();
     }
@@ -143,6 +183,20 @@ describe('CLI (F07 repro, F15)', () => {
     expect(r.err).toMatch(/src\/handlers\/claims\.ts/);
   });
 
+  it('H2-23: scope2.sh repro — a dangling link into the claim and `src/../src/…` conflict (exit 1), a loop is free', (ctx) => {
+    if (!canLink) ctx.skip();
+    const t = (JSON.parse(sl(['create', 'T1', '--triaged', '--json']).out) as { ticket: { id: string } }).ticket.id;
+    expect(sl(['claim', t, '--paths', 'src/handlers', '--session', 'sA', '--actor', 'a']).code).toBe(0);
+    const chk = (p: string) => sl(['scope-check', '--session', 'sB', '--actor', 'b', '--', p]);
+    for (const p of ['dclaim', 'dchain', join(repo, 'dclaim'), 'src/../src/handlers/claims.ts', 'hlink/../handlers/claims.ts']) {
+      const r = chk(p);
+      expect(r.code, `${p}: ${r.err}`).toBe(1);
+    }
+    expect(chk('loopA').code).toBe(0);
+    expect(chk('dangling').code).toBe(0);
+    expect(chk('dout').code).toBe(2); // a dangling link out of the repository: refused like any escaping link
+  });
+
   it('F15: `scope-check -- PATH` checks the paths after `--` (and a path may start with -)', () => {
     const t = (JSON.parse(sl(['create', 'T1', '--triaged', '--json']).out) as { ticket: { id: string } }).ticket.id;
     expect(sl(['claim', t, '--paths', 'src', '--session', 'sA', '--actor', 'a']).code).toBe(0);
@@ -151,6 +205,10 @@ describe('CLI (F07 repro, F15)', () => {
     expect(hit.out).toMatch(/src\/a\.ts ↔ src/);
     expect(sl(['scope-check', '--session', 'x', '--', '-weird.ts', 'docs/b.md']).code).toBe(0);
     expect(sl(['scope-check', '--session', 'x', '--json', '--', 'src/a.ts', 'docs/b.md']).out).toMatch(/"paths": \[\s*"docs\/b\.md",\s*"src\/a\.ts"/);
+    // After `--` an option-looking word is a path, and a value flag right before `--` does not swallow it.
+    expect(sl(['scope-check', '--session', 'x', '--', '--json']).out).toMatch(/^ok: --json /);
+    expect(sl(['scope-check', '--actor', 'x', '--session', 'x', '--', 'src/a.ts']).code).toBe(1);
+    expect(sl(['scope-check', '--session=x', '--', 'docs/b.md', 'src/a.ts']).code).toBe(1);
   });
 });
 

@@ -55,6 +55,24 @@ describe('scope normalization', () => {
     expect(codeOf(() => normalizeScope(Array.from({ length: 65 }, (_, i) => `p${i}`)))).toBe('invalid_input');
   });
 
+  it('H2-23b: `..` that stays inside the repository is resolved, not refused', () => {
+    expect(normalizeScopePath('src/../src/handlers/claims.ts')).toBe('src/handlers/claims.ts');
+    expect(normalizeScopePath('a/b/../c')).toBe('a/c');
+    expect(normalizeScopePath('./src//../docs/')).toBe('docs');
+    expect(normalizeScopePath('src/..')).toBe('.');
+    expect(normalizeScopePath('next.js/sub/..')).toBe('next.js/');
+    expect(normalizeScopePath('src/../src/**/*.ts')).toBe('src/**/*.ts');
+    expect(normalizeScope(['src/../src/handlers', 'src/handlers/'])).toEqual(['src/handlers']);
+    // Still refused: climbing above the root (at any point), and `..` after a glob.
+    expect(codeOf(() => normalizeScopePath('..'))).toBe('invalid_input');
+    expect(codeOf(() => normalizeScopePath('src/../..'))).toBe('invalid_input');
+    expect(codeOf(() => normalizeScopePath('../repo/src'))).toBe('invalid_input');
+    expect(codeOf(() => normalizeScopePath('src/**/../x'))).toBe('invalid_input');
+    // keepParents validates the same way but leaves `..` for the on-disk resolution.
+    expect(normalizeScopePath('hlink/../x.ts', { keepParents: true })).toBe('hlink/../x.ts');
+    expect(codeOf(() => normalizeScopePath('src/../..', { keepParents: true }))).toBe('invalid_input');
+  });
+
   it('classifies globs by metacharacters, leaving route groups like app/(auth) literal', () => {
     expect(isGlobEntry('src/**/*.ts')).toBe(true);
     expect(isGlobEntry('docs/*.md')).toBe(true);
