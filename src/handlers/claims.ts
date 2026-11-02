@@ -215,7 +215,13 @@ export function release(ctx: Ctx, input: ReleaseInput): ReleaseResult {
     const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
     if (input.force) {
       if (ctx.role !== 'operator') {
-        throw new SeaError('forbidden', 'force release requires the server to run with --role operator', { role: ctx.role });
+        // P2-12: an HTTP actor's role comes from its token, not from the server's --role.
+        throw new SeaError(
+          'forbidden',
+          `force release needs the operator role; "${ctx.actor}" acts as ${ctx.role} (stdio/CLI: --role operator or SEA_LITE_ROLE=operator; ` +
+            'HTTP: a token from the actors file with "role": "operator", e.g. sea-lite add-token --actor ID --role operator)',
+          { role: ctx.role },
+        );
       }
       if (row.claim_token_hash === null) {
         throw new SeaError('invalid_input', `ticket ${id} is not claimed`, { ticket_id: id });

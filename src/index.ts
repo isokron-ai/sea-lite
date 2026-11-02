@@ -26,6 +26,7 @@ export { createServer, errorResult, type ServerOptions } from './server.js';
 export {
   serveHttp,
   createHttpListener,
+  checkTokenFileMode,
   loadOrCreateBearer,
   readBearerFile,
   parseActorsFile,

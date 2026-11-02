@@ -35,6 +35,7 @@ import {
   ACTORS_FILE_NAME,
   addActorToken,
   DEFAULT_HTTP_PORT,
+  checkTokenFileMode,
   loadOrCreateBearer,
   readActorsFile,
   readBearerFile,
@@ -70,6 +71,7 @@ const BOOLEAN_FLAGS = new Set([
   'help',
   'mine',
   'core',
+  'allow-insecure-token-file',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -151,9 +153,11 @@ Serving agents:
                      --core (= --profile core): only the day-to-day tools, short descriptions (~11 KB tools/list)
   sea-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--actors-file F]
                    [--allow-origin H,..] [--allow-host H,..] [--project KEY|*] [--legacy stateless|reject]
+                   [--allow-insecure-token-file]
                      Streamable HTTP on 127.0.0.1:${DEFAULT_HTTP_PORT}/mcp (2026-07-28, and 2025-era clients unless
                      --legacy reject); shared bearer from DIR/http-bearer.token; per-actor tokens from
-                     DIR/http-actors.json (or --actors-file)
+                     DIR/http-actors.json (or --actors-file), re-read when it changes; a token file
+                     group/others can read is refused unless --allow-insecure-token-file
   sea-lite add-token --actor ID [--role agent|operator] [--actors-file F]
                      mint a per-actor HTTP token (the authenticated identity), print it once
 
@@ -1003,14 +1007,18 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
   const dataDir = store.kronicle.dataDir ?? dataDirOf(flags);
   let bearer: string;
   let bearerNote: string;
+  const tokenFileOpts = { allowInsecure: flags['allow-insecure-token-file'] === true };
   if (str(flags['bearer']) !== undefined) {
     bearer = str(flags['bearer'])!;
     bearerNote = 'bearer from --bearer';
   } else if (str(flags['bearer-file']) !== undefined) {
     bearer = readBearerFile(str(flags['bearer-file'])!);
+    const warning = checkTokenFileMode(str(flags['bearer-file'])!, tokenFileOpts);
+    if (warning !== null) process.stderr.write(`sea-lite: ${warning}\n`);
     bearerNote = `bearer from ${str(flags['bearer-file'])}`;
   } else {
-    const b = loadOrCreateBearer(dataDir);
+    const b = loadOrCreateBearer(dataDir, tokenFileOpts);
+    if (b.warning !== null) process.stderr.write(`sea-lite: ${b.warning}\n`);
     bearer = b.token;
     bearerNote = `bearer from ${b.file}${b.created ? ' (created, mode 0600)' : ''}`;
   }
@@ -1021,6 +1029,7 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
     actors = readActorsFile(actorsFile);
     bearerNote += `; ${actors.length} actor token(s) from ${actorsFile}`;
   }
+  bearerNote += ' (re-read on change)';
   const allowedOrigins = list(flags['allow-origin']);
   const allowedHosts = list(flags['allow-host']);
   const port = num(flags['port'], 'port');
@@ -1032,6 +1041,7 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
     store,
     bearer,
     actors,
+    actorsFile,
     version: VERSION,
     ...(legacyFlag !== undefined ? { legacy: legacyFlag } : {}),
     profile: profileOf(flags),

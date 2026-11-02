@@ -172,7 +172,10 @@ kronicle-lite's `serve --http` uses: one data dir, one store, one owner
 secret. A request presenting it acts as the server's `--actor` with the
 server's `--role`, and a per-call `actor_id` is a self-asserted label —
 exactly the stdio posture. Holding it is holding the whole store. Rotate by
-deleting the file and restarting.
+deleting the file and restarting. Since 0.6.1 a token file that group or
+others can read is refused at start (`--allow-insecure-token-file` turns
+that into a warning), and concurrent first starts agree on one file
+(created exclusively, never read half-written).
 
 **Actor tokens.** `sea-lite add-token --actor alice` mints a 256-bit token,
 appends its SHA-256 (never the token) to `<data dir>/http-actors.json`
@@ -183,8 +186,10 @@ naming anyone else is refused with `forbidden`. That makes claim holders,
 credential rather than a label — the basis for per-seat accounting.
 Comparison is constant-time over every entry (SHA-256 digests, no early
 exit). An entry's `role: operator` is what lets that token force-release.
-Rotate a token by deleting its entry and running `add-token` again;
-restart the server to pick up changes (the file is read at start).
+Rotate a token by deleting its entry and running `add-token` again. Since
+0.6.1 the server re-reads the file when it changes (one `stat` per
+request), so new and removed entries take effect without a restart; a file
+that does not parse keeps the previous tokens and is reported on stderr.
 
 **What actor tokens do not give you.**
 
@@ -199,7 +204,7 @@ restart the server to pick up changes (the file is read at start).
   can still write events under any label. `sea_stats` is accounting for a
   cooperative team, not evidence against a hostile one.
 - *No revocation list, no expiry.* A token is valid until its entry is
-  removed and the server restarted.
+  removed (picked up on the next request).
 - *The shared bearer outranks them.* It is the owner credential; do not
   hand it to teammates — give each one an actor token.
 

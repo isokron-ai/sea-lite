@@ -64,7 +64,7 @@ describe('tokens and the actors file', () => {
       expect(a.created).toBe(true);
       expect(a.token.length).toBeGreaterThanOrEqual(32);
       if (POSIX) expect(statSync(a.file).mode & 0o777).toBe(0o600);
-      expect(loadOrCreateBearer(dir)).toEqual({ token: a.token, created: false, file: a.file });
+      expect(loadOrCreateBearer(dir)).toEqual({ token: a.token, created: false, file: a.file, warning: null });
     } finally {
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
