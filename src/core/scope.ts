@@ -22,8 +22,8 @@
  * genuinely ambiguous.
  */
 
-import { lstatSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, parse as parsePath, relative, sep } from 'node:path';
 
 import picomatch from 'picomatch';
 
@@ -46,25 +46,41 @@ export function isGlobEntry(entry: string): boolean {
   return GLOB_CHARS.test(entry);
 }
 
-/** Normalize one scope entry; throws invalid_input on anything that cannot be a repo-relative path. */
-export function normalizeScopePath(raw: string): string {
+/**
+ * Normalize one scope entry; throws invalid_input on anything that cannot be a repo-relative path.
+ * `..` segments are resolved lexically (`src/../src/x` is `src/x`); one that
+ * would climb above the repository root, or that follows a glob segment, is
+ * invalid_input. With `keepParents`, the `..` segments are validated the same
+ * way but kept, for canonicalScopePath to resolve them on disk (after a
+ * symlinked directory, `..` is the link target's parent, as for the OS).
+ */
+export function normalizeScopePath(raw: string, opts: { keepParents?: boolean } = {}): string {
   let p = raw.trim().replace(/\\/g, '/');
   if (p.includes('\0')) throw new SeaError('invalid_input', 'scope path contains a NUL byte');
   if (p.startsWith('!')) throw new SeaError('invalid_input', `scope path "${raw}": negation is not supported`, { path: raw });
   if (/^[A-Za-z]:/.test(p) || p.startsWith('/')) {
     throw new SeaError('invalid_input', `scope path "${raw}" must be repo-relative, not absolute`, { path: raw });
   }
-  p = p.replace(/\/{2,}/g, '/');
-  while (p.startsWith('./')) p = p.slice(2);
-  const dirMarked = p.endsWith('/');
-  while (p.endsWith('/')) p = p.slice(0, -1);
-  if (p === '' || p === '.') return WHOLE_REPO;
-  const segments = p.split('/');
-  if (segments.some((s) => s === '..')) throw new SeaError('invalid_input', `scope path "${raw}" must not climb out of the repo ("..")`, { path: raw });
-  if (segments.some((s) => s === '.' || s === '')) {
-    p = segments.filter((s) => s !== '.' && s !== '').join('/');
-    if (p === '') return WHOLE_REPO;
+  const dirMarked = /\/\.{0,2}$/.test(p) || p === '..';
+  const kept: string[] = [];
+  let depth = 0;
+  let afterGlob = false;
+  for (const s of p.split('/')) {
+    if (s === '' || s === '.') continue;
+    if (s === '..') {
+      if (afterGlob) throw new SeaError('invalid_input', `scope path "${raw}": ".." after a glob segment is ambiguous`, { path: raw });
+      if (depth === 0) throw new SeaError('invalid_input', `scope path "${raw}" must not climb out of the repo ("..")`, { path: raw });
+      depth--;
+      if (opts.keepParents === true) kept.push(s);
+      else kept.pop();
+      continue;
+    }
+    if (isGlobEntry(s)) afterGlob = true;
+    depth++;
+    kept.push(s);
   }
+  p = kept.join('/');
+  if (p === '') return WHOLE_REPO;
   // A trailing slash is kept only where it carries information: a file-looking
   // name that is really a directory (`next.js/`). Elsewhere it is noise.
   if (dirMarked && !isGlobEntry(p) && looksLikeFile(p)) p += '/';
@@ -84,8 +100,7 @@ export function normalizeScope(paths: readonly string[], root: string | null = n
   if (paths.length > MAX_SCOPE_PATHS) throw new SeaError('invalid_input', `scope.paths may hold at most ${MAX_SCOPE_PATHS} entries`, { max: MAX_SCOPE_PATHS });
   const out = new Set<string>();
   for (const raw of paths) {
-    const p = normalizeScopePath(raw);
-    out.add(root !== null ? canonicalScopePath(root, p, raw) : p);
+    out.add(root !== null ? canonicalScopePath(root, normalizeScopePath(raw, { keepParents: true }), raw) : normalizeScopePath(raw));
   }
   if (out.has(WHOLE_REPO)) return [WHOLE_REPO];
   return [...out].sort();
@@ -105,51 +120,143 @@ function realRoot(root: string): string {
   return r;
 }
 
+/** Symbolic links followed by hand (dangling ones) before a path is given up as a loop; Linux's own limit. */
+const MAX_LINK_HOPS = 40;
+
 /**
- * A normalized repo-relative entry, resolved through symlinks: the longest
- * prefix of its literal (non-glob) segments that exists on disk is replaced
- * by its realpath, made repo-relative again; the rest is kept as written (a
- * path that does not exist yet cannot contain a link). A link that resolves
- * outside the repository is invalid_input (`reason: "outside_repo"`): it
- * would name files no scope in this project can lock. Uses the platform's
- * realpath (`realpathSync.native`, canonical case on Windows) and returns
- * `/`-separated paths on every OS.
+ * realpath of the longest existing prefix of `segs` under `base`, with the
+ * rest appended as written; undefined when that prefix is a link realpath
+ * cannot follow (dangling, or a loop). `segs` hold no `..`.
  */
-export function canonicalScopePath(root: string, entry: string, raw: string = entry): string {
-  if (entry === WHOLE_REPO) return entry;
-  const dirMarked = entry.endsWith('/');
-  const segs = (dirMarked ? entry.slice(0, -1) : entry).split('/');
-  let literal = segs.findIndex((x) => isGlobEntry(x));
-  if (literal === -1) literal = segs.length;
-  const base = realRoot(root);
-  for (let i = literal; i > 0; i--) {
+function realOfLongestExisting(base: string, segs: readonly string[]): string | undefined {
+  for (let i = segs.length; i > 0; i--) {
     const candidate = join(base, ...segs.slice(0, i));
     try {
       lstatSync(candidate);
     } catch {
       continue; // does not exist: try a shorter prefix
     }
-    let real: string;
     try {
-      real = realpathSync.native(candidate);
+      return join(realpathSync.native(candidate), ...segs.slice(i));
     } catch {
-      // A dangling link: it points nowhere; keep the path as written.
-      return entry;
+      return undefined;
     }
-    const rel = relative(base, real);
-    if (rel.startsWith('..') || isAbsolute(rel)) {
-      throw new SeaError('invalid_input', `scope path "${raw}" resolves outside the repository through a symlink (${real})`, {
-        path: raw,
-        reason: 'outside_repo',
-        resolved: real,
-      });
-    }
-    const head = rel === '' ? [] : rel.split(sep);
-    const out = [...head, ...segs.slice(i)].join('/');
-    if (out === '') return WHOLE_REPO;
-    return dirMarked ? `${out}/` : out;
   }
-  return entry;
+  return join(base, ...segs);
+}
+
+/**
+ * Resolve `segs` from the physical directory `start` the way the OS would
+ * open the path, one segment at a time: `..` is the parent of where the walk
+ * is (so after a symlinked directory it is the target's parent), an existing
+ * link is followed through realpath, and a dangling link is followed
+ * lexically: its target, taken relative to the link's directory, is walked in
+ * turn (a write through the link creates that file). A missing segment and
+ * everything after it is kept as written. Null on a link loop (more than
+ * MAX_LINK_HOPS links followed by hand).
+ */
+function physicalWalk(start: string, segs: readonly string[]): string | null {
+  let hops = 0;
+  const walkFrom = (from: string, parts: readonly string[]): string | null => {
+    let cur = from;
+    for (const seg of parts) {
+      if (seg === '' || seg === '.') continue;
+      if (seg === '..') {
+        cur = dirname(cur);
+        continue;
+      }
+      const next = join(cur, seg);
+      let isLink: boolean;
+      try {
+        isLink = lstatSync(next).isSymbolicLink();
+      } catch {
+        cur = next; // missing: nothing below it can be a link
+        continue;
+      }
+      if (!isLink) {
+        cur = next;
+        continue;
+      }
+      try {
+        cur = realpathSync.native(next);
+        continue;
+      } catch {
+        // dangling, or a loop: follow it by hand
+      }
+      if (++hops > MAX_LINK_HOPS) return null;
+      let target: string;
+      try {
+        target = readlinkSync(next).replace(/^\\\\\?\\/, '');
+      } catch {
+        return null;
+      }
+      const troot = isAbsolute(target) ? parsePath(target).root : '';
+      const r = walkFrom(troot !== '' ? troot : cur, target.slice(troot.length).split(/[\\/]+/));
+      if (r === null) return null;
+      cur = r;
+    }
+    return cur;
+  };
+  return walkFrom(start, segs);
+}
+
+/** The platform's canonical spelling of an absolute path's existing part (case and 8.3 names on Windows), rest as given. */
+function canonicalAbs(p: string): string {
+  const tail: string[] = [];
+  let cur = p;
+  for (;;) {
+    try {
+      return join(realpathSync.native(cur), ...tail.reverse());
+    } catch {
+      // missing: try the parent
+    }
+    const up = dirname(cur);
+    if (up === cur) return p;
+    tail.push(basename(cur));
+    cur = up;
+  }
+}
+
+/**
+ * A normalized repo-relative entry, resolved through symlinks the way the OS
+ * opens it: an existing link is replaced by its realpath, a dangling link by
+ * its target resolved lexically (writing through it would create that file),
+ * and `..` (kept by normalizeScopePath's `keepParents`) is the parent of the
+ * physical directory reached so far. The result is repo-relative again; the
+ * part from the first glob segment on is kept as written. A link that
+ * resolves outside the repository is invalid_input (`reason:
+ * "outside_repo"`): it would name files no scope in this project can lock. A
+ * link loop is kept as written (`..` resolved lexically): nothing can be
+ * written through it. Uses the platform's realpath (`realpathSync.native`,
+ * canonical case on Windows) and returns `/`-separated paths on every OS.
+ */
+export function canonicalScopePath(root: string, entry: string, raw: string = entry): string {
+  if (entry === WHOLE_REPO) return entry;
+  const slash = entry.endsWith('/');
+  const segs = (slash ? entry.slice(0, -1) : entry).split('/');
+  // A trailing slash or `..` names a directory; the slash is kept where it carries information (see normalizeScopePath).
+  const dirMarked = slash || segs[segs.length - 1] === '..';
+  let literal = segs.findIndex((x) => isGlobEntry(x));
+  if (literal === -1) literal = segs.length;
+  const head = segs.slice(0, literal);
+  const base = realRoot(root);
+  let real = head.includes('..') ? undefined : realOfLongestExisting(base, head);
+  if (real === undefined) {
+    const walked = physicalWalk(base, head);
+    if (walked === null) return normalizeScopePath(entry);
+    real = canonicalAbs(walked);
+  }
+  const rel = relative(base, real);
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new SeaError('invalid_input', `scope path "${raw}" resolves outside the repository through a symlink (${real})`, {
+      path: raw,
+      reason: 'outside_repo',
+      resolved: real,
+    });
+  }
+  const out = [...(rel === '' ? [] : rel.split(sep)), ...segs.slice(literal)].join('/');
+  if (out === '') return WHOLE_REPO;
+  return dirMarked && !isGlobEntry(out) && looksLikeFile(out) ? `${out}/` : out;
 }
 
 interface Parsed {

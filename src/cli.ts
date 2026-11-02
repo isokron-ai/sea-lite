@@ -11,8 +11,8 @@
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { defaultDataDir } from 'kronicle-lite';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { SeaError } from './core/errors.js';
@@ -28,6 +28,7 @@ import {
 } from './core/identity.js';
 import { findRepo, projectKeyFor, resolveProject } from './core/project.js';
 import { MAX_SCOPE_PATHS } from './core/scope.js';
+import { MAX_STDIO_LINE_BYTES, StdioLineGuard } from './stdio-guard.js';
 import type { TicketCompact, Ticket } from './core/types.js';
 import { ALL_STATES, type TicketStatus } from './model/enums.js';
 import * as S from './model/schemas.js';
@@ -35,6 +36,7 @@ import {
   ACTORS_FILE_NAME,
   addActorToken,
   DEFAULT_HTTP_PORT,
+  checkTokenFileMode,
   loadOrCreateBearer,
   readActorsFile,
   readBearerFile,
@@ -70,6 +72,7 @@ const BOOLEAN_FLAGS = new Set([
   'help',
   'mine',
   'core',
+  'allow-insecure-token-file',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -151,9 +154,11 @@ Serving agents:
                      --core (= --profile core): only the day-to-day tools, short descriptions (~11 KB tools/list)
   sea-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--actors-file F]
                    [--allow-origin H,..] [--allow-host H,..] [--project KEY|*] [--legacy stateless|reject]
+                   [--allow-insecure-token-file]
                      Streamable HTTP on 127.0.0.1:${DEFAULT_HTTP_PORT}/mcp (2026-07-28, and 2025-era clients unless
                      --legacy reject); shared bearer from DIR/http-bearer.token; per-actor tokens from
-                     DIR/http-actors.json (or --actors-file)
+                     DIR/http-actors.json (or --actors-file), re-read when it changes; a token file
+                     group/others can read is refused unless --allow-insecure-token-file
   sea-lite add-token --actor ID [--role agent|operator] [--actors-file F]
                      mint a per-actor HTTP token (the authenticated identity), print it once
 
@@ -302,19 +307,61 @@ function readCliClaims(dataDir: string): Record<string, CliClaim> {
 }
 
 function writeCliClaims(dataDir: string, claims: Record<string, CliClaim>): void {
-  mkdirSync(dataDir, { recursive: true });
   const file = join(dataDir, CLI_CLAIMS_FILE);
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   writeFileSync(tmp, JSON.stringify({ v: 1, claims }, null, 2) + '\n', { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, file);
 }
 
+/** A lock older than this is a crashed holder's: taken over. Every holder is one short read-modify-write. */
+const CLI_CLAIMS_LOCK_STALE_MS = 30_000;
+const CLI_CLAIMS_LOCK_WAIT_MS = 30_000;
+
+/**
+ * C2-02 (0.6.1): read-modify-write of cli-claims.json under an exclusive lock
+ * file (`open(O_CREAT|O_EXCL)`, retried), so concurrent CLI claims and
+ * releases never drop each other's tokens (40 concurrent claims lost up to 34
+ * tokens on 0.6.0). The write itself stays temp file + rename.
+ */
+function updateCliClaims(dataDir: string, change: (claims: Record<string, CliClaim>) => void): void {
+  mkdirSync(dataDir, { recursive: true });
+  const lock = join(dataDir, `${CLI_CLAIMS_FILE}.lock`);
+  const deadline = Date.now() + CLI_CLAIMS_LOCK_WAIT_MS;
+  let fd: number | null = null;
+  while (fd === null) {
+    try {
+      fd = openSync(lock, 'wx', 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > CLI_CLAIMS_LOCK_STALE_MS) unlinkSync(lock);
+      } catch {
+        // gone already: retry at once
+      }
+      if (Date.now() > deadline) throw new SeaError('wait_timeout', `${lock} is held by another sea-lite process; remove it if no sea-lite command is running`, { lock });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5 + Math.floor(Math.random() * 20));
+    }
+  }
+  try {
+    const claims = readCliClaims(dataDir);
+    change(claims);
+    writeCliClaims(dataDir, claims);
+  } finally {
+    closeSync(fd);
+    try {
+      unlinkSync(lock);
+    } catch {
+      // taken over as stale: nothing to remove
+    }
+  }
+}
+
 function rememberTokens(dataDir: string, who: ResolvedIdentity, got: { ticket_id: string; claim_token: string; expires_at: string }[]): void {
   if (got.length === 0) return;
-  const claims = readCliClaims(dataDir);
-  for (const g of got) claims[g.ticket_id] = { token: g.claim_token, actor: who.actor, session: who.session, expires_at: g.expires_at };
-  writeCliClaims(dataDir, claims);
+  updateCliClaims(dataDir, (claims) => {
+    for (const g of got) claims[g.ticket_id] = { token: g.claim_token, actor: who.actor, session: who.session, expires_at: g.expires_at };
+  });
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
@@ -480,9 +527,11 @@ async function main(argv: string[]): Promise<number> {
           if (e instanceof SeaError && /^fence_/.test(e.code)) results.push({ ticket_id: id, released: false, reason: e.code });
           else throw e;
         }
-        delete held[id];
       }
-      writeCliClaims(dataDir, held);
+      // Forget only the tokens this command used, re-read under the lock (another CLI may have added its own since).
+      updateCliClaims(dataDir, (claims) => {
+        for (const id of ids) if (claims[id]?.token === held[id]?.token) delete claims[id];
+      });
       out(flags, { released: results }, () =>
         results.length === 0
           ? 'nothing to release\n'
@@ -693,7 +742,13 @@ async function serveCmd(flags: Args['flags']): Promise<number> {
   // client (per-request _meta) and a 2025 client (initialize handshake)
   // are both served from the same factory. The store is shared; each
   // pinned instance is a fresh McpServer over it.
-  const transport = new StdioServerTransport();
+  // P2-05 / F11: an over-limit stdin line is answered with a JSON-RPC error instead of closing the server.
+  const guard = new StdioLineGuard(
+    (line) => process.stdout.write(line),
+    (msg) => process.stderr.write(msg + '\n'),
+  );
+  process.stdin.pipe(guard);
+  const transport = new StdioServerTransport(guard, process.stdout, { maxBufferSize: MAX_STDIO_LINE_BYTES + 1024 * 1024 });
   const handle = serveStdio(() => createServer(store, { version: VERSION, profile }), {
     transport,
     onerror: (err) => process.stderr.write(`sea-lite: ${err.message}\n`),
@@ -1003,14 +1058,18 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
   const dataDir = store.kronicle.dataDir ?? dataDirOf(flags);
   let bearer: string;
   let bearerNote: string;
+  const tokenFileOpts = { allowInsecure: flags['allow-insecure-token-file'] === true };
   if (str(flags['bearer']) !== undefined) {
     bearer = str(flags['bearer'])!;
     bearerNote = 'bearer from --bearer';
   } else if (str(flags['bearer-file']) !== undefined) {
     bearer = readBearerFile(str(flags['bearer-file'])!);
+    const warning = checkTokenFileMode(str(flags['bearer-file'])!, tokenFileOpts);
+    if (warning !== null) process.stderr.write(`sea-lite: ${warning}\n`);
     bearerNote = `bearer from ${str(flags['bearer-file'])}`;
   } else {
-    const b = loadOrCreateBearer(dataDir);
+    const b = loadOrCreateBearer(dataDir, tokenFileOpts);
+    if (b.warning !== null) process.stderr.write(`sea-lite: ${b.warning}\n`);
     bearer = b.token;
     bearerNote = `bearer from ${b.file}${b.created ? ' (created, mode 0600)' : ''}`;
   }
@@ -1021,6 +1080,7 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
     actors = readActorsFile(actorsFile);
     bearerNote += `; ${actors.length} actor token(s) from ${actorsFile}`;
   }
+  bearerNote += ' (re-read on change)';
   const allowedOrigins = list(flags['allow-origin']);
   const allowedHosts = list(flags['allow-host']);
   const port = num(flags['port'], 'port');
@@ -1032,6 +1092,7 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
     store,
     bearer,
     actors,
+    actorsFile,
     version: VERSION,
     ...(legacyFlag !== undefined ? { legacy: legacyFlag } : {}),
     profile: profileOf(flags),

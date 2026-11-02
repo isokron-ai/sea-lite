@@ -7,7 +7,7 @@
 import type { ChainEvent, ChainHead, VerifyChainResult } from 'kronicle-lite';
 
 import { SEA_EVENT_PREFIXES } from '../core/events.js';
-import { resolveId, type Ctx } from '../core/repo.js';
+import { jsonBytes, resolveId, RESPONSE_BUDGET_DEFAULT, type Ctx } from '../core/repo.js';
 import type { HistoryInput } from '../model/schemas.js';
 
 export interface HistoryEntry {
@@ -27,7 +27,10 @@ export interface HistoryResult {
   count: number;
   /** Highest seq returned; pass as since_seq to continue the feed. */
   last_seq: number | null;
+  /** More events follow (limit or the byte budget): call again with since_seq = last_seq. */
   truncated: boolean;
+  /** 0.6.1: present (true) when the byte budget, not `limit`, ended the page. */
+  budget_truncated?: true;
   head: ChainHead;
   chain: {
     verified: boolean | null;
@@ -79,13 +82,31 @@ export function history(ctx: Ctx, input: HistoryInput): HistoryResult {
         .all(...PREFIX_PARAMS, input.since_seq ?? 0, input.limit + 1) as { seq: number }[]
     ).map((r) => r.seq);
   }
-  const truncated = seqs.length > input.limit;
   const page = seqs.slice(0, input.limit);
+  // P2-03: a byte budget per response. Stop before the event that would exceed it; the first event is
+  // always returned so a page advances, with its payload elided when that alone is over the budget (a
+  // sea.batch_applied event carries every ticket of the batch).
+  const budget = ctx.maxResponseBytes ?? RESPONSE_BUDGET_DEFAULT;
   const events: HistoryEntry[] = [];
+  let used = 0;
+  let budgetCut = false;
   for (const s of page) {
     const ev = ctx.chain.get(s);
-    if (ev) events.push(toEntry(ev));
+    if (!ev) continue;
+    let entry = toEntry(ev);
+    let size = jsonBytes(entry) + 1;
+    if (events.length > 0 && used + size > budget) {
+      budgetCut = true;
+      break;
+    }
+    if (size > budget) {
+      entry = { ...entry, payload: { elided: true, payload_bytes: jsonBytes(entry.payload), reason: 'payload exceeds the response budget (SEA_LITE_MAX_RESPONSE_BYTES)' } };
+      size = jsonBytes(entry) + 1;
+    }
+    events.push(entry);
+    used += size;
   }
+  const truncated = seqs.length > input.limit || budgetCut;
   const head = ctx.chain.head();
   let chain: HistoryResult['chain'] = { verified: null, events_checked: null, first_mismatch: null };
   if (input.verify) {
@@ -100,6 +121,7 @@ export function history(ctx: Ctx, input: HistoryInput): HistoryResult {
     count: events.length,
     last_seq: events.length > 0 ? events[events.length - 1]!.seq : null,
     truncated,
+    ...(budgetCut ? { budget_truncated: true as const } : {}),
     head,
     chain,
   };

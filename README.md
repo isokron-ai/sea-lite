@@ -210,8 +210,8 @@ npx sea-lite add-token --actor agent-b
 | Flag | Default | |
 | --- | --- | --- |
 | `--port N` / `--host H` | `7418` / `127.0.0.1` | kronicle-lite's `serve --http` is 7417 |
-| `--bearer T` / `--bearer-file F` | `<data dir>/http-bearer.token` (created `0600`) | the shared owner token (same file kronicle-lite uses) |
-| `--actors-file F` | `<data dir>/http-actors.json` if present | per-actor tokens from `add-token` (sha256 only, `0600`) |
+| `--bearer T` / `--bearer-file F` | `<data dir>/http-bearer.token` (created `0600`) | the shared owner token (same file kronicle-lite uses); a token file group or others can read is refused unless `--allow-insecure-token-file` |
+| `--actors-file F` | `<data dir>/http-actors.json` if present | per-actor tokens from `add-token` (sha256 only, `0600`); re-read when it changes, so `add-token` works without a restart |
 | `--allow-origin H,..` / `--allow-host H,..` | loopback only | DNS-rebinding defence; add the names clients use |
 | `--legacy stateless\|reject` | `stateless` | serve 2025-era `initialize` clients, or refuse them with -32022 |
 | `--project KEY\|*` | `*` (every project) | the project this server's queue belongs to |

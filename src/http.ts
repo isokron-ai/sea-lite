@@ -21,11 +21,13 @@
 import { createMcpHandler, type McpRequestContext } from '@modelcontextprotocol/server';
 import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from 'node:http';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { z } from 'zod';
 
+import { SeaError } from './core/errors.js';
+import { CorruptFileError, ensureDir, readOrCreateOnce } from './core/once-file.js';
 import { ROLES, type Role } from './model/enums.js';
 import { createServer, type Profile } from './server.js';
 import type { SeaLite } from './store.js';
@@ -43,21 +45,44 @@ const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
 
 // ───────────────────────────── tokens ─────────────────────────────
 
+export interface TokenFileOptions {
+  /** Use a token file that group or others can read (P2-13); a warning is returned instead of an error. */
+  allowInsecure?: boolean;
+}
+
+/**
+ * P2-13 (0.6.1): a token file other users can read is refused (it was used
+ * silently), unless `allowInsecure`, which turns it into a warning. POSIX
+ * only: Windows has no mode bits to check.
+ */
+export function checkTokenFileMode(file: string, opts: TokenFileOptions = {}): string | null {
+  if (process.platform === 'win32') return null;
+  const mode = statSync(file).mode & 0o777;
+  if ((mode & 0o077) === 0) return null;
+  const text = `${file} is readable by group or others (mode 0${mode.toString(8)}); run chmod 600 on it`;
+  if (opts.allowInsecure !== true) throw new SeaError('invalid_input', `${text}, or pass --allow-insecure-token-file`, { reason: 'insecure_token_file', file, mode: `0${mode.toString(8)}` });
+  return `warning: ${text} (used because of --allow-insecure-token-file)`;
+}
+
 /**
  * Read the bearer token from `<dataDir>/http-bearer.token`, creating a random
- * 256-bit one with mode 0600 when absent.
+ * 256-bit one with mode 0600 when absent. 0.6.1 (P2-07): creation is atomic
+ * and exclusive (core/once-file.ts), so servers starting together on a fresh
+ * data dir all agree on one token instead of one crashing with EEXIST or
+ * "empty"; the data dir is created when missing.
  */
-export function loadOrCreateBearer(dataDir: string): { token: string; created: boolean; file: string } {
+export function loadOrCreateBearer(dataDir: string, opts: TokenFileOptions = {}): { token: string; created: boolean; file: string; warning: string | null } {
+  ensureDir(dataDir);
   const file = join(dataDir, BEARER_FILE_NAME);
-  if (existsSync(file)) {
-    const token = readFileSync(file, 'utf8').trim();
-    if (token.length === 0) throw new Error(`${file} is empty; delete it to regenerate or pass --bearer`);
-    return { token, created: false, file };
+  let r: { value: string; created: boolean };
+  try {
+    r = readOrCreateOnce(file, () => newToken() + '\n', (text) => (text.trim().length > 0 ? text.trim() : null));
+  } catch (err) {
+    if (err instanceof CorruptFileError) throw new SeaError('invalid_input', `${file} is empty; delete it to regenerate or pass --bearer`, { file });
+    throw err;
   }
-  const token = newToken();
-  writeFileSync(file, token + '\n', { mode: 0o600, flag: 'wx' });
-  chmodSync(file, 0o600);
-  return { token, created: true, file };
+  const warning = r.created ? null : checkTokenFileMode(file, opts);
+  return { token: r.value, created: r.created, file, warning };
 }
 
 export function readBearerFile(file: string): string {
@@ -134,6 +159,7 @@ export function readActorsFile(file: string): ActorToken[] {
  * 0600; rewritten atomically) and return the plaintext — shown once.
  */
 export function addActorToken(file: string, actor: string, role?: Role): { token: string; file: string; created: boolean } {
+  ensureDir(dirname(file)); // P2-12: a fresh machine has no data dir yet
   const created = !existsSync(file);
   const doc: ActorsFile = created ? { actors: [] } : ActorsFile.parse(JSON.parse(readFileSync(file, 'utf8')));
   parseActorsFile(JSON.stringify(doc), file); // the existing file must already be valid
@@ -192,6 +218,14 @@ export interface HttpServeOptions {
   bearer: string;
   /** Per-actor tokens (from the actors file). */
   actors?: readonly ActorToken[];
+  /**
+   * 0.6.1 (P2-12): the actors file to follow. Re-read when its mtime, size or
+   * inode changes (one stat per request), so `add-token` after start works
+   * without a restart; a missing file means no actor tokens; a file that does
+   * not parse keeps the previous table (reported through onerror). Replaces
+   * `actors` once the file is first read.
+   */
+  actorsFile?: string;
   host?: string;
   port?: number;
   path?: string;
@@ -237,8 +271,44 @@ export function createHttpListener(opts: HttpServeOptions): {
   if (!opts.bearer || opts.bearer.length < MIN_TOKEN_CHARS) throw new Error(`bearer token must be at least ${MIN_TOKEN_CHARS} characters`);
   const store = opts.store;
   const shared = { digest: createHash('sha256').update(opts.bearer, 'utf8').digest(), actor: store.actor, role: store.role };
-  const actors = (opts.actors ?? []).map((entry) => ({ digest: Buffer.from(entry.token_sha256, 'hex'), entry }));
-  if (actors.some((a) => a.digest.equals(shared.digest))) throw new Error('an actor token equals the shared bearer; give each actor its own token');
+  const table = (list: readonly ActorToken[]) => {
+    const t = list.map((entry) => ({ digest: Buffer.from(entry.token_sha256, 'hex'), entry }));
+    if (t.some((a) => a.digest.equals(shared.digest))) throw new Error('an actor token equals the shared bearer; give each actor its own token');
+    return t;
+  };
+  let actors = table(opts.actors ?? []);
+  let actorsSig: string | null = null;
+  const reloadActors = (): void => {
+    const file = opts.actorsFile;
+    if (file === undefined) return;
+    let sig: string;
+    try {
+      const st = statSync(file);
+      sig = `${st.ino}:${st.size}:${st.mtimeMs}`;
+    } catch {
+      sig = 'absent';
+    }
+    if (sig === actorsSig) return;
+    try {
+      actors = sig === 'absent' ? [] : table(readActorsFile(file));
+      actorsSig = sig;
+    } catch (err) {
+      actorsSig = sig; // report a bad file once, keep the previous table
+      opts.onerror?.(new Error(`actors file not reloaded, keeping the previous tokens: ${err instanceof Error ? err.message : String(err)}`));
+    }
+  };
+  if (opts.actorsFile !== undefined) {
+    // The first read must succeed (a broken file at start is an error, as before).
+    try {
+      const st = statSync(opts.actorsFile);
+      actorsSig = `${st.ino}:${st.size}:${st.mtimeMs}`;
+      actors = table(readActorsFile(opts.actorsFile));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      actorsSig = 'absent';
+      actors = table(opts.actors ?? []);
+    }
+  }
   const path = opts.path ?? DEFAULT_HTTP_PATH;
   const host = opts.host ?? '127.0.0.1';
   const allowedHosts = [...new Set([...LOOPBACK, host.includes(':') && !host.startsWith('[') ? `[${host}]` : host, ...(opts.allowedHosts ?? [])])];
@@ -269,6 +339,7 @@ export function createHttpListener(opts: HttpServeOptions): {
     // Order: Host (rebinding) → Origin (browser cross-site) → bearer → MCP.
     if (!validateHost(req, res)) return;
     if (!validateOrigin(req, res)) return;
+    reloadActors();
     const identity = resolveIdentity(bearerOf(req), shared, actors);
     if (identity === null) {
       reject(res, 401, 'missing or invalid bearer token', { 'WWW-Authenticate': 'Bearer realm="sea-lite"' });
