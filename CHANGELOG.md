@@ -4,6 +4,79 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.6.1] — 2026-11-01
+
+Fixes from hardening round 2 (hooks, protocol and chaos tracks) and the live
+full-stack runs, plus kronicle-lite ^0.8.0.
+
+### Fixed
+
+- **Scope paths (H2-23).** A dangling symlink into a claim
+  (`dangling → src/handlers/nope.ts`) was kept as written, so `scope-check`
+  passed and a write through it created a file inside the claim. A dangling
+  link now names its target, resolved lexically from the link's directory
+  (chains follow; a loop stops after 40 hops and is kept as written; a target
+  outside the repository is `outside_repo`, like any escaping link). And
+  `src/../src/x` was refused (exit 2, "must not climb out"): `..` that stays
+  inside the repository is now resolved — lexically without a root, on disk
+  with one (after a symlinked directory, `..` is the target's parent, as for
+  the OS). Climbing above the root, or `..` after a glob, is still
+  `invalid_input`.
+- **Response budget for `sea_list` / `sea_history` (P2-03).** 200 tickets with
+  schema-max bodies made a 38 MiB line (34–95 s, event loop blocked) and
+  killed the TS stdio client. A page now stops before the item that would
+  exceed `SEA_LITE_MAX_RESPONSE_BYTES` (default 256 KiB; 1 KiB–4 MiB; store
+  option `maxResponseBytes`), always with at least one item:
+  `sea_list` continues with `next_cursor`, `sea_history` with
+  `since_seq = last_seq` (`truncated`); both add `budget_truncated: true` when
+  the budget, not `limit`, ended the page. A single history event over the
+  budget (a large `sea.batch_applied`) comes back with its payload elided.
+  `sea_list` sorts ids only and reads rows one at a time.
+- **Concurrent first start of `serve --http` (P2-07).** The bearer file was
+  check-then-create, so one of two servers starting on a fresh data dir could
+  exit (`EEXIST`, or "token is empty"). It is now created exclusively (temp
+  file + link, kronicle-lite's recipe), an empty file is re-read for up to
+  2 s, and the data dir is created when missing.
+- **Over-limit stdio messages (P2-05 / F11).** A request line over 10 MiB made
+  `serve` exit 0 with no reply. It is now discarded as it streams and
+  answered with JSON-RPC `-32600` carrying the request's id; the server stays
+  up.
+- **CLI claim tokens under concurrency (C2-02).** `cli-claims.json` was an
+  unlocked read-modify-write: 40 concurrent CLI claims lost up to 34 tokens,
+  and those claims could not be released until their leases lapsed. Updates
+  now hold an exclusive lock file (stale after 30 s); `release` forgets only
+  the tokens it used.
+- **HTTP team mode (P2-12).** The actors file is re-read when it changes (one
+  `stat` per request), so `add-token` after `serve --http` works without the
+  restart the README never mentioned; a file that does not parse keeps the
+  previous tokens. `add-token` on a machine with no data dir creates it (was
+  an `ENOENT` stack trace). The force-release refusal names the caller's role
+  and how an HTTP token gets `operator`.
+- **Token file modes (P2-13).** A pre-existing bearer file (or
+  `--bearer-file`) that group or others can read was used silently; it is now
+  refused at start unless `--allow-insecure-token-file`, which warns.
+- **Project keys (kronicle-lite 0.8.0 recipe).** A missing path in a non-git
+  directory was keyed as spelled, so `<link>/new` and `<real>/new` were two
+  projects; it now resolves through its nearest existing ancestor.
+- **Server instructions overflowed** their 512-char budget (513) for an
+  operator with a long actor in the core profile, which made `serve` throw.
+
+### Changed
+
+- **The session is kept out of kronicle-lite actor ids (L2-06).** Agents
+  copied sea-lite's `agent-A#<session>` into their kronicle-lite `actor_id` in
+  13 of 96 live sessions, splitting pending items and lineage by session. The
+  instructions now read `You are "agent-A" (role agent; session 1a2b3c4d:
+  sea-lite only, not in a kronicle-lite actor_id).`, and the work-queue skill
+  and `holder_label` say the same. The instructions show the actor up to 24
+  characters.
+- kronicle-lite `^0.8.0` (was `^0.7.0`). sea-lite's project keys and scope
+  paths are its own (no table is shared with kronicle-lite's project keys);
+  the full suite passes on 0.8.0 unchanged.
+- F15 (`scope-check -- PATH`) was already fixed in 0.6.0; regression cases
+  added for an option-looking word after `--` and a value flag right before
+  it.
+
 ## [0.6.0] — 2026-11-01
 
 Wait for a claim instead of polling for it. Measured by agent-memory-bench

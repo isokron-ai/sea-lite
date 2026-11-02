@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T18:30:23.567Z",
+  "capturedAt": "2026-11-02T01:47:25.876Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -769,6 +769,10 @@
         "name": "sea_history",
         "outputSchema": {
           "properties": {
+            "budget_truncated": {
+              "description": "The response byte budget, not limit, ended this page.",
+              "type": "boolean"
+            },
             "chain": {
               "description": "{verified,events_checked,first_mismatch}",
               "type": "object"
@@ -809,6 +813,7 @@
               ]
             },
             "truncated": {
+              "description": "More events follow: call again with since_seq = last_seq.",
               "type": "boolean"
             }
           },
@@ -1074,6 +1079,10 @@
         "name": "sea_list",
         "outputSchema": {
           "properties": {
+            "budget_truncated": {
+              "description": "The response byte budget ended this page before limit; next_cursor continues.",
+              "type": "boolean"
+            },
             "count": {
               "type": "number"
             },
@@ -1858,7 +1867,7 @@
   "protocolVersion": "2025-11-25",
   "server": {
     "name": "sea-lite",
-    "version": "0.6.0"
+    "version": "0.6.1"
   },
-  "sha256": "66072f5f09cf044df2385bf74aab55d229416766c3a84c6609985c58b5f1782e"
+  "sha256": "49eaa556e5cd2dc2a667c01737eb257142a498027ea73ff85910e0a0314485db"
 }
