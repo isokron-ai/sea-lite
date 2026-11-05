@@ -12,8 +12,8 @@ import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/s
 import { defaultDataDir } from 'kronicle-lite';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { SeaError } from './core/errors.js';
 import {
@@ -172,7 +172,8 @@ Audits (driven by the mcp-audit runner through the library; these are the human 
   sea-lite audit queue  AUDIT [--json]                     findings whose gates are all resolved, awaiting review
   sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P] [--note N]
   sea-lite audit export AUDIT [--format csv|xlsx] [--out FILE]   the findings tracker (CSV to stdout by default)
-  sea-lite audit import AUDIT FILE.csv                     upsert an analysis pass's findings.csv by finding id
+  sea-lite audit import AUDIT FILE.csv [--trusted]         upsert a findings.csv by finding id; gate results land as
+                     claims unless --trusted (operator role)
   sea-lite lease show NAME [--json] | lease release NAME --force   named leases (e.g. sandbox:ID)
 
 Common flags: --data-dir DIR (default $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite, shared with kronicle-lite),
@@ -1177,16 +1178,25 @@ function auditCmd(positional: string[], flags: Args['flags']): number {
         process.stdout.write(data);
         return 0;
       }
-      // why: a tracker carries unreported vulnerabilities; 0600 also when the file existed with wider bits.
-      writeFileSync(file, data, { mode: 0o600 });
-      chmodSync(file, 0o600);
+      // why: a tracker carries unreported vulnerabilities. Written to a fresh 0600
+      // temp file (O_EXCL, never through a link) and renamed over the path, so a
+      // symlink or hard link planted at --out is replaced, not written through.
+      const tmpOut = join(dirname(resolve(file)), `.${basename(file)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+      const fd = openSync(tmpOut, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+      try {
+        writeSync(fd, typeof data === 'string' ? Buffer.from(data, 'utf8') : data);
+        fchmodSync(fd, 0o600);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmpOut, file);
       process.stderr.write(`wrote ${file} (${store.auditRows(audit).length} findings)\n`);
       return 0;
     }
     case 'import': {
       const file = rest[0];
       if (file === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit import AUDIT_ID FILE.csv (- = stdin)');
-      const r = store.auditImport(audit, readFileSync(file === '-' ? 0 : file, 'utf8'));
+      const r = store.auditImport(audit, readFileSync(file === '-' ? 0 : file, 'utf8'), { trusted: flags['trusted'] === true });
       out(flags, r, () => `created ${r.created}, updated ${r.updated}, unchanged ${r.unchanged}; ${r.queued} entered the review queue\n`);
       return 0;
     }

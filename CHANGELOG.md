@@ -46,6 +46,34 @@ uses semantic versioning once past 0.x.
   audit templates via `sea_apply` — the runner orchestrates passes in code
   and creates finding tickets only after refutation.
 
+### Fixed before release (#6, review of #5)
+
+- **No raw credential in the chain.** A lease intent's `op` and the audit
+  title were chained unredacted (a `ghp_` token was confirmed in the events
+  table). Free text is now redacted everywhere the audit layer writes, and
+  identity strings (ids, refs, lease names, idempotency keys, token-typed
+  fields) that look like a credential are `invalid_input`.
+- **Redaction gaps.** Keys glued to `_` (`_ghp_…_`, `key_phx_…`,
+  `phx_…_x`) and URL-encoded or base64 / base64url keys are now caught
+  (`src/audit/redact.ts`), with tests that use bare keys.
+- **`--out` followed symlinks** (overwrote and chmodded the target). It now
+  writes an `O_EXCL | O_NOFOLLOW` 0600 temp file and renames it over the path.
+- **Self-approving CSV.** An imported `<gate>_result` is recorded as a claim
+  (`claimed_result`, exported `claimed:pass`) that never counts toward
+  review; `auditImport(…, { trusted: true })` / `audit import --trusted`
+  (operator role) records results.
+- **Decisions survived changes.** Any change of substance (title, a
+  non-bookkeeping field such as severity or summary, a gate's result / note /
+  evidence) sends approved / rejected / hold back to `pending`; a gate back
+  to `pending` takes the finding out of the queue.
+- **Probe tampering.** A hard link at the probe path was truncated, and a
+  planted symlink / FIFO switched the guard off. A plant is now unlinked
+  (never touching its target) and the probe recreated exclusively; a plant
+  that cannot be removed fails closed (`clock_skew`, `reason:
+  probe_tampered`; doctor `clock` check fails). Only an unwritable data dir
+  still fails open, with a warning.
+- **Short rows.** Import refuses a row with fewer cells than the header.
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to

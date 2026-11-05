@@ -250,16 +250,17 @@ describe('export and import', () => {
     expect((store.auditExport('posthog-2', 'xlsx') as Buffer).equals(buf)).toBe(true);
   });
 
-  it('import of an analysis pass findings.csv: idempotent by finding id, gate results from their own columns, all-or-nothing', () => {
-    const { store } = audit();
+  it('trusted import of a findings.csv: idempotent by finding id, gate results from their own columns, all-or-nothing', () => {
+    const { store: s0 } = audit();
+    const store = new SeaLite({ kronicle: s0.kronicle, actor: 'mcp-audit', role: 'operator' });
     const cols = ['id', 'title', 'verdict', 'confidence', 'component', 'gate1_repro', 'repro_result', 'intent_result', 'docs_result', 'prior_reports_result', 'refuter_result'];
     const csv = toCsv(cols, [
       { id: 'K1', title: 'guidance contradicts schema', verdict: 'bug', confidence: 'high', component: 'guidance', gate1_repro: 'seen live', repro_result: 'pass', intent_result: 'pass', docs_result: 'n/a', prior_reports_result: 'pass', refuter_result: 'pass' },
       { id: 'K2', title: 'untyped node', verdict: 'design-gap', confidence: 'low', component: 'schema', gate1_repro: 'pass: reproduced twice', repro_result: '', intent_result: '', docs_result: '', prior_reports_result: '', refuter_result: '' },
     ]);
-    expect(store.auditImport('posthog-2', csv)).toEqual({ created: 2, updated: 0, unchanged: 0, queued: 1 });
+    expect(store.auditImport('posthog-2', csv, { trusted: true })).toEqual({ created: 2, updated: 0, unchanged: 0, queued: 1 });
     const head = store.chain.head().seq;
-    expect(store.auditImport('posthog-2', csv)).toEqual({ created: 0, updated: 0, unchanged: 2, queued: 0 });
+    expect(store.auditImport('posthog-2', csv, { trusted: true })).toEqual({ created: 0, updated: 0, unchanged: 2, queued: 0 });
     expect(store.chain.head().seq).toBe(head);
     const rows = parseCsv(store.auditExport('posthog-2', 'csv') as string).rows;
     expect(rows.find((r) => r['id'] === 'K1')).toMatchObject({ gate1_repro: 'seen live', repro_result: 'pass', review: 'pending' });

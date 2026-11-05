@@ -38,8 +38,9 @@ describe('sea-lite audit / lease', () => {
         'X1,"dispatcher drops ""limit""",bug,pass,pass,n/a,pass,pass\n' +
         'X2,second,design-gap,,,,,\n',
     );
-    expect(sl(['audit', 'import', 'ph2', csv, '--json'])).toMatchObject({ code: 0 });
-    expect(JSON.parse(sl(['audit', 'import', 'ph2', csv, '--json']).out)).toEqual({ created: 0, updated: 0, unchanged: 2, queued: 0 });
+    expect(sl(['audit', 'import', 'ph2', csv, '--trusted', '--json'])).toMatchObject({ code: 2, err: expect.stringMatching(/^forbidden/) });
+    expect(sl(['audit', 'import', 'ph2', csv, '--trusted', '--role', 'operator', '--json'])).toMatchObject({ code: 0 });
+    expect(JSON.parse(sl(['audit', 'import', 'ph2', csv, '--trusted', '--role', 'operator', '--json']).out)).toEqual({ created: 0, updated: 0, unchanged: 2, queued: 0 });
     const q = JSON.parse(sl(['audit', 'queue', 'ph2', '--json']).out) as { items: { finding_id: string }[] };
     expect(q.items.map((i) => i.finding_id)).toEqual(['X1']);
     expect(sl(['audit', 'review', 'ph2', 'X1', 'approved', '--plan', 'PR wave 1'])).toMatchObject({ code: 0, out: expect.stringMatching(/^X1: approved/) });

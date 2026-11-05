@@ -68,7 +68,9 @@ desynchronize it.
 
 ### `sea_fields`, `sea_field_heads` (0.7.0)
 
-Typed fields (`src/audit/fields.ts`, a closed registry): `ticket_id`, `name`,
+Typed fields (`src/audit/fields.ts`, a closed registry; a gate's
+`claimed_result` is what an untrusted import said, `result` what was
+recorded): `ticket_id`, `name`,
 `value` (TEXT in the field's type), `set_seq`; one row per set field.
 `sea_field_heads` holds each ticket's fields `version` and `last_seq`. The
 ticket row and its `row_version` are not touched, so a pre-0.7 build opens

@@ -283,6 +283,7 @@ function checkClock(dataDir: string, now: Date): DoctorCheck {
   let why: string | null = null;
   const ref = fsReference(dataDir, (m) => (why = m))();
   if (ref === null) return { id: 'clock', status: 'warn', detail: why ?? 'clock probe failed; lease decisions trust each process clock' };
+  if (typeof ref === 'object') return { id: 'clock', status: 'fail', detail: `clock probe tampered with: ${ref.tampered}; claims and leases will be refused until it is removed` };
   let max: number;
   try {
     max = parseMaxSkew(process.env['SEA_LITE_MAX_CLOCK_SKEW_SECONDS']);

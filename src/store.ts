@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 
 import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kronicle-lite';
 
-import { clockGuard, fsReference, parseMaxSkew, type ClockGuard } from './core/clock.js';
+import { clockGuard, fsReference, parseMaxSkew, type ClockGuard, type Reference } from './core/clock.js';
 import { SeaError } from './core/errors.js';
 import { isBusy, resolveId, tx, type Ctx } from './core/repo.js';
 import { SEA_MIGRATIONS, SEA_NEWEST_TABLE, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
@@ -69,7 +69,7 @@ export interface SeaLiteOptions {
    * clock differs from it by more than SEA_LITE_MAX_CLOCK_SKEW_SECONDS
    * (default 30; 0 disables). See core/clock.ts.
    */
-  clockReference?: () => number | null;
+  clockReference?: () => Reference;
   /**
    * 0.6.1 (P2-03): byte budget for one sea_list / sea_history response's
    * items (UTF-8 JSON). A page stops before the item that would exceed it and
@@ -424,10 +424,16 @@ export class SeaLite {
    * row by its `id` column, in one transaction (all rows or none). Strict:
    * an unterminated quote, a ragged row, a duplicate or unknown column and a
    * duplicate id are `invalid_input` naming the row. Gate results come from
-   * the `<gate>_result` columns only, never from the gate note text;
+   * the `<gate>_result` columns only, never from the gate note text, and
+   * land as *claims* (`claimed:pass`, not counted toward review) unless the
+   * import is `trusted` (operator role only: an agent-written CSV must not be
+   * able to pass its own gates). A `claimed:…` cell is always a claim.
    * `ticket_id` and `review` are accepted and ignored.
    */
-  auditImport(audit_id: string, csv: string): { created: number; updated: number; unchanged: number; queued: number } {
+  auditImport(audit_id: string, csv: string, opts: { trusted?: boolean } = {}): { created: number; updated: number; unchanged: number; queued: number } {
+    if (opts.trusted && this.role !== 'operator') {
+      throw new SeaError('forbidden', `a trusted import (gate results recorded as results) needs the operator role; "${this.actor}" acts as ${this.role}`);
+    }
     const { header, rows, lines } = exportH.parseCsv(csv);
     if (!header.includes('id') || !header.includes('title')) throw new SeaError('invalid_input', 'findings.csv needs an id and a title column', { header });
     for (const h of header) {
@@ -460,7 +466,13 @@ export class SeaLite {
             const f = auditH.IMPORT_COLUMNS[col]!;
             if (v !== '') fields[f] = f === 'affected_count' && /^\d+$/.test(v) ? Number(v) : raw;
           } else if (Object.hasOwn(auditH.IMPORT_GATE_COLUMNS, col)) gate(auditH.IMPORT_GATE_COLUMNS[col]!).note = raw === '' ? null : raw;
-          else if (Object.hasOwn(auditH.IMPORT_GATE_RESULT_COLUMNS, col) && v !== '') gate(auditH.IMPORT_GATE_RESULT_COLUMNS[col]!).result = v;
+          else if (Object.hasOwn(auditH.IMPORT_GATE_RESULT_COLUMNS, col) && v !== '') {
+            const g = gate(auditH.IMPORT_GATE_RESULT_COLUMNS[col]!);
+            const claim = /^claimed:(.*)$/.exec(v);
+            if (claim) g.claimed = claim[1]!;
+            else if (opts.trusted) g.result = v;
+            else if (v !== 'pending') g.claimed = v;
+          }
         }
         let res: auditH.UpsertFindingResult;
         try {

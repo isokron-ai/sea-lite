@@ -22,7 +22,7 @@ import { EVENT } from '../core/events.js';
 import { assertClockTrusted } from '../core/clock.js';
 import { clampLease, expiryFrom, hashToken, newClaimToken, tokenMatches } from '../core/fence.js';
 import { tx, uuid, type Ctx } from '../core/repo.js';
-import { redactText } from './fields.js';
+import { looksLikeSecret, redactText } from './redact.js';
 import type { Db } from 'kronicle-lite';
 
 export interface LeaseRow {
@@ -53,6 +53,13 @@ const NAME = /^[A-Za-z0-9._:@/-]{1,200}$/;
 
 function checkName(name: string): void {
   if (!NAME.test(name)) throw new SeaError('invalid_input', 'lease name: 1-200 of letters, digits and ._:@/-', { name });
+  if (looksLikeSecret(name)) throw new SeaError('invalid_input', 'lease name looks like a credential; refusing to chain it');
+}
+
+/** Identity-like strings (keys, refs) are refused when they look like a credential; free text is redacted. */
+function refuseSecret(value: string, what: string): string {
+  if (looksLikeSecret(value)) throw new SeaError('invalid_input', `${what} looks like a credential; refusing to chain it`, { field: what });
+  return value;
 }
 
 function getLease(db: Db, name: string): LeaseRow | null {
@@ -249,9 +256,9 @@ export function openIntent(ctx: Ctx, input: { name: string; token: string; op: s
       intent_id,
       name: input.name,
       epoch: row.epoch,
-      op: input.op,
+      op: redactText(input.op, 'op').text,
       ...(input.target !== undefined ? { target: redactText(input.target.slice(0, 500), 'target').text } : {}),
-      ...(input.idempotency_key !== undefined ? { idempotency_key: redactText(input.idempotency_key.slice(0, 200), 'idempotency_key').text } : {}),
+      ...(input.idempotency_key !== undefined ? { idempotency_key: refuseSecret(input.idempotency_key.slice(0, 200), 'idempotency_key') } : {}),
       opened_by: ctx.actor,
       opened_at: ctx.now.toISOString(),
     });
@@ -283,7 +290,7 @@ export function closeIntent(
       outcome: input.outcome,
       was: it.state,
       closed_by: ctx.actor,
-      ...(input.evidence_ref !== undefined ? { evidence_ref: input.evidence_ref.slice(0, 128) } : {}),
+      ...(input.evidence_ref !== undefined ? { evidence_ref: refuseSecret(input.evidence_ref.slice(0, 128), 'evidence_ref') } : {}),
     });
     return { intent_id: input.intent_id, state: input.outcome };
   });

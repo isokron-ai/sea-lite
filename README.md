@@ -666,8 +666,12 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   `review`, and the tracker's text columns. Unknown names and bad values are
   `invalid_input`; `expect_version` guards concurrent writers. Identity
   fields, gate results and `review` are managed: only the audit calls set
-  them. Credential-shaped text (kronicle-lite's write-time detectors, plus
-  PostHog `phx_` keys) is redacted before it is chained.
+  them. Nothing credential-shaped reaches the append-only chain: free text
+  (titles, notes, evidence, a lease intent's `op` / `target`) is redacted —
+  kronicle-lite's write-time detectors, plus vendor key shapes matched
+  without word boundaries (`_ghp_…_`, `key_phx_…`) and URL-encoded or
+  base64 runs decoded and checked — and identity strings (ids, refs, lease
+  names, idempotency keys) that look like a credential are refused.
 - **Findings and gates**: tickets live in project `audit:<id>`, so they stay
   out of every code project's `sea_next` / `sea_list`. A finding gets gate
   sub-tickets `repro`, `intent`, `docs`, `prior_reports`, `refuter`
@@ -676,8 +680,11 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
 - **Human review queue**: once every gate has a result (`pass | fail | n/a`)
   the finding is `review: pending`; `sea-lite audit queue AUDIT`, then
   `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]`.
-  An approval goes back to `pending` when a gate turns `fail` or the verdict
-  changes.
+  A decision (approved / rejected / hold) goes back to `pending` when the
+  title, a finding field other than tracker bookkeeping (`pr_or_issue`,
+  `submitted_date`, `tracker_status`, `submit_plan`, `review_note`), or a
+  gate's result / note / evidence changes; a gate back to `pending` takes
+  the finding out of the queue.
 - **Export / import**: `sea-lite audit export AUDIT [--format csv|xlsx] [--out F]`
   (mode 0600) writes the PostHog tracker's columns in order (gate columns hold
   the gate notes), then one `<gate>_result` column per gate, `review`,
@@ -687,8 +694,13 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   `sea-lite audit import AUDIT findings.csv` upserts by `id` in one
   transaction; it undoes the `'` guard (export → import round-trips), takes
   gate results only from the `<gate>_result` columns, and refuses an
-  unterminated quote, a ragged row, a duplicate or unknown column and a
-  duplicate id, naming the row.
+  unterminated quote, a row with more or fewer cells than the header, a
+  duplicate or unknown column and a duplicate id, naming the row. Imported
+  gate results are **claims** (`claimed:pass`; they never count toward
+  review) unless the import is `--trusted`, which needs the operator role:
+  an agent-written CSV cannot pass its own gates. `--out` writes a fresh
+  0600 file and renames it into place, so a planted link is replaced, never
+  written through.
 
 ## Limitations (read these)
 
