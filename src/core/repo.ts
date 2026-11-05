@@ -42,6 +42,8 @@ export interface Ctx {
   readonly role: Role;
   readonly lifecycle: LifecycleConfig;
   readonly now: Date;
+  /** Random per SeaLite instance (≈ per process): a named lease's holder is actor + instance (audit/lease.ts). */
+  readonly instance?: string;
   /** C2-06: lease decisions are refused while this process's clock is skewed (core/clock.ts). */
   readonly clock?: ClockGuard;
   /** Byte budget of one sea_list / sea_history page (P2-03); default DEFAULT_MAX_RESPONSE_BYTES. */
@@ -138,12 +140,12 @@ export function sweepExpired(ctx: Ctx, row: TicketRow): TicketRow {
 
 /** Sweep every expired lease in the table (used by list/next so the queue view is honest). */
 export function sweepAllExpired(ctx: Ctx): number {
-  if (ctx.clock?.untrusted()) return 0;
   const rows = ctx.db
     .prepare(`SELECT * FROM sea_tickets WHERE claim_expires_at IS NOT NULL AND claim_expires_at <= ?`)
     .all(ctx.now.toISOString()) as TicketRow[];
-  for (const row of rows) sweepExpired(ctx, row);
-  return rows.length;
+  let swept = 0;
+  for (const row of rows) if (sweepExpired(ctx, row) !== row) swept++;
+  return swept;
 }
 
 export function activeLinksFor(db: Db, id: string): LinkRow[] {

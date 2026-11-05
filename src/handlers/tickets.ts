@@ -99,7 +99,7 @@ function ticketFromCreatedPayload(p: CreatedPayload, seq: number): Ticket {
 }
 
 /** Insert one ticket row + its created event. Caller holds the transaction. */
-function insertTicket(
+export function insertTicket(
   ctx: Ctx,
   fields: {
     title: string;

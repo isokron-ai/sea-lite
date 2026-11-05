@@ -15,7 +15,7 @@
  * towards refusing the holder, never towards admitting someone else).
  */
 
-import { statSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, writeSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 
 import { SeaError } from './errors.js';
@@ -38,17 +38,54 @@ export function parseMaxSkew(raw: string | undefined): number {
   return n;
 }
 
-/** The file system's notion of "now" in ms, from a probe write in `dir`; null when the dir cannot be written. */
-export function fsReference(dir: string): () => number | null {
+/** The probe never follows a link or opens a FIFO / device (both were possible through a planted file). */
+const PROBE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+
+function defaultWarn(message: string): void {
+  process.emitWarning(message, { code: 'SEA_LITE_CLOCK_PROBE' });
+}
+
+/**
+ * The file system's notion of "now" in ms, from a probe write in `dir`; null
+ * when it cannot be measured (the guard then allows lease decisions). The
+ * first failure is reported once through `warn` (default: a process warning
+ * on stderr) so a disabled check is never silent; `sea-lite doctor` reports
+ * it too.
+ */
+export function fsReference(dir: string, warn: (message: string) => void = defaultWarn): () => number | null {
   const file = join(dir, PROBE_FILE);
+  let warned = false;
+  const fail = (why: string): null => {
+    if (!warned) {
+      warned = true;
+      warn(`sea-lite: clock check disabled for ${dir}: ${why}; leases then trust this process's clock`);
+    }
+    return null;
+  };
   return () => {
+    let fd: number | null = null;
     try {
-      writeFileSync(file, `${process.pid}\n`, { mode: 0o600 });
-      return statSync(file).mtimeMs;
-    } catch {
-      return null;
+      // why: lstat first for platforms without O_NOFOLLOW (Windows); the flags close the race on POSIX.
+      const pre = lstatOrNull(file);
+      if (pre && !pre.isFile()) return fail(`${file} is not a regular file`);
+      fd = openSync(file, PROBE_FLAGS, 0o600);
+      if (!fstatSync(fd).isFile()) return fail(`${file} is not a regular file`);
+      writeSync(fd, `${process.pid}\n`);
+      return fstatSync(fd).mtimeMs;
+    } catch (e) {
+      return fail(`${file}: ${(e as NodeJS.ErrnoException).code ?? String(e)}`);
+    } finally {
+      if (fd !== null) closeSync(fd);
     }
   };
+}
+
+function lstatOrNull(file: string): Stats | null {
+  try {
+    return lstatSync(file);
+  } catch {
+    return null;
+  }
 }
 
 export function clockGuard(clock: () => Date, reference: () => number | null, maxSkewSeconds: number): ClockGuard {

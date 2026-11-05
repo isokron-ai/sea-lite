@@ -12,6 +12,8 @@
 
 import type { Chain, ChainEvent, Db } from 'kronicle-lite';
 
+import { applyFieldsSet } from './audit/fields.js';
+import { applyLeaseEvent } from './audit/lease.js';
 import { EVENT } from './core/events.js';
 import { SEA_DROP_SQL, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
 
@@ -147,6 +149,14 @@ export function applySeaEvent(db: Db, ev: ChainEvent): boolean {
     }
     case EVENT.batch_applied:
       return true; // summary only; the member events carried the rows
+    case EVENT.ticket_fields_set:
+      applyFieldsSet(db, { ticket_id: s(p['ticket_id'])!, set: (p['set'] ?? {}) as P, unset: (p['unset'] ?? []) as string[], version: n(p['version'], 1) }, ev.seq);
+      return true;
+    case EVENT.lease_acquired:
+    case EVENT.lease_released:
+    case EVENT.lease_intent_opened:
+    case EVENT.lease_intent_closed:
+      return applyLeaseEvent(db, ev.event_type, p, ev.seq);
     default:
       return false;
   }
@@ -213,5 +223,10 @@ export function verifySea(db: Db, chain: Chain): SeaVerifyResult {
   check('sea_links', 'link_id', 'chain_seq');
   check('sea_links', 'link_id', 'tombstone_seq');
   check('sea_notes', 'note_id', 'chain_seq');
+  check('sea_fields', 'ticket_id', 'set_seq');
+  check('sea_field_heads', 'ticket_id', 'last_seq');
+  check('sea_leases', 'name', 'last_seq');
+  check('sea_lease_intents', 'intent_id', 'opened_seq');
+  check('sea_lease_intents', 'intent_id', 'closed_seq');
   return { chain: chainResult, rows_missing_chain_seq: missing, ok: chainResult.ok && missing.length === 0 };
 }

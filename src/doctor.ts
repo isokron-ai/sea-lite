@@ -15,6 +15,7 @@ import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './
 import { SEA_SCHEMA_META_KEY, SEA_SCHEMA_VERSION } from './db/schema.js';
 import { ACTORS_FILE_NAME, BEARER_FILE_NAME, MIN_TOKEN_CHARS, parseActorsFile } from './http.js';
 import { verifySea } from './rebuild.js';
+import { fsReference, parseMaxSkew } from './core/clock.js';
 import { VERSION } from './version.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
@@ -276,6 +277,25 @@ async function checkCatalog(cwd: string): Promise<DoctorCheck> {
   }
 }
 
+/** C2-06: the lease clock check needs a writable probe and a clock that agrees with the file system's. */
+function checkClock(dataDir: string, now: Date): DoctorCheck {
+  if (!existsSync(dataDir)) return { id: 'clock', status: 'skip', detail: 'no data dir' };
+  let why: string | null = null;
+  const ref = fsReference(dataDir, (m) => (why = m))();
+  if (ref === null) return { id: 'clock', status: 'warn', detail: why ?? 'clock probe failed; lease decisions trust each process clock' };
+  let max: number;
+  try {
+    max = parseMaxSkew(process.env['SEA_LITE_MAX_CLOCK_SKEW_SECONDS']);
+  } catch (e) {
+    return { id: 'clock', status: 'fail', detail: errMsg(e) };
+  }
+  const skew = Math.round((now.getTime() - ref) / 1000);
+  if (max === 0) return { id: 'clock', status: 'warn', detail: `clock check disabled (SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0); skew ${skew}s`, data: { skew_seconds: skew } };
+  return Math.abs(skew) > max
+    ? { id: 'clock', status: 'fail', detail: `this clock is ${skew}s off the data dir's file-system clock (tolerance ${max}s): claims and leases will be refused`, data: { skew_seconds: skew } }
+    : { id: 'clock', status: 'ok', detail: `skew ${skew}s vs the file-system clock (tolerance ${max}s)`, data: { skew_seconds: skew } };
+}
+
 export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
   const platform = opts.platform ?? process.platform;
   const nodeVersion = opts.nodeVersion ?? process.versions.node;
@@ -293,6 +313,7 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
     checks.push({ id: 'data-dir', status: 'ok', detail: dataDir });
   }
   checks.push(checkPermissions(dataDir, platform));
+  checks.push(checkClock(dataDir, new Date())); // why: the real clock, not opts.now (a test clock is skewed by design)
   checks.push(checkHttpTokens(dataDir, actorsFile, platform));
 
   let db: Database.Database | null = null;

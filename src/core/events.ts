@@ -19,6 +19,11 @@ export const EVENT = {
   link_created: 'sea_link.created',
   link_tombstoned: 'sea_link.tombstoned',
   batch_applied: 'sea.batch_applied',
+  ticket_fields_set: 'sea_ticket.fields_set',
+  lease_acquired: 'sea_lease.acquired',
+  lease_released: 'sea_lease.released',
+  lease_intent_opened: 'sea_lease.intent_opened',
+  lease_intent_closed: 'sea_lease.intent_closed',
 } as const;
 
 export type SeaEventType = (typeof EVENT)[keyof typeof EVENT];
@@ -26,7 +31,7 @@ export type SeaEventType = (typeof EVENT)[keyof typeof EVENT];
 export const SEA_EVENT_TYPES: readonly SeaEventType[] = Object.freeze(Object.values(EVENT));
 
 /** Every sea-lite event type starts with one of these. */
-export const SEA_EVENT_PREFIXES = ['sea_ticket.', 'sea_link.', 'sea.'] as const;
+export const SEA_EVENT_PREFIXES = ['sea_ticket.', 'sea_link.', 'sea_lease.', 'sea.'] as const;
 
 export function isSeaEventType(t: string): t is SeaEventType {
   return (SEA_EVENT_TYPES as readonly string[]).includes(t);

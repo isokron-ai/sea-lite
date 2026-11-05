@@ -33,6 +33,7 @@ describe('clock skew guard (C2-06)', () => {
     const B = new SeaLite({ kronicle: A.kronicle, actor: 'b', now: ahead, clockReference: () => Date.now() });
     const t = A.create({ title: 'x', ...NEW });
     A.claim({ ticket_ids: [t.ticket.id] });
+    A.create({ title: 'free', ...NEW });
     expect(codeOf(() => B.claim({ ticket_ids: [t.ticket.id] }))).toBe('clock_skew');
     expect(codeOf(() => B.next({ include_unassigned: true }))).toBe('clock_skew');
     expect(codeOf(() => B.heartbeat())).toBe('clock_skew');

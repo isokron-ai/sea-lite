@@ -4,12 +4,18 @@
  * methods. The MCP server and the CLI both talk to this.
  */
 
+import { randomUUID } from 'node:crypto';
+
 import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kronicle-lite';
 
 import { clockGuard, fsReference, parseMaxSkew, type ClockGuard } from './core/clock.js';
 import { SeaError } from './core/errors.js';
-import { isBusy, type Ctx } from './core/repo.js';
-import { SEA_MIGRATIONS, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
+import { isBusy, resolveId, tx, type Ctx } from './core/repo.js';
+import { SEA_MIGRATIONS, SEA_NEWEST_TABLE, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
+import * as auditH from './audit/audit.js';
+import * as exportH from './audit/export.js';
+import * as fieldsH from './audit/fields.js';
+import * as leaseH from './audit/lease.js';
 import * as claims from './handlers/claims.js';
 import * as finishH from './handlers/finish.js';
 import * as hist from './handlers/history.js';
@@ -132,6 +138,8 @@ export class SeaLite {
   private readonly ownsKronicle: boolean;
   private readonly clock: () => Date;
   private readonly clockGuard: ClockGuard | undefined;
+  /** Random per instance: the holder identity of a named lease, with the actor (audit/lease.ts). */
+  readonly instance: string = randomUUID();
   readonly maxResponseBytes: number;
 
   constructor(opts: SeaLiteOptions = {}) {
@@ -189,6 +197,7 @@ export class SeaLite {
       ownsKronicle: false,
       clock: this.clock,
       clockGuard: this.clockGuard,
+      instance: this.instance,
       maxResponseBytes: this.maxResponseBytes,
       lastTouch: this.lastTouch,
     });
@@ -208,6 +217,7 @@ export class SeaLite {
       lifecycle: this.lifecycle,
       now: this.clock(),
       ...(this.clockGuard ? { clock: this.clockGuard } : {}),
+      instance: this.instance,
       maxResponseBytes: this.maxResponseBytes,
     };
   }
@@ -353,6 +363,120 @@ export class SeaLite {
   verify(): SeaVerifyResult {
     return verifySea(this.db, this.chain);
   }
+
+  // ── typed fields, named leases, audits (0.7.0): library + CLI only, no MCP tools ──
+
+  /** Set / unset typed fields (audit/fields.ts) on a ticket; null unsets. Returns the new version and changed names. */
+  setFields(ticket_id: string, patch: Record<string, unknown>, expect_version?: number): fieldsH.SetFieldsResult {
+    const ctx = this.ctx();
+    return tx(ctx.db, () => fieldsH.setFields(ctx, resolveId(ctx.db, ticket_id), patch, expect_version));
+  }
+  fields(ticket_id: string): { ticket_id: string; version: number; fields: fieldsH.FieldMap } {
+    const id = resolveId(this.db, ticket_id);
+    return { ticket_id: id, version: fieldsH.fieldsVersion(this.db, id), fields: fieldsH.readFields(this.db, id) };
+  }
+  leaseAcquire(input: { name: string; lease_seconds?: number }): leaseH.AcquireResult {
+    return leaseH.acquire(this.ctx(), input);
+  }
+  leaseRenew(input: { name: string; token: string; extend_by_seconds?: number }): { expires_at: string } {
+    return leaseH.renew(this.ctx(), input);
+  }
+  leaseRelease(input: { name: string; token?: string; abandon?: boolean; force?: boolean }): { epoch: number; may_have_happened: number } {
+    return leaseH.release(this.ctx(), input);
+  }
+  leaseIntent(input: { name: string; token: string; op: string; target?: string; idempotency_key?: string }): { intent_id: string } {
+    return leaseH.openIntent(this.ctx(), input);
+  }
+  leaseResolve(input: { name: string; token: string; intent_id: string; outcome: 'happened' | 'not_happened'; evidence_ref?: string }): { intent_id: string; state: leaseH.IntentState } {
+    return leaseH.closeIntent(this.ctx(), input);
+  }
+  leaseShow(name: string): leaseH.LeaseStatus {
+    return leaseH.show(this.ctx(), name);
+  }
+  auditOpen(input: { audit_id: string; title: string; catalog_fingerprint?: string }): auditH.OpenAuditResult {
+    return auditH.openAudit(this.ctx(), input);
+  }
+  auditFinding(audit_id: string, input: auditH.FindingInput): auditH.UpsertFindingResult {
+    return auditH.upsertFinding(this.ctx(), audit_id, input);
+  }
+  auditGate(audit_id: string, input: { finding_id: string; gate: fieldsH.Gate } & auditH.GateInput): { ticket_id: string; changed: string[]; review?: 'pending' } {
+    return auditH.recordGate(this.ctx(), audit_id, input);
+  }
+  auditReviewQueue(audit_id: string): { items: auditH.ReviewItem[] } {
+    return auditH.reviewQueue(this.ctx(), audit_id);
+  }
+  auditReview(
+    audit_id: string,
+    input: { finding_id: string; decision: 'approved' | 'rejected' | 'hold'; submit_plan?: string; note?: string; expect_version?: number },
+  ): { ticket_id: string; version: number; changed: string[] } {
+    return auditH.review(this.ctx(), audit_id, input);
+  }
+  auditRows(audit_id: string): auditH.ExportRow[] {
+    return auditH.findingRows(this.ctx(), audit_id);
+  }
+  /** The audit's findings as CSV text or XLSX bytes (columns: auditH.EXPORT_COLUMNS). */
+  auditExport(audit_id: string, format: 'csv' | 'xlsx'): string | Buffer {
+    const rows = this.auditRows(audit_id);
+    return format === 'csv' ? exportH.toCsv(auditH.EXPORT_COLUMNS, rows) : exportH.toXlsx(auditH.EXPORT_COLUMNS, rows);
+  }
+  /**
+   * Import a findings.csv (an analysis pass's, or an export): one upsert per
+   * row by its `id` column, in one transaction (all rows or none). Strict:
+   * an unterminated quote, a ragged row, a duplicate or unknown column and a
+   * duplicate id are `invalid_input` naming the row. Gate results come from
+   * the `<gate>_result` columns only, never from the gate note text;
+   * `ticket_id` and `review` are accepted and ignored.
+   */
+  auditImport(audit_id: string, csv: string): { created: number; updated: number; unchanged: number; queued: number } {
+    const { header, rows, lines } = exportH.parseCsv(csv);
+    if (!header.includes('id') || !header.includes('title')) throw new SeaError('invalid_input', 'findings.csv needs an id and a title column', { header });
+    for (const h of header) {
+      const known =
+        h === 'id' ||
+        h === 'title' ||
+        auditH.IMPORT_IGNORED.has(h) ||
+        Object.hasOwn(auditH.IMPORT_COLUMNS, h) ||
+        Object.hasOwn(auditH.IMPORT_GATE_COLUMNS, h) ||
+        Object.hasOwn(auditH.IMPORT_GATE_RESULT_COLUMNS, h);
+      if (!known) throw new SeaError('invalid_input', `CSV row 1: unknown column "${h}"`, { row: 1, column: h });
+    }
+    const seen = new Map<string, number>();
+    rows.forEach((r, k) => {
+      const id = (r['id'] ?? '').trim();
+      const first = seen.get(id);
+      if (first !== undefined) throw new SeaError('invalid_input', `CSV row ${lines[k]}: duplicate id "${id}" (first at row ${first})`, { row: lines[k], first_row: first, id });
+      seen.set(id, lines[k]!);
+    });
+    const ctx = this.ctx();
+    return tx(ctx.db, () => {
+      const out = { created: 0, updated: 0, unchanged: 0, queued: 0 };
+      rows.forEach((r, k) => {
+        const fields: Record<string, unknown> = {};
+        const gates: Partial<Record<fieldsH.Gate, auditH.GateInput>> = {};
+        const gate = (g: fieldsH.Gate) => (gates[g] ??= {});
+        for (const [col, raw] of Object.entries(r)) {
+          const v = raw.trim();
+          if (Object.hasOwn(auditH.IMPORT_COLUMNS, col)) {
+            const f = auditH.IMPORT_COLUMNS[col]!;
+            if (v !== '') fields[f] = f === 'affected_count' && /^\d+$/.test(v) ? Number(v) : raw;
+          } else if (Object.hasOwn(auditH.IMPORT_GATE_COLUMNS, col)) gate(auditH.IMPORT_GATE_COLUMNS[col]!).note = raw === '' ? null : raw;
+          else if (Object.hasOwn(auditH.IMPORT_GATE_RESULT_COLUMNS, col) && v !== '') gate(auditH.IMPORT_GATE_RESULT_COLUMNS[col]!).result = v;
+        }
+        let res: auditH.UpsertFindingResult;
+        try {
+          res = auditH.upsertFinding(ctx, audit_id, { finding_id: (r['id'] ?? '').trim(), title: r['title'] ?? '', fields, gates });
+        } catch (e) {
+          if (e instanceof SeaError) throw new SeaError(e.code, `CSV row ${lines[k]}: ${e.message}`, { ...e.details, row: lines[k] });
+          throw e;
+        }
+        if (res.created) out.created++;
+        else if (res.changed.length > 0) out.updated++;
+        else out.unchanged++;
+        if (res.review) out.queued++;
+      });
+      return out;
+    });
+  }
 }
 
 /** Never below kronicle-lite's own wait (10 s); 0.6.1 lowered it to 5 s. */
@@ -366,7 +490,7 @@ export function ensureSeaSchema(db: Db): void {
   }
   // why: every CLI command opens the store; a current schema needs no write,
   // so a 40-process storm no longer queues 40 extra write transactions.
-  if (row && Number(row.value) === SEA_SCHEMA_VERSION && db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sea_tickets'`).get()) return;
+  if (row && Number(row.value) === SEA_SCHEMA_VERSION && db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SEA_NEWEST_TABLE)) return;
   db.exec(SEA_SCHEMA_SQL);
   // Additive column migrations for stores created by an older build. CREATE
   // TABLE IF NOT EXISTS above is a no-op on them, so add what is missing.

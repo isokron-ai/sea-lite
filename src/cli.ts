@@ -168,12 +168,20 @@ Inspecting:
   sea-lite stats   [--since 24h|7d|ISO] [--for ACTOR] [--json]
   sea-lite verify | rebuild | doctor [--json]
 
+Audits (driven by the mcp-audit runner through the library; these are the human side):
+  sea-lite audit queue  AUDIT [--json]                     findings whose gates are all resolved, awaiting review
+  sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P] [--note N]
+  sea-lite audit export AUDIT [--format csv|xlsx] [--out FILE]   the findings tracker (CSV to stdout by default)
+  sea-lite audit import AUDIT FILE.csv                     upsert an analysis pass's findings.csv by finding id
+  sea-lite lease show NAME [--json] | lease release NAME --force   named leases (e.g. sandbox:ID)
+
 Common flags: --data-dir DIR (default $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite, shared with kronicle-lite),
   --actor ID, --session S, --project KEY ('*' = every project).
 Identity: a claim belongs to an actor AND a session. serve takes the session from --session,
   SEA_LITE_SESSION or CLAUDE_CODE_SESSION_ID (else a random instance id) and registers it; other
   commands find the session of the agent they run for (see docs/THREAT-MODEL.md "Identity").
-Env: SEA_LITE_ACTOR, SEA_LITE_SESSION, SEA_LITE_PROJECT, SEA_LITE_ROLE, SEA_LITE_TRACKS, SEA_LITE_PROFILE.
+Env: SEA_LITE_ACTOR, SEA_LITE_SESSION, SEA_LITE_PROJECT, SEA_LITE_ROLE, SEA_LITE_TRACKS, SEA_LITE_PROFILE,
+  SEA_LITE_MAX_CLOCK_SKEW_SECONDS (default 30; 0 disables the lease clock check).
 `;
 
 // ───────────────────────────── identity / store ─────────────────────────────
@@ -684,6 +692,22 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(r.token + '\n');
       return 0;
     }
+    case 'audit':
+      return auditCmd(positional, flags);
+    case 'lease': {
+      const [sub, name] = positional;
+      if ((sub !== 'show' && sub !== 'release') || name === undefined) throw new SeaError('invalid_input', 'usage: sea-lite lease show NAME | lease release NAME --force (operator)');
+      const { store } = openAs(flags, null);
+      if (sub === 'show') {
+        const r = store.leaseShow(name);
+        out(flags, r, () => `${r.name}  epoch ${r.epoch}  ${r.live ? `held by ${r.holder} until ${r.expires_at}` : 'free'}  open ${r.open}  may_have_happened ${r.may_have_happened}\n`);
+        return 0;
+      }
+      if (flags['force'] !== true) throw new SeaError('invalid_input', 'the CLI holds no lease tokens: lease release needs --force (operator role)');
+      const r = store.leaseRelease({ name, force: true });
+      out(flags, r, () => `released ${name} (epoch ${r.epoch}); ${r.may_have_happened} intent(s) now may_have_happened\n`);
+      return 0;
+    }
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 2;
@@ -1115,6 +1139,60 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
   });
   store.close();
   return 0;
+}
+
+/** `sea-lite audit …`: the human side of an audit (review queue, export) and the runner's CSV import. */
+function auditCmd(positional: string[], flags: Args['flags']): number {
+  const [sub, audit, ...rest] = positional;
+  if (sub === undefined || audit === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit queue|review|export|import AUDIT_ID …');
+  const { store } = openAs(flags, null);
+  switch (sub) {
+    case 'queue': {
+      const r = store.auditReviewQueue(audit);
+      out(flags, r, () =>
+        r.items.length === 0
+          ? 'review queue empty\n'
+          : table([['ID', 'VERDICT', 'SEV', 'PLAN', 'TITLE'], ...r.items.map((i) => [i.finding_id, i.verdict ?? '', i.severity ?? '', i.submit_plan ?? '', trunc(i.title, 70)])]),
+      );
+      return 0;
+    }
+    case 'review': {
+      const [finding_id, decision] = rest;
+      if (finding_id === undefined || (decision !== 'approved' && decision !== 'rejected' && decision !== 'hold')) {
+        throw new SeaError('invalid_input', 'usage: sea-lite audit review AUDIT_ID FINDING_ID approved|rejected|hold [--plan P] [--note N]');
+      }
+      const plan = str(flags['plan']);
+      const note = str(flags['note']);
+      const r = store.auditReview(audit, { finding_id, decision, ...(plan !== undefined ? { submit_plan: plan } : {}), ...(note !== undefined ? { note } : {}) });
+      out(flags, r, () => `${finding_id}: ${decision} (fields v${r.version}; changed ${r.changed.join(', ') || 'nothing'})\n`);
+      return 0;
+    }
+    case 'export': {
+      const format = str(flags['format']) ?? 'csv';
+      if (format !== 'csv' && format !== 'xlsx') throw new SeaError('invalid_input', '--format csv|xlsx');
+      const file = str(flags['out']);
+      const data = store.auditExport(audit, format);
+      if (file === undefined) {
+        if (format === 'xlsx') throw new SeaError('invalid_input', 'xlsx needs --out FILE');
+        process.stdout.write(data);
+        return 0;
+      }
+      // why: a tracker carries unreported vulnerabilities; 0600 also when the file existed with wider bits.
+      writeFileSync(file, data, { mode: 0o600 });
+      chmodSync(file, 0o600);
+      process.stderr.write(`wrote ${file} (${store.auditRows(audit).length} findings)\n`);
+      return 0;
+    }
+    case 'import': {
+      const file = rest[0];
+      if (file === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit import AUDIT_ID FILE.csv (- = stdin)');
+      const r = store.auditImport(audit, readFileSync(file === '-' ? 0 : file, 'utf8'));
+      out(flags, r, () => `created ${r.created}, updated ${r.updated}, unchanged ${r.unchanged}; ${r.queued} entered the review queue\n`);
+      return 0;
+    }
+    default:
+      throw new SeaError('invalid_input', `unknown audit subcommand: ${sub}`);
+  }
 }
 
 /** Codes that mean "someone else holds it" rather than "you asked wrong". */
