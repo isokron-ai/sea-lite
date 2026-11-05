@@ -223,5 +223,10 @@ export function verifySea(db: Db, chain: Chain): SeaVerifyResult {
   check('sea_links', 'link_id', 'chain_seq');
   check('sea_links', 'link_id', 'tombstone_seq');
   check('sea_notes', 'note_id', 'chain_seq');
+  check('sea_fields', 'ticket_id', 'set_seq');
+  check('sea_field_heads', 'ticket_id', 'last_seq');
+  check('sea_leases', 'name', 'last_seq');
+  check('sea_lease_intents', 'intent_id', 'opened_seq');
+  check('sea_lease_intents', 'intent_id', 'closed_seq');
   return { chain: chainResult, rows_missing_chain_seq: missing, ok: chainResult.ok && missing.length === 0 };
 }

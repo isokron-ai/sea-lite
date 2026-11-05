@@ -19,7 +19,7 @@
 import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
 import { assertClockTrusted } from '../core/clock.js';
-import { clampLease, expiryFrom, hashToken, newClaimToken } from '../core/fence.js';
+import { clampLease, expiryFrom, hashToken, newClaimToken, tokenMatches } from '../core/fence.js';
 import { sameOwner } from '../core/identity.js';
 import { tx, uuid, type Ctx } from '../core/repo.js';
 import type { Db } from 'kronicle-lite';
@@ -74,7 +74,7 @@ function unresolved(db: Db, name: string, states: readonly IntentState[] = ['may
 /** Fence check for every holder operation: the token, the holder, the clock, the expiry. */
 function fenced(ctx: Ctx, name: string, token: string): LeaseRow & { holder: string; expires_at: string } {
   const row = getLease(ctx.db, name);
-  if (!row || row.token_hash === null || row.token_hash !== hashToken(token)) {
+  if (!row || !tokenMatches(row.token_hash, token)) {
     throw new SeaError('fence_invalid', `token does not hold lease ${name}`, { name, holder: row?.holder ?? null, epoch: row?.epoch ?? 0 });
   }
   if (row.holder !== ctx.actor) throw new SeaError('fence_foreign_holder', `lease ${name} is held by "${row.holder}", not "${ctx.actor}"`, { name, holder: row.holder });

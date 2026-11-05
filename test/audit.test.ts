@@ -5,6 +5,11 @@
  * runner drives it; agents never see these tickets).
  */
 
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 
@@ -102,6 +107,35 @@ describe('named exclusive lease', () => {
     expect(b.unresolved).toHaveLength(1);
     w1.close();
   });
+
+  it('ten processes race to acquire one lease: exactly one wins, nine get already_claimed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sea-lease-race-'));
+    try {
+      new SeaLite({ dataDir: dir, actor: 'init' }).close();
+      const lib = pathToFileURL(join(process.cwd(), 'dist', 'index.js')).href;
+      const script = `import { SeaLite } from ${JSON.stringify(lib)};
+        const s = new SeaLite({ dataDir: process.argv[1], actor: process.argv[2] });
+        try { s.leaseAcquire({ name: 'sandbox:race' }); console.log('won'); } catch (e) { console.log(e.code); } finally { s.close(); }`;
+      const runs = await Promise.all(
+        Array.from({ length: 10 }, (_, k) =>
+          new Promise<string>((res) => {
+            const c = spawn(process.execPath, ['--input-type=module', '-e', script, dir, `w${k}`], { stdio: ['ignore', 'pipe', 'inherit'] });
+            let o = '';
+            c.stdout.on('data', (d: Buffer) => (o += d.toString()));
+            c.on('close', () => res(o.trim()));
+          }),
+        ),
+      );
+      expect(runs.filter((r) => r === 'won')).toHaveLength(1);
+      expect(runs.filter((r) => r === 'already_claimed')).toHaveLength(9);
+      const s = new SeaLite({ dataDir: dir, actor: 'check' });
+      expect(s.leaseShow('sandbox:race')).toMatchObject({ epoch: 1, live: true });
+      expect(s.verify().ok).toBe(true);
+      s.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  }, 60_000);
 
   it('force release needs the operator role', () => {
     const clock = new Clock();

@@ -48,6 +48,11 @@ function hashEquals(a: string, b: string): boolean {
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
+/** Constant-time: does `token` hash to `hash`? */
+export function tokenMatches(hash: string | null, token: string): boolean {
+  return hash !== null && hashEquals(hash, hashToken(token));
+}
+
 export function isExpired(expires_at: string | null, now: Date): boolean {
   return expires_at === null || Date.parse(expires_at) <= now.getTime();
 }
