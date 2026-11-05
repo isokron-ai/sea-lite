@@ -4,9 +4,34 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased] (0.6.2)
+## [Unreleased]
 
-### Fixed
+### Added (0.7.0 candidate: audit orchestration)
+
+- **Audit tracker for the mcp-audit runner** (library + CLI; no new MCP
+  tools, so `tools/list` is unchanged): named exclusive leases with a
+  write-intent journal (`leaseAcquire / Renew / Release / Intent / Resolve /
+  Show`; a takeover or an abandoning release turns open intents into
+  `may_have_happened`, reported to the next holder, which must resolve them
+  before writing again), a closed registry of typed ticket fields
+  (`setFields` / `fields`), audits as epics in project `audit:<id>` with
+  findings and five gate sub-tickets (`auditOpen`, `auditFinding`,
+  `auditGate`), the human review queue (`auditReviewQueue`, `auditReview`;
+  CLI `audit queue|review`), and export / import (`auditExport` csv|xlsx with
+  the PostHog tracker's columns, `auditImport` of a findings.csv; CLI
+  `audit export|import`), plus `lease show|release --force`.
+- New events `sea_ticket.fields_set`, `sea_lease.acquired|released|
+  intent_opened|intent_closed`, and tables `sea_fields`, `sea_field_heads`,
+  `sea_leases`, `sea_lease_intents` (docs/MODEL.md). The schema version stays
+  4: older builds keep opening the store and ignore the new tables / events.
+- XLSX is written by a ~150-line zero-dependency writer (`src/audit/export.ts`,
+  node:zlib deflate) instead of a library: CONTRIBUTING asks for minimal
+  runtime dependencies. Checked with openpyxl and LibreOffice.
+- Not built (scope narrowed by the toolkit council, 2026-11-05): per-pass
+  audit templates via `sea_apply` — the runner orchestrates passes in code
+  and creates finding tickets only after refutation.
+
+### Fixed (0.6.2)
 
 - **Lease clock skew (C2-06).** Expiry compared wall-clock instants written
   by different processes, so a process 15 min ahead took over every live

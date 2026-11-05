@@ -625,6 +625,57 @@ transaction as the row change. That buys you:
 You can run sea-lite without ever running kronicle-lite's server. The
 dependency is the library.
 
+## Audits: the runner's tracker (library + CLI, no MCP tools)
+
+For MCP audits driven by code (the mcp-audit runner). Agents never read or
+write these tickets, so none of it is in `tools/list`; every result is ids,
+versions and changed field names, not entities.
+
+```ts
+const sea = new SeaLite({ actor: 'mcp-audit' });
+sea.auditOpen({ audit_id: 'posthog-2', title: 'PostHog MCP audit 2', catalog_fingerprint: 'sha256:…' });
+
+// One worker at a time on the sandbox. Journal every side effect.
+const lease = sea.leaseAcquire({ name: 'sandbox:posthog', lease_seconds: 600 });
+for (const u of lease.unresolved ?? []) {           // a predecessor died mid-write
+  const landed = await readBack(u);                  // verify; never repeat blindly
+  sea.leaseResolve({ name: 'sandbox:posthog', token: lease.token, intent_id: u.intent_id, outcome: landed ? 'happened' : 'not_happened' });
+}
+const { intent_id } = sea.leaseIntent({ name: 'sandbox:posthog', token: lease.token, op: 'insight-create', idempotency_key: 'run7:L3' });
+// … remote write …
+sea.leaseResolve({ name: 'sandbox:posthog', token: lease.token, intent_id, outcome: 'happened', evidence_ref: 'kl:1234' });
+
+// After refutation only: a finding, with five gate sub-tickets.
+sea.auditFinding('posthog-2', { finding_id: 'L3', title: '500 still persists the insight', fields: { verdict: 'bug', severity: 'high' } });
+sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', evidence_ref: 'kl:1234' });
+```
+
+- **Named exclusive lease** (`sandbox:<id>`): one live holder; `epoch` bumps on
+  every change of holder; a stale holder's token stops fencing. Takeover of a
+  lapsed lease, or `leaseRelease({ abandon: true })` (an abort), turns every
+  open intent into `may_have_happened`; the next holder gets them in
+  `unresolved` and cannot open a new intent until it has verified and closed
+  each one. Clock-skew guarded like claims.
+- **Typed fields** (`setFields` / `fields`): a closed registry — `verdict`,
+  `severity`, `confidence`, `submit_plan`, `pr_or_issue`, `submitted_date`,
+  `tracker_status`, `catalog_fingerprint`, `evidence_ref` (kronicle event id),
+  `review`, and the tracker's text columns. Unknown names and bad values are
+  `invalid_input`; `expect_version` guards concurrent writers.
+- **Findings and gates**: tickets live in project `audit:<id>`, so they stay
+  out of every code project's `sea_next` / `sea_list`. A finding gets gate
+  sub-tickets `repro`, `intent`, `docs`, `prior_reports`, `refuter`
+  (`parent_of`). Upserts are idempotent by finding id and write nothing when
+  nothing changed.
+- **Human review queue**: once every gate has a result (`pass | fail | n/a`)
+  the finding is `review: pending`; `sea-lite audit queue AUDIT`, then
+  `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]`.
+- **Export / import**: `sea-lite audit export AUDIT [--format csv|xlsx] [--out F]`
+  writes the PostHog tracker's columns in order (then `review`,
+  `catalog_fingerprint`, `evidence_ref`, `ticket_id`); CSV cells that would run
+  as formulas get a leading `'`. XLSX is written without a dependency.
+  `sea-lite audit import AUDIT findings.csv` upserts a pass's findings by `id`
+  in one transaction.
+
 ## Limitations (read these)
 
 - **Cooperative fencing.** A claim token stops a well-behaved agent from

@@ -90,3 +90,33 @@ export { runDoctor, renderDoctor, type DoctorReport, type DoctorCheck, type Doct
 export { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
 export { parseSince, type StatsResult, type ActorStats } from './handlers/stats.js';
 export { findPossibleDuplicates, titleMatchExpression, type PossibleDuplicate } from './handlers/dedup.js';
+export {
+  FIELD_NAMES,
+  FIELD_TYPES,
+  VERDICTS,
+  SEVERITIES,
+  CONFIDENCES,
+  TRACKER_STATUSES,
+  GATES,
+  GATE_RESULTS,
+  REVIEW_STATES,
+  type FieldName,
+  type FieldMap,
+  type FieldValue,
+  type Gate,
+  type SetFieldsResult,
+} from './audit/fields.js';
+export type { AcquireResult, IntentState, LeaseStatus, Unresolved } from './audit/lease.js';
+export {
+  AUDIT_PROJECT_PREFIX,
+  EXPORT_COLUMNS,
+  auditProject,
+  type ExportRow,
+  type FindingInput,
+  type GateInput,
+  type OpenAuditResult,
+  type ReviewItem,
+  type UpsertFindingResult,
+} from './audit/audit.js';
+export { toCsv, parseCsv, toXlsx } from './audit/export.js';
+export { DEFAULT_MAX_CLOCK_SKEW_SECONDS, type ClockGuard } from './core/clock.js';

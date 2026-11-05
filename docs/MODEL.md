@@ -66,6 +66,23 @@ FTS5 over `title` and `body` with `ticket_id` unindexed, maintained by
 triggers. It is a standalone table (not `content=`) so a `VACUUM` cannot
 desynchronize it.
 
+### `sea_fields`, `sea_field_heads` (0.7.0)
+
+Typed fields (`src/audit/fields.ts`, a closed registry): `ticket_id`, `name`,
+`value` (TEXT in the field's type), `set_seq`; one row per set field.
+`sea_field_heads` holds each ticket's fields `version` and `last_seq`. The
+ticket row and its `row_version` are not touched, so a pre-0.7 build opens
+the store and rebuilds its own tables exactly.
+
+### `sea_leases`, `sea_lease_intents` (0.7.0)
+
+Named exclusive leases (`src/audit/lease.ts`): `name`, `epoch` (bumped on
+each change of holder), `holder`, `holder_session`, `token_hash`,
+`expires_at`, `lease_seconds`, `last_seq`. The intent journal:
+`intent_id`, `lease_name`, `epoch`, `op`, `target`, `idempotency_key`,
+`state` (`open | happened | not_happened | may_have_happened`),
+`opened_by`, `opened_at`, `opened_seq`, `closed_seq`, `evidence_ref`.
+
 ## Events
 
 Every sea-lite mutation appends exactly the events below to the kronicle-lite
@@ -84,10 +101,15 @@ chain, inside the same `BEGIN IMMEDIATE` transaction as the row change. The
 | `sea_ticket.note_added` | `ticket_id note_id body created_at` | insert note, `last_seq` |
 | `sea_link.created` | `link_id from_id to_id link_type created_at` (+ `from_row_version reason` via sea_link; `batch_id` via apply, plus `from_row_version` when the from end is an existing ticket; `via` via transition) | insert active link; when `from_row_version` present, bump the from ticket |
 | `sea_link.tombstoned` | `link_id target_id from_id to_id link_type reason tombstoned_at from_row_version` | mark tombstoned; bump the from ticket |
+| `sea_ticket.fields_set` | `ticket_id set{name: value} unset[name] version` | upsert / delete `sea_fields` rows (`set_seq=seq`); `sea_field_heads.version`, `last_seq` |
+| `sea_lease.acquired` | `name epoch holder session token_hash expires_at lease_seconds` (+ `took_over{holder,epoch,expired_at}`, `may_have_happened[intent_id]`) | listed open intents → `may_have_happened`; upsert the lease row |
+| `sea_lease.released` | `name epoch holder released_by` (+ `forced`, `may_have_happened[intent_id]`) | listed open intents → `may_have_happened`; clear holder, token, expiry |
+| `sea_lease.intent_opened` | `intent_id name epoch op target idempotency_key opened_by opened_at` | insert intent, `state=open` |
+| `sea_lease.intent_closed` | `intent_id name outcome was closed_by evidence_ref` | `state=outcome`, `closed_seq`, `evidence_ref` |
 | `sea.batch_applied` | `batch_id tickets[{ref,ticket_id,title}] links[{link_id,from_ref,to_ref,from_id,to_id,link_type}] ticket_count link_count` (`from_ref` / `to_ref` null for an existing-ticket end) | nothing (summary; carries the idempotency key for apply) |
 
-Not chained: `sea_refresh`. A heartbeat only updates `claim_expires_at` on the
-row. Consequence: after `sea-lite rebuild`, a lease shows the expiry last
+Not chained: `sea_refresh`, and renewing a named lease. A heartbeat only
+updates the expiry on the row. Consequence: after `sea-lite rebuild`, a lease shows the expiry last
 chained, which is never later than the live one.
 
 `target_id` on `sea_link.tombstoned` is the generic subject key kronicle-lite's
@@ -114,7 +136,8 @@ A key is bound to its request: the keyed event's payload carries
 request, minus the key, `dry_run`, `verbose`, `confirm`, claim tokens and the
 caller; ticket ids resolved; `sea_apply` after template expansion). A reuse
 whose hash differs is `invalid_input` (`reason: "request_mismatch"`),
-never a replay. Events from before request hashes carry none and replay.
+never a replay. A key bound to an event from before request hashes (< 0.6.0)
+is `invalid_input` (`reason: "unverifiable_key"`), not a replay (0.6.2).
 
 Claims are not keyed: a repeated `sea_claim` by the current holder rotates
 the token, which is the useful behaviour for a retry.

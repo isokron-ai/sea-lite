@@ -8,8 +8,12 @@ import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kro
 
 import { clockGuard, fsReference, parseMaxSkew, type ClockGuard } from './core/clock.js';
 import { SeaError } from './core/errors.js';
-import { isBusy, type Ctx } from './core/repo.js';
-import { SEA_MIGRATIONS, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
+import { isBusy, resolveId, tx, type Ctx } from './core/repo.js';
+import { SEA_MIGRATIONS, SEA_NEWEST_TABLE, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
+import * as auditH from './audit/audit.js';
+import * as exportH from './audit/export.js';
+import * as fieldsH from './audit/fields.js';
+import * as leaseH from './audit/lease.js';
 import * as claims from './handlers/claims.js';
 import * as finishH from './handlers/finish.js';
 import * as hist from './handlers/history.js';
@@ -353,6 +357,103 @@ export class SeaLite {
   verify(): SeaVerifyResult {
     return verifySea(this.db, this.chain);
   }
+
+  // ── typed fields, named leases, audits (0.7.0): library + CLI only, no MCP tools ──
+
+  /** Set / unset typed fields (audit/fields.ts) on a ticket; null unsets. Returns the new version and changed names. */
+  setFields(ticket_id: string, patch: Record<string, unknown>, expect_version?: number): fieldsH.SetFieldsResult {
+    const ctx = this.ctx();
+    return tx(ctx.db, () => fieldsH.setFields(ctx, resolveId(ctx.db, ticket_id), patch, expect_version));
+  }
+  fields(ticket_id: string): { ticket_id: string; version: number; fields: fieldsH.FieldMap } {
+    const id = resolveId(this.db, ticket_id);
+    return { ticket_id: id, version: fieldsH.fieldsVersion(this.db, id), fields: fieldsH.readFields(this.db, id) };
+  }
+  leaseAcquire(input: { name: string; lease_seconds?: number }): leaseH.AcquireResult {
+    return leaseH.acquire(this.ctx(), input);
+  }
+  leaseRenew(input: { name: string; token: string; extend_by_seconds?: number }): { expires_at: string } {
+    return leaseH.renew(this.ctx(), input);
+  }
+  leaseRelease(input: { name: string; token?: string; abandon?: boolean; force?: boolean }): { epoch: number; may_have_happened: number } {
+    return leaseH.release(this.ctx(), input);
+  }
+  leaseIntent(input: { name: string; token: string; op: string; target?: string; idempotency_key?: string }): { intent_id: string } {
+    return leaseH.openIntent(this.ctx(), input);
+  }
+  leaseResolve(input: { name: string; token: string; intent_id: string; outcome: 'happened' | 'not_happened'; evidence_ref?: string }): { intent_id: string; state: leaseH.IntentState } {
+    return leaseH.closeIntent(this.ctx(), input);
+  }
+  leaseShow(name: string): leaseH.LeaseStatus {
+    return leaseH.show(this.ctx(), name);
+  }
+  auditOpen(input: { audit_id: string; title: string; catalog_fingerprint?: string }): auditH.OpenAuditResult {
+    return auditH.openAudit(this.ctx(), input);
+  }
+  auditFinding(audit_id: string, input: auditH.FindingInput): auditH.UpsertFindingResult {
+    return auditH.upsertFinding(this.ctx(), audit_id, input);
+  }
+  auditGate(audit_id: string, input: { finding_id: string; gate: fieldsH.Gate } & auditH.GateInput): { ticket_id: string; changed: string[]; review?: 'pending' } {
+    return auditH.recordGate(this.ctx(), audit_id, input);
+  }
+  auditReviewQueue(audit_id: string): { items: auditH.ReviewItem[] } {
+    return auditH.reviewQueue(this.ctx(), audit_id);
+  }
+  auditReview(
+    audit_id: string,
+    input: { finding_id: string; decision: 'approved' | 'rejected' | 'hold'; submit_plan?: string; note?: string; expect_version?: number },
+  ): { ticket_id: string; version: number; changed: string[] } {
+    return auditH.review(this.ctx(), audit_id, input);
+  }
+  auditRows(audit_id: string): auditH.ExportRow[] {
+    return auditH.findingRows(this.ctx(), audit_id);
+  }
+  /** The audit's findings as CSV text or XLSX bytes (columns: auditH.EXPORT_COLUMNS). */
+  auditExport(audit_id: string, format: 'csv' | 'xlsx'): string | Buffer {
+    const rows = this.auditRows(audit_id);
+    return format === 'csv' ? exportH.toCsv(auditH.EXPORT_COLUMNS, rows) : exportH.toXlsx(auditH.EXPORT_COLUMNS, rows);
+  }
+  /**
+   * Import a findings.csv from an analysis pass: one upsert per row, by its
+   * `id` column, in one transaction (all rows or none). Known tracker columns
+   * become fields; gate columns become gate results when they start with
+   * pass / fail / n/a, else stay pending with the text as the note.
+   */
+  auditImport(audit_id: string, csv: string): { created: number; updated: number; unchanged: number; queued: number } {
+    const { header, rows } = exportH.parseCsv(csv);
+    if (!header.includes('id') || !header.includes('title')) throw new SeaError('invalid_input', 'findings.csv needs an id and a title column', { header });
+    const ctx = this.ctx();
+    return tx(ctx.db, () => {
+      const out = { created: 0, updated: 0, unchanged: 0, queued: 0 };
+      rows.forEach((r, k) => {
+        const fields: Record<string, unknown> = {};
+        const gates: Partial<Record<fieldsH.Gate, auditH.GateInput>> = {};
+        for (const [col, raw] of Object.entries(r)) {
+          const v = raw.trim();
+          if (v === '') continue;
+          const f = auditH.IMPORT_COLUMNS[col];
+          if (f !== undefined) fields[f] = f === 'affected_count' && /^\d+$/.test(v) ? Number(v) : v;
+          const g = auditH.IMPORT_GATE_COLUMNS[col];
+          if (g !== undefined) {
+            const m = /^(pass|fail|n\/a)\b[\s:\u2014-]*/i.exec(v);
+            gates[g] = m ? { result: m[1]!.toLowerCase(), ...(v.slice(m[0].length) ? { note: v.slice(m[0].length) } : {}) } : { result: 'pending', note: v };
+          }
+        }
+        let res: auditH.UpsertFindingResult;
+        try {
+          res = auditH.upsertFinding(ctx, audit_id, { finding_id: (r['id'] ?? '').trim(), title: (r['title'] ?? '').trim(), fields, gates });
+        } catch (e) {
+          if (e instanceof SeaError) throw new SeaError(e.code, `row ${k + 2}: ${e.message}`, { ...e.details, row: k + 2 });
+          throw e;
+        }
+        if (res.created) out.created++;
+        else if (res.changed.length > 0) out.updated++;
+        else out.unchanged++;
+        if (res.review) out.queued++;
+      });
+      return out;
+    });
+  }
 }
 
 /** Never below kronicle-lite's own wait (10 s); 0.6.1 lowered it to 5 s. */
@@ -366,7 +467,7 @@ export function ensureSeaSchema(db: Db): void {
   }
   // why: every CLI command opens the store; a current schema needs no write,
   // so a 40-process storm no longer queues 40 extra write transactions.
-  if (row && Number(row.value) === SEA_SCHEMA_VERSION && db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sea_tickets'`).get()) return;
+  if (row && Number(row.value) === SEA_SCHEMA_VERSION && db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SEA_NEWEST_TABLE)) return;
   db.exec(SEA_SCHEMA_SQL);
   // Additive column migrations for stores created by an older build. CREATE
   // TABLE IF NOT EXISTS above is a no-op on them, so add what is missing.

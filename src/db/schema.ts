@@ -25,7 +25,16 @@ import { ALL_STATES, LINK_STATES, LINK_TYPES, PRIORITIES, sqlIn, TICKET_KINDS } 
 export const SEA_SCHEMA_VERSION = 4;
 export const SEA_SCHEMA_META_KEY = 'sea_schema_version';
 
-export const SEA_TABLES = ['sea_tickets_fts', 'sea_notes', 'sea_links', 'sea_tickets'] as const;
+export const SEA_TABLES = ['sea_lease_intents', 'sea_leases', 'sea_field_heads', 'sea_fields', 'sea_tickets_fts', 'sea_notes', 'sea_links', 'sea_tickets'] as const;
+
+/**
+ * 0.7.0 (audit orchestration): typed ticket fields and named exclusive
+ * leases. New tables only, created on open; the schema version stays 4 so an
+ * older sea-lite keeps opening the store (it ignores these tables and the
+ * `sea_ticket.fields_set` / `sea_lease.*` events). Opening skips DDL only
+ * when this table exists.
+ */
+export const SEA_NEWEST_TABLE = 'sea_lease_intents';
 
 export const SEA_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS sea_tickets (
@@ -104,6 +113,50 @@ CREATE TRIGGER IF NOT EXISTS sea_tickets_fts_au AFTER UPDATE OF title, body ON s
   DELETE FROM sea_tickets_fts WHERE ticket_id = old.id;
   INSERT INTO sea_tickets_fts(ticket_id, title, body) VALUES (new.id, new.title, new.body);
 END;
+
+-- Typed fields (audit/fields.ts): one row per set field; value is TEXT in the
+-- field's declared type. Versioned per ticket in sea_field_heads, so the
+-- ticket row (and older builds' rebuild of it) is untouched.
+CREATE TABLE IF NOT EXISTS sea_fields (
+  ticket_id TEXT NOT NULL REFERENCES sea_tickets(id),
+  name      TEXT NOT NULL,
+  value     TEXT NOT NULL,
+  set_seq   INTEGER NOT NULL,
+  PRIMARY KEY (ticket_id, name)
+);
+CREATE INDEX IF NOT EXISTS sea_fields_lookup_idx ON sea_fields (name, value);
+CREATE TABLE IF NOT EXISTS sea_field_heads (
+  ticket_id TEXT PRIMARY KEY REFERENCES sea_tickets(id),
+  version   INTEGER NOT NULL,
+  last_seq  INTEGER NOT NULL
+);
+
+-- Named exclusive leases (audit/lease.ts) and their write-intent journal.
+CREATE TABLE IF NOT EXISTS sea_leases (
+  name           TEXT PRIMARY KEY,
+  epoch          INTEGER NOT NULL,
+  holder         TEXT,
+  holder_session TEXT,
+  token_hash     TEXT,
+  expires_at     TEXT,
+  lease_seconds  INTEGER,
+  last_seq       INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sea_lease_intents (
+  intent_id       TEXT PRIMARY KEY,
+  lease_name      TEXT NOT NULL,
+  epoch           INTEGER NOT NULL,
+  op              TEXT NOT NULL,
+  target          TEXT,
+  idempotency_key TEXT,
+  state           TEXT NOT NULL CHECK (state IN ('open', 'happened', 'not_happened', 'may_have_happened')),
+  opened_by       TEXT NOT NULL,
+  opened_at       TEXT NOT NULL,
+  opened_seq      INTEGER NOT NULL,
+  closed_seq      INTEGER,
+  evidence_ref    TEXT
+);
+CREATE INDEX IF NOT EXISTS sea_lease_intents_idx ON sea_lease_intents (lease_name, state);
 `;
 
 /**
