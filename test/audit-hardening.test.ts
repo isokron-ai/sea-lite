@@ -104,8 +104,8 @@ describe('CSV formula guard (#5 blocker 2) and round trip', () => {
     expect(parseCsv(toCsv(['v'], all.map((v) => ({ v })))).rows.map((r) => r['v'])).toEqual(all);
   });
 
-  it('export → import → export is the identity (guard prefix undone, gate results from their own columns)', () => {
-    const { store } = fresh({ actor: 'mcp-audit' });
+  it('export → trusted import → export is the identity (guard prefix undone, gate results from their own columns)', () => {
+    const { store } = fresh({ actor: 'mcp-audit', role: 'operator' });
     store.auditOpen({ audit_id: 'a', title: 'A' });
     store.auditOpen({ audit_id: 'b', title: 'B' });
     store.auditFinding('a', {
@@ -116,7 +116,7 @@ describe('CSV formula guard (#5 blocker 2) and round trip', () => {
     });
     store.auditFinding('a', { finding_id: 'F2', title: 'two', gates: { repro: { result: 'pass', note: 'fail: in the note only' } } });
     const one = store.auditExport('a', 'csv') as string;
-    store.auditImport('b', one);
+    store.auditImport('b', one, { trusted: true });
     const strip = (csv: string) => parseCsv(csv).rows.map((r) => ({ ...r, ticket_id: '' }));
     expect(strip(store.auditExport('b', 'csv') as string)).toEqual(strip(one));
     const f1 = parseCsv(one).rows.find((r) => r['id'] === 'F1')!;
