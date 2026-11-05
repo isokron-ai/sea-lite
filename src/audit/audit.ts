@@ -97,24 +97,36 @@ export interface UpsertFindingResult {
   redacted?: string[];
 }
 
-function reviewIfReady(ctx: Ctx, audit_id: string, finding_ticket: string, finding_id: string): boolean {
-  const f = readFields(ctx.db, finding_ticket);
-  if (f.review !== undefined) return false;
+/** Tracker bookkeeping: changing these never reopens a decision. */
+const REVIEW_NEUTRAL: readonly string[] = ['pr_or_issue', 'submitted_date', 'tracker_status', 'submit_plan', 'review_note'];
+
+function gatesResolved(ctx: Ctx, audit_id: string, finding_id: string): boolean {
   for (const g of GATES) {
     const id = byField(ctx, audit_id, 'gate_of', finding_id, { name: 'gate', value: g });
     const r = id ? readFields(ctx.db, id).result : undefined;
     if (r === undefined || r === 'pending') return false;
   }
-  setFields(ctx, finding_ticket, { review: 'pending' }, undefined, MANAGED);
   return true;
 }
 
-/** why: an approval was given to the finding as it was; a failed gate or a new verdict sends it back to the queue. */
-function reopenApproval(ctx: Ctx, finding_ticket: string): boolean {
-  if (readFields(ctx.db, finding_ticket).review !== 'approved') return false;
-  setFields(ctx, finding_ticket, { review: 'pending' }, undefined, MANAGED);
-  return true;
+/**
+ * The review state after a write (#6). Unresolved gates: out of the queue
+ * (no review state), whatever was decided. All resolved: queued when new;
+ * and a decision (approved / rejected / hold) goes back to `pending` when
+ * the write changed substance (title, a non-bookkeeping field, a gate's
+ * result, note or evidence), since it was made about the finding as it was.
+ * Returns 'pending' when this write (re)queued the finding.
+ */
+function reconcileReview(ctx: Ctx, audit_id: string, finding_ticket: string, finding_id: string, substance: boolean): 'pending' | undefined {
+  const cur = readFields(ctx.db, finding_ticket).review;
+  let next: string | undefined = cur === undefined ? undefined : String(cur);
+  if (!gatesResolved(ctx, audit_id, finding_id)) next = undefined;
+  else if (next === undefined || (substance && next !== 'pending')) next = 'pending';
+  if (next !== cur) setFields(ctx, finding_ticket, { review: next ?? null }, undefined, MANAGED);
+  return next === 'pending' && cur !== 'pending' ? 'pending' : undefined;
 }
+
+const GATE_SUBSTANCE: readonly string[] = ['result', 'note', 'evidence_ref'];
 
 const MANAGED = { managed: true } as const;
 
@@ -163,16 +175,16 @@ export function upsertFinding(ctx0: Ctx, audit_id: string, input: FindingInput):
     const r = setFields(ctx, id, input.fields ?? {});
     changed.push(...r.changed);
     redacted.push(...(r.redacted ?? []));
-    let reopened = r.changed.includes('verdict') && reopenApproval(ctx, id);
+    let substance = !created && (changed.includes('title') || r.changed.some((f) => !REVIEW_NEUTRAL.includes(f)));
     for (const [g, v] of Object.entries(input.gates ?? {}) as [Gate, GateInput][]) {
       const gr = gateWrite(ctx, audit_id, input.finding_id, g, v);
       if (gr.changed.length > 0) changed.push(`gate.${g}`);
       redacted.push(...gr.redacted.map((x) => `gate.${g}.${x}`));
-      if (gr.failed) reopened = reopenApproval(ctx, id) || reopened;
+      if (!created && gr.changed.some((f) => GATE_SUBSTANCE.includes(f))) substance = true;
     }
-    const queued = reviewIfReady(ctx, audit_id, id, input.finding_id) || reopened;
+    const queued = reconcileReview(ctx, audit_id, id, input.finding_id, substance);
     const version = readVersion(ctx, id);
-    return { ticket_id: id, created, version, changed, ...(queued ? { review: 'pending' as const } : {}), ...(redacted.length > 0 ? { redacted } : {}) };
+    return { ticket_id: id, created, version, changed, ...(queued ? { review: queued } : {}), ...(redacted.length > 0 ? { redacted } : {}) };
   });
 }
 
@@ -181,7 +193,7 @@ function readVersion(ctx: Ctx, id: string): number {
 }
 
 /** `result` / `note` / `evidence_ref`: a key left out is left as is; a null or empty note / evidence_ref unsets it. */
-function gateWrite(ctx: Ctx, audit_id: string, finding_id: string, gate: Gate, v: GateInput): { changed: string[]; redacted: string[]; failed: boolean } {
+function gateWrite(ctx: Ctx, audit_id: string, finding_id: string, gate: Gate, v: GateInput): { changed: string[]; redacted: string[] } {
   if (!(GATES as readonly string[]).includes(gate)) throw new SeaError('invalid_input', `gate must be one of ${GATES.join(', ')}`, { gate });
   const gid = byField(ctx, audit_id, 'gate_of', finding_id, { name: 'gate', value: gate });
   if (!gid) throw new SeaError('not_found', `finding ${finding_id} not found in audit ${audit_id}`, { finding_id });
@@ -191,7 +203,7 @@ function gateWrite(ctx: Ctx, audit_id: string, finding_id: string, gate: Gate, v
   if ('evidence_ref' in v) patch['evidence_ref'] = v.evidence_ref || null;
   if (v.claimed !== undefined) patch['claimed_result'] = v.claimed;
   const r = setFields(ctx, gid, patch, undefined, MANAGED);
-  return { changed: r.changed, redacted: r.redacted ?? [], failed: r.changed.includes('result') && v.result === 'fail' };
+  return { changed: r.changed, redacted: r.redacted ?? [] };
 }
 
 /** Record one gate's result. Returns the gate ticket and what changed. */
@@ -201,10 +213,9 @@ export function recordGate(ctx0: Ctx, audit_id: string, input: { finding_id: str
     const { finding_id, gate, ...g } = input;
     const gr = gateWrite(ctx, audit_id, finding_id, gate, g);
     const fid = byField(ctx, audit_id, 'finding_id', finding_id)!;
-    const reopened = gr.failed && reopenApproval(ctx, fid);
-    const queued = reviewIfReady(ctx, audit_id, fid, finding_id) || reopened;
+    const queued = reconcileReview(ctx, audit_id, fid, finding_id, gr.changed.some((f) => GATE_SUBSTANCE.includes(f)));
     const gid = byField(ctx, audit_id, 'gate_of', finding_id, { name: 'gate', value: gate })!;
-    return { ticket_id: gid, changed: gr.changed, ...(queued ? { review: 'pending' as const } : {}) };
+    return { ticket_id: gid, changed: gr.changed, ...(queued ? { review: queued } : {}) };
   });
 }
 

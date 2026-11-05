@@ -53,8 +53,8 @@ export function toCsv(columns: readonly string[], rows: readonly Record<string, 
 /**
  * Strict RFC 4180 parse (quoted fields, "" escapes, CRLF or LF, optional
  * BOM) into header-keyed rows. Errors name the 1-based line of the record:
- * an unterminated quote, text after a closing quote, a record with more
- * cells than the header, a duplicate or empty header name.
+ * an unterminated quote, text after a closing quote, a record with more or
+ * fewer cells than the header, a duplicate or empty header name.
  */
 export function parseCsv(text: string): { header: string[]; rows: Record<string, string>[]; lines: number[] } {
   const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
@@ -121,7 +121,7 @@ export function parseCsv(text: string): { header: string[]; rows: Record<string,
     if (seen.has(h)) throw bad(`duplicate column "${h}"`, head?.line ?? 1);
     seen.add(h);
   }
-  for (const r of nonEmpty) if (r.cells.length > header.length) throw bad(`${r.cells.length} cells, header has ${header.length}`, r.line);
+  for (const r of nonEmpty) if (r.cells.length !== header.length) throw bad(`${r.cells.length} cells, header has ${header.length}`, r.line);
   return {
     header,
     rows: nonEmpty.map((r) => Object.fromEntries(header.map((h, k) => [h, unguardCell(r.cells[k] ?? '')]))),

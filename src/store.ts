@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 
 import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kronicle-lite';
 
-import { clockGuard, fsReference, parseMaxSkew, type ClockGuard } from './core/clock.js';
+import { clockGuard, fsReference, parseMaxSkew, type ClockGuard, type Reference } from './core/clock.js';
 import { SeaError } from './core/errors.js';
 import { isBusy, resolveId, tx, type Ctx } from './core/repo.js';
 import { SEA_MIGRATIONS, SEA_NEWEST_TABLE, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
@@ -69,7 +69,7 @@ export interface SeaLiteOptions {
    * clock differs from it by more than SEA_LITE_MAX_CLOCK_SKEW_SECONDS
    * (default 30; 0 disables). See core/clock.ts.
    */
-  clockReference?: () => number | null;
+  clockReference?: () => Reference;
   /**
    * 0.6.1 (P2-03): byte budget for one sea_list / sea_history response's
    * items (UTF-8 JSON). A page stops before the item that would exceed it and

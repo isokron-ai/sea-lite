@@ -15,7 +15,7 @@
  * towards refusing the holder, never towards admitting someone else).
  */
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, writeSync, type Stats } from 'node:fs';
+import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, openSync, unlinkSync, writeSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 
 import { SeaError } from './errors.js';
@@ -27,7 +27,7 @@ const PROBE_FILE = 'sea-clock.probe';
 
 export interface ClockGuard {
   /** Measured skew in ms (this process minus the reference) when over the tolerance, else null. */
-  untrusted(): { skew_ms: number; max_ms: number } | null;
+  untrusted(): Untrusted | null;
 }
 
 /** SEA_LITE_MAX_CLOCK_SKEW_SECONDS: tolerance in seconds; 0 disables the guard. */
@@ -38,46 +38,74 @@ export function parseMaxSkew(raw: string | undefined): number {
   return n;
 }
 
-/** The probe never follows a link or opens a FIFO / device (both were possible through a planted file). */
-const PROBE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+/** Opening the probe never follows a link, never blocks on a FIFO, and never truncates before the checks. */
+const OPEN_FLAGS = constants.O_WRONLY | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+const CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+
+/** A reference reading: ms since the epoch, null (cannot measure: fail open, warned), or tampered (fail closed). */
+export type Reference = number | null | { tampered: string };
 
 function defaultWarn(message: string): void {
   process.emitWarning(message, { code: 'SEA_LITE_CLOCK_PROBE' });
 }
 
 /**
- * The file system's notion of "now" in ms, from a probe write in `dir`; null
- * when it cannot be measured (the guard then allows lease decisions). The
- * first failure is reported once through `warn` (default: a process warning
- * on stderr) so a disabled check is never silent; `sea-lite doctor` reports
- * it too.
+ * The file system's notion of "now" in ms, from a probe write in `dir`.
+ *
+ * #6: anything other than our own regular, singly linked file at the probe
+ * path (a symlink, a FIFO, a hard link to someone else's file) is a plant:
+ * it is unlinked (which never touches what it points at) and a fresh probe is
+ * created exclusively. A plant that cannot be removed (a directory) is
+ * reported as tampered and the guard fails closed. A data dir that cannot be
+ * written at all (read-only mount) is not an attack: the reading is null, the
+ * guard allows lease decisions, and `warn` says so once (default: a process
+ * warning on stderr); `sea-lite doctor` reports it too.
  */
-export function fsReference(dir: string, warn: (message: string) => void = defaultWarn): () => number | null {
+export function fsReference(dir: string, warn: (message: string) => void = defaultWarn): () => Reference {
   const file = join(dir, PROBE_FILE);
   let warned = false;
-  const fail = (why: string): null => {
+  const unavailable = (why: string): null => {
     if (!warned) {
       warned = true;
       warn(`sea-lite: clock check disabled for ${dir}: ${why}; leases then trust this process's clock`);
     }
     return null;
   };
+  const write = (fd: number): number => {
+    ftruncateSync(fd, 0);
+    writeSync(fd, `${process.pid}\n`);
+    return fstatSync(fd).mtimeMs;
+  };
   return () => {
     let fd: number | null = null;
     try {
-      // why: lstat first for platforms without O_NOFOLLOW (Windows); the flags close the race on POSIX.
       const pre = lstatOrNull(file);
-      if (pre && !pre.isFile()) return fail(`${file} is not a regular file`);
-      fd = openSync(file, PROBE_FLAGS, 0o600);
-      if (!fstatSync(fd).isFile()) return fail(`${file} is not a regular file`);
-      writeSync(fd, `${process.pid}\n`);
-      return fstatSync(fd).mtimeMs;
+      if (pre && (!pre.isFile() || pre.nlink > 1)) {
+        try {
+          unlinkSync(file);
+        } catch (e) {
+          return { tampered: `${file} is not our probe (${kind(pre)}) and cannot be removed: ${(e as NodeJS.ErrnoException).code ?? String(e)}` };
+        }
+        fd = openSync(file, CREATE_FLAGS, 0o600);
+      } else {
+        fd = openSync(file, OPEN_FLAGS, 0o600);
+      }
+      const st = fstatSync(fd);
+      // why: closes the lstat→open race (O_NOFOLLOW covers links; this covers a hard link made in between).
+      if (!st.isFile() || st.nlink > 1) return { tampered: `${file} changed under the probe (${kind(st)})` };
+      return write(fd);
     } catch (e) {
-      return fail(`${file}: ${(e as NodeJS.ErrnoException).code ?? String(e)}`);
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP' || code === 'ENXIO' || code === 'EEXIST') return { tampered: `${file}: ${code} while opening the probe` };
+      return unavailable(`${file}: ${code ?? String(e)}`);
     } finally {
       if (fd !== null) closeSync(fd);
     }
   };
+}
+
+function kind(st: Stats): string {
+  return st.isSymbolicLink() ? 'symlink' : st.isFIFO() ? 'fifo' : st.isDirectory() ? 'directory' : st.nlink > 1 ? `hard link ×${st.nlink}` : 'not a regular file';
 }
 
 function lstatOrNull(file: string): Stats | null {
@@ -88,20 +116,32 @@ function lstatOrNull(file: string): Stats | null {
   }
 }
 
-export function clockGuard(clock: () => Date, reference: () => number | null, maxSkewSeconds: number): ClockGuard {
+export interface Untrusted {
+  /** Measured skew in ms (this process minus the reference); NaN when tampered. */
+  skew_ms: number;
+  max_ms: number;
+  /** Set when the probe path was tampered with and could not be repaired. */
+  tampered?: string;
+}
+
+export function clockGuard(clock: () => Date, reference: () => Reference, maxSkewSeconds: number): ClockGuard {
   const max_ms = maxSkewSeconds * 1000;
   let measuredAt = -Infinity;
-  let skew: number | null = null;
+  let last: Reference = null;
+  let at = 0;
   return {
     untrusted() {
       if (max_ms <= 0) return null;
       const t = performance.now();
       if (t - measuredAt >= PROBE_EVERY_MS) {
-        const ref = reference();
-        skew = ref === null ? null : clock().getTime() - ref;
+        last = reference();
+        at = clock().getTime();
         measuredAt = t;
       }
-      return skew !== null && Math.abs(skew) > max_ms ? { skew_ms: Math.round(skew), max_ms } : null;
+      if (last === null) return null;
+      if (typeof last === 'object') return { skew_ms: NaN, max_ms, tampered: last.tampered };
+      const skew = at - last;
+      return Math.abs(skew) > max_ms ? { skew_ms: Math.round(skew), max_ms } : null;
     },
   };
 }
@@ -110,6 +150,11 @@ export function clockGuard(clock: () => Date, reference: () => number | null, ma
 export function assertClockTrusted(guard: ClockGuard | undefined, what: string): void {
   const u = guard?.untrusted() ?? null;
   if (u === null) return;
+  if (u.tampered !== undefined) {
+    throw new SeaError('clock_skew', `refusing to ${what}: the clock probe was tampered with and could not be repaired (${u.tampered}); remove it`, {
+      reason: 'probe_tampered',
+    });
+  }
   const dir = u.skew_ms > 0 ? 'ahead of' : 'behind';
   throw new SeaError(
     'clock_skew',

@@ -72,8 +72,8 @@ describe('clock skew guard (C2-06)', () => {
   it('an on-disk store uses the file-system clock by default: same host, no skew, claims work', () => {
     const dir = tmp();
     const ref = fsReference(dir)();
-    expect(ref).not.toBeNull();
-    expect(Math.abs(Date.now() - ref!)).toBeLessThan(5_000);
+    expect(typeof ref).toBe("number");
+    expect(Math.abs(Date.now() - (ref as number))).toBeLessThan(5_000);
     const s = new SeaLite({ dataDir: dir, actor: 'a' });
     const t = s.create({ title: 'x', ...NEW });
     expect(s.claim({ ticket_ids: [t.ticket.id] }).claims).toHaveLength(1);
