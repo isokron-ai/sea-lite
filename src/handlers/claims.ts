@@ -9,6 +9,7 @@ import type { ChainHead } from 'kronicle-lite';
 
 import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
+import { assertClockTrusted } from '../core/clock.js';
 import { clampLease, DEFAULT_LEASE_SECONDS, expiryFrom, hasLiveClaim, MAX_LEASE_SECONDS, validateFence } from '../core/fence.js';
 import { holderLabel } from '../core/identity.js';
 import type { Blocker, WaitInfo } from '../core/wait.js';
@@ -117,6 +118,7 @@ export function assertScopeFree(ctx: Ctx, scope: Scope, excludeIds: ReadonlySet<
 
 export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
   const lease = clampLease(input.lease_seconds);
+  assertClockTrusted(ctx.clock, 'claim');
   const { scope, worktree } = resolveClaimScope(input.scope, ctx.root);
   return tx(ctx.db, () => {
     // Resolve, de-duplicate, and lock in one order so two processes claiming
@@ -187,6 +189,7 @@ export function refresh(ctx: Ctx, input: RefreshInput): RefreshResult {
   if (input.extend_by_seconds !== undefined && input.extend_by_seconds > MAX_LEASE_SECONDS) {
     throw new SeaError('invalid_input', `extend_by_seconds must be ≤ ${MAX_LEASE_SECONDS}`);
   }
+  assertClockTrusted(ctx.clock, 'refresh a lease');
   return tx(ctx.db, () => {
     const id = resolveId(ctx.db, input.ticket_id);
     const row = mustGetRow(ctx.db, id);
@@ -294,6 +297,7 @@ export interface NextResult {
  */
 export function next(ctx: Ctx, input: NextInput): NextResult {
   const lease = clampLease(input.lease_seconds);
+  assertClockTrusted(ctx.clock, 'dispatch (sea_next)');
   const { scope, worktree } = resolveClaimScope(input.scope, ctx.root);
   return tx(ctx.db, () => {
     sweepAllExpired(ctx);
@@ -421,6 +425,8 @@ export interface HeartbeatResult {
  * layer's per-call touch).
  */
 export function heartbeat(ctx: Ctx, opts: { quiet?: boolean } = {}): HeartbeatResult {
+  if (opts.quiet && ctx.clock?.untrusted()) return { renewed: [], lapsed: [], head: ctx.chain.head() };
+  assertClockTrusted(ctx.clock, 'renew leases');
   return tx(ctx.db, () => {
     const rows = ctx.db
       .prepare(`SELECT * FROM sea_tickets WHERE claim_token_hash IS NOT NULL AND claim_actor IS NOT NULL ORDER BY id`)

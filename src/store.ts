@@ -6,8 +6,9 @@
 
 import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kronicle-lite';
 
+import { clockGuard, fsReference, parseMaxSkew, type ClockGuard } from './core/clock.js';
 import { SeaError } from './core/errors.js';
-import type { Ctx } from './core/repo.js';
+import { isBusy, type Ctx } from './core/repo.js';
 import { SEA_MIGRATIONS, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
 import * as claims from './handlers/claims.js';
 import * as finishH from './handlers/finish.js';
@@ -54,6 +55,15 @@ export interface SeaLiteOptions {
   tracks?: readonly Track[];
   /** Clock override (tests). */
   now?: () => Date;
+  /**
+   * C2-06 (0.6.2): a reference clock (ms since the epoch, or null when
+   * unknown) that every process sharing the store sees. Default: the file
+   * system's mtime on a probe in the data dir, unless `now` is overridden or
+   * the store is in memory. Lease decisions are refused while this process's
+   * clock differs from it by more than SEA_LITE_MAX_CLOCK_SKEW_SECONDS
+   * (default 30; 0 disables). See core/clock.ts.
+   */
+  clockReference?: () => number | null;
   /**
    * 0.6.1 (P2-03): byte budget for one sea_list / sea_history response's
    * items (UTF-8 JSON). A page stops before the item that would exceed it and
@@ -121,6 +131,7 @@ export class SeaLite {
   readonly sessionWide: boolean;
   private readonly ownsKronicle: boolean;
   private readonly clock: () => Date;
+  private readonly clockGuard: ClockGuard | undefined;
   readonly maxResponseBytes: number;
 
   constructor(opts: SeaLiteOptions = {}) {
@@ -129,7 +140,12 @@ export class SeaLite {
       this.ownsKronicle = false;
     } else {
       const klOpts: KronicleLiteOptions = opts.memory ? { memory: true } : opts.dataDir !== undefined ? { dataDir: opts.dataDir } : {};
-      this.kronicle = new KronicleLite(klOpts);
+      try {
+        this.kronicle = new KronicleLite(klOpts);
+      } catch (e) {
+        if (isBusy(e)) throw new SeaError('wait_timeout', 'the store is busy (another process held the write lock while it was being opened); nothing was written, retry', { sqlite: (e as { code: string }).code });
+        throw e;
+      }
       this.ownsKronicle = true;
     }
     this.db = this.kronicle.db;
@@ -142,6 +158,8 @@ export class SeaLite {
     this.role = opts.role ?? parseRole(process.env['SEA_LITE_ROLE']);
     this.lifecycle = { tracks: opts.tracks ?? parseTracks(process.env['SEA_LITE_TRACKS']) };
     this.clock = opts.now ?? (() => new Date());
+    const reference = opts.clockReference ?? (opts.now === undefined && this.kronicle.dataDir !== null ? fsReference(this.kronicle.dataDir) : undefined);
+    this.clockGuard = reference ? clockGuard(this.clock, reference, parseMaxSkew(process.env['SEA_LITE_MAX_CLOCK_SKEW_SECONDS'])) : undefined;
     this.maxResponseBytes = opts.maxResponseBytes ?? parseResponseBudget(process.env['SEA_LITE_MAX_RESPONSE_BYTES']);
     ensureSeaSchema(this.db);
   }
@@ -170,6 +188,7 @@ export class SeaLite {
       lifecycle: this.lifecycle,
       ownsKronicle: false,
       clock: this.clock,
+      clockGuard: this.clockGuard,
       maxResponseBytes: this.maxResponseBytes,
       lastTouch: this.lastTouch,
     });
@@ -188,6 +207,7 @@ export class SeaLite {
       role: this.role,
       lifecycle: this.lifecycle,
       now: this.clock(),
+      ...(this.clockGuard ? { clock: this.clockGuard } : {}),
       maxResponseBytes: this.maxResponseBytes,
     };
   }
@@ -335,13 +355,19 @@ export class SeaLite {
   }
 }
 
+/** Never below kronicle-lite's own wait (10 s); 0.6.1 lowered it to 5 s. */
+const SEA_BUSY_TIMEOUT_MS = 10_000;
+
 export function ensureSeaSchema(db: Db): void {
-  db.pragma('busy_timeout = 5000');
-  db.exec(SEA_SCHEMA_SQL);
+  if (Number(db.pragma('busy_timeout', { simple: true })) < SEA_BUSY_TIMEOUT_MS) db.pragma(`busy_timeout = ${SEA_BUSY_TIMEOUT_MS}`);
   const row = db.prepare(`SELECT value FROM meta WHERE key = ?`).get(SEA_SCHEMA_META_KEY) as { value: string } | undefined;
   if (row && Number(row.value) > SEA_SCHEMA_VERSION) {
     throw new Error(`sea-lite: store has sea_schema_version ${row.value}, newer than this build (${SEA_SCHEMA_VERSION}); upgrade sea-lite`);
   }
+  // why: every CLI command opens the store; a current schema needs no write,
+  // so a 40-process storm no longer queues 40 extra write transactions.
+  if (row && Number(row.value) === SEA_SCHEMA_VERSION && db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sea_tickets'`).get()) return;
+  db.exec(SEA_SCHEMA_SQL);
   // Additive column migrations for stores created by an older build. CREATE
   // TABLE IF NOT EXISTS above is a no-op on them, so add what is missing.
   db.transaction(() => {

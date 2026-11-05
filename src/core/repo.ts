@@ -9,6 +9,7 @@ import type { Chain, Db } from 'kronicle-lite';
 
 import type { LifecycleConfig } from '../model/lifecycle.js';
 import type { Role } from '../model/enums.js';
+import type { ClockGuard } from './clock.js';
 import { EVENT } from './events.js';
 import { SeaError, notFound } from './errors.js';
 import { isExpired } from './fence.js';
@@ -41,6 +42,8 @@ export interface Ctx {
   readonly role: Role;
   readonly lifecycle: LifecycleConfig;
   readonly now: Date;
+  /** C2-06: lease decisions are refused while this process's clock is skewed (core/clock.ts). */
+  readonly clock?: ClockGuard;
   /** Byte budget of one sea_list / sea_history page (P2-03); default DEFAULT_MAX_RESPONSE_BYTES. */
   readonly maxResponseBytes?: number;
 }
@@ -108,6 +111,8 @@ export function mustGetRow(db: Db, id: string): TicketRow {
  */
 export function sweepExpired(ctx: Ctx, row: TicketRow): TicketRow {
   if (row.claim_token_hash === null || !isExpired(row.claim_expires_at, ctx.now)) return row;
+  // why: a skewed clock must not decide that someone else's lease lapsed (C2-06).
+  if (ctx.clock?.untrusted()) return row;
   const r = ctx.chain.append({
     event_type: EVENT.ticket_claim_expired,
     actor_id: ctx.actor,
@@ -133,6 +138,7 @@ export function sweepExpired(ctx: Ctx, row: TicketRow): TicketRow {
 
 /** Sweep every expired lease in the table (used by list/next so the queue view is honest). */
 export function sweepAllExpired(ctx: Ctx): number {
+  if (ctx.clock?.untrusted()) return 0;
   const rows = ctx.db
     .prepare(`SELECT * FROM sea_tickets WHERE claim_expires_at IS NOT NULL AND claim_expires_at <= ?`)
     .all(ctx.now.toISOString()) as TicketRow[];
@@ -191,8 +197,22 @@ export function checkVersion(row: TicketRow, expected: number | undefined): void
 
 /** Run `fn` in one BEGIN IMMEDIATE transaction. Synchronous by construction. */
 export function tx<T>(db: Db, fn: () => T): T {
-  const out = db.transaction(fn).immediate();
+  let out: T;
+  try {
+    out = db.transaction(fn).immediate();
+  } catch (e) {
+    // why: SQLITE_BUSY after busy_timeout is contention, not a bug; the
+    // transaction rolled back, so report it as a typed, retryable conflict.
+    if (isBusy(e)) throw new SeaError('wait_timeout', 'the store is busy (another process held the write lock past the busy timeout); nothing was written, retry', { sqlite: (e as { code: string }).code });
+    throw e;
+  }
   // Committed (or a nested savepoint released): wake in-process waiters (core/wait.ts).
   if (!db.inTransaction) notifyChange(db);
   return out;
+}
+
+/** SQLITE_BUSY / SQLITE_BUSY_SNAPSHOT / SQLITE_LOCKED from better-sqlite3. */
+export function isBusy(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'));
 }

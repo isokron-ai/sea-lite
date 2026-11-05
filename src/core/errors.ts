@@ -25,6 +25,7 @@ export const ERROR_CODES = [
   'confirmation_declined',
   'wait_timeout',
   'wait_cancelled',
+  'clock_skew',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

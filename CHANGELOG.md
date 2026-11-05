@@ -4,6 +4,33 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased] (0.6.2)
+
+### Fixed
+
+- **Lease clock skew (C2-06).** Expiry compared wall-clock instants written
+  by different processes, so a process 15 min ahead took over every live
+  lease, and one behind wrote leases that lapsed early for everyone else.
+  Each process now measures its clock against the file-system time on a
+  probe file in the data dir (re-measured at most once a minute); beyond
+  `SEA_LITE_MAX_CLOCK_SKEW_SECONDS` (default 30, 0 disables) claim, next,
+  refresh and heartbeat fail with the new error code `clock_skew`, the
+  per-call auto-heartbeat skips, and the lazy expiry sweep leaves other
+  holders' leases alone. Reads and fenced writes are unchanged. Library
+  option `clockReference` supplies another reference.
+- **Idempotency keys from before 0.6.0 (C2-07).** A key bound to an event
+  without a `request_hash` replayed whatever request reused it after an
+  upgrade (F09 again). It is now `invalid_input` with
+  `reason: "unverifiable_key"` and the bound `first_seq`; nothing is written.
+- **SQLite busy under load (round-3 lead, `sl-cli-tokens.sh 40`).** Not
+  reproduced in 8 runs of 40/80-way CLI claim storms here; fixed the two
+  ways it could happen: sea-lite lowered kronicle-lite's 10 s busy timeout to
+  5 s, and every open ran a write transaction even when the schema was
+  current (one extra writer per CLI command). Opening a current store now
+  writes nothing, the timeout stays at ≥ 10 s, and `SQLITE_BUSY` past it —
+  in a sea-lite transaction or while opening — is a typed `wait_timeout`
+  ("nothing was written, retry"; CLI exit 1) instead of a raw stack trace.
+
 ## [0.6.1] — 2026-11-01
 
 Fixes from hardening round 2 (hooks, protocol and chaos tracks) and the live
