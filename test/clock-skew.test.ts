@@ -34,7 +34,7 @@ describe('clock skew guard (C2-06)', () => {
     const t = A.create({ title: 'x', ...NEW });
     A.claim({ ticket_ids: [t.ticket.id] });
     expect(codeOf(() => B.claim({ ticket_ids: [t.ticket.id] }))).toBe('clock_skew');
-    expect(codeOf(() => B.next({}))).toBe('clock_skew');
+    expect(codeOf(() => B.next({ include_unassigned: true }))).toBe('clock_skew');
     expect(codeOf(() => B.heartbeat())).toBe('clock_skew');
     // Reads still work, and do not sweep A's lease as expired.
     B.list({ include_terminal: true, limit: 10, view: 'compact', claimed: 'any' });
