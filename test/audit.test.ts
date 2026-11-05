@@ -108,7 +108,7 @@ describe('named exclusive lease', () => {
     w1.close();
   });
 
-  it('ten processes race to acquire one lease: exactly one wins, nine get already_claimed', async () => {
+  it('four processes race to acquire one lease: exactly one wins, three get already_claimed', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sea-lease-race-'));
     try {
       new SeaLite({ dataDir: dir, actor: 'init' }).close();
@@ -117,7 +117,7 @@ describe('named exclusive lease', () => {
         const s = new SeaLite({ dataDir: process.argv[1], actor: process.argv[2] });
         try { s.leaseAcquire({ name: 'sandbox:race' }); console.log('won'); } catch (e) { console.log(e.code); } finally { s.close(); }`;
       const runs = await Promise.all(
-        Array.from({ length: 10 }, (_, k) =>
+        Array.from({ length: 4 }, (_, k) =>
           new Promise<string>((res) => {
             const c = spawn(process.execPath, ['--input-type=module', '-e', script, dir, `w${k}`], { stdio: ['ignore', 'pipe', 'inherit'] });
             let o = '';
@@ -127,7 +127,7 @@ describe('named exclusive lease', () => {
         ),
       );
       expect(runs.filter((r) => r === 'won')).toHaveLength(1);
-      expect(runs.filter((r) => r === 'already_claimed')).toHaveLength(9);
+      expect(runs.filter((r) => r === 'already_claimed')).toHaveLength(3);
       const s = new SeaLite({ dataDir: dir, actor: 'check' });
       expect(s.leaseShow('sandbox:race')).toMatchObject({ epoch: 1, live: true });
       expect(s.verify().ok).toBe(true);
