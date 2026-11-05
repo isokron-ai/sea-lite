@@ -424,10 +424,16 @@ export class SeaLite {
    * row by its `id` column, in one transaction (all rows or none). Strict:
    * an unterminated quote, a ragged row, a duplicate or unknown column and a
    * duplicate id are `invalid_input` naming the row. Gate results come from
-   * the `<gate>_result` columns only, never from the gate note text;
+   * the `<gate>_result` columns only, never from the gate note text, and
+   * land as *claims* (`claimed:pass`, not counted toward review) unless the
+   * import is `trusted` (operator role only: an agent-written CSV must not be
+   * able to pass its own gates). A `claimed:…` cell is always a claim.
    * `ticket_id` and `review` are accepted and ignored.
    */
-  auditImport(audit_id: string, csv: string): { created: number; updated: number; unchanged: number; queued: number } {
+  auditImport(audit_id: string, csv: string, opts: { trusted?: boolean } = {}): { created: number; updated: number; unchanged: number; queued: number } {
+    if (opts.trusted && this.role !== 'operator') {
+      throw new SeaError('forbidden', `a trusted import (gate results recorded as results) needs the operator role; "${this.actor}" acts as ${this.role}`);
+    }
     const { header, rows, lines } = exportH.parseCsv(csv);
     if (!header.includes('id') || !header.includes('title')) throw new SeaError('invalid_input', 'findings.csv needs an id and a title column', { header });
     for (const h of header) {
@@ -460,7 +466,13 @@ export class SeaLite {
             const f = auditH.IMPORT_COLUMNS[col]!;
             if (v !== '') fields[f] = f === 'affected_count' && /^\d+$/.test(v) ? Number(v) : raw;
           } else if (Object.hasOwn(auditH.IMPORT_GATE_COLUMNS, col)) gate(auditH.IMPORT_GATE_COLUMNS[col]!).note = raw === '' ? null : raw;
-          else if (Object.hasOwn(auditH.IMPORT_GATE_RESULT_COLUMNS, col) && v !== '') gate(auditH.IMPORT_GATE_RESULT_COLUMNS[col]!).result = v;
+          else if (Object.hasOwn(auditH.IMPORT_GATE_RESULT_COLUMNS, col) && v !== '') {
+            const g = gate(auditH.IMPORT_GATE_RESULT_COLUMNS[col]!);
+            const claim = /^claimed:(.*)$/.exec(v);
+            if (claim) g.claimed = claim[1]!;
+            else if (opts.trusted) g.result = v;
+            else if (v !== 'pending') g.claimed = v;
+          }
         }
         let res: auditH.UpsertFindingResult;
         try {

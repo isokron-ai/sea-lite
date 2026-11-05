@@ -15,6 +15,7 @@ import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
 import { tx, type Ctx } from '../core/repo.js';
 import { insertLink, insertTicket } from '../handlers/tickets.js';
+import { looksLikeSecret } from './redact.js';
 import { GATES, MANAGED_FIELDS, readFields, redactText, setFields, type FieldMap, type FieldName, type Gate } from './fields.js';
 
 export const AUDIT_PROJECT_PREFIX = 'audit:';
@@ -22,6 +23,7 @@ const AUDIT_ID = /^[A-Za-z0-9._-]{1,100}$/;
 
 export function auditProject(audit_id: string): string {
   if (!AUDIT_ID.test(audit_id)) throw new SeaError('invalid_input', 'audit_id: 1-100 of letters, digits and ._-', { audit_id });
+  if (looksLikeSecret(audit_id)) throw new SeaError('invalid_input', 'audit_id looks like a credential; refusing to chain it');
   return AUDIT_PROJECT_PREFIX + audit_id;
 }
 
@@ -68,13 +70,13 @@ export function openAudit(ctx0: Ctx, input: { audit_id: string; title: string; c
       if (input.catalog_fingerprint !== undefined) setFields(ctx, existing.id, { catalog_fingerprint: input.catalog_fingerprint }, undefined, MANAGED);
       return { ticket_id: existing.id, created: false };
     }
-    const { row } = insertTicket(ctx, { title: input.title, body: '', kind: 'epic', priority: 'medium', tags: ['audit'], assignee: ctx.actor, status: 'triaged' });
+    const { row } = insertTicket(ctx, { title: redactText(input.title, 'title').text, body: '', kind: 'epic', priority: 'medium', tags: ['audit'], assignee: ctx.actor, status: 'triaged' });
     setFields(ctx, row.id, { audit_id: input.audit_id, ...(input.catalog_fingerprint !== undefined ? { catalog_fingerprint: input.catalog_fingerprint } : {}) }, undefined, MANAGED);
     return { ticket_id: row.id, created: true };
   });
 }
 
-export type GateInput = { result?: string; note?: string | null; evidence_ref?: string | null };
+export type GateInput = { result?: string; claimed?: string; note?: string | null; evidence_ref?: string | null };
 
 export interface FindingInput {
   finding_id: string;
@@ -187,6 +189,7 @@ function gateWrite(ctx: Ctx, audit_id: string, finding_id: string, gate: Gate, v
   if (v.result !== undefined) patch['result'] = v.result;
   if ('note' in v) patch['note'] = v.note || null;
   if ('evidence_ref' in v) patch['evidence_ref'] = v.evidence_ref || null;
+  if (v.claimed !== undefined) patch['claimed_result'] = v.claimed;
   const r = setFields(ctx, gid, patch, undefined, MANAGED);
   return { changed: r.changed, redacted: r.redacted ?? [], failed: r.changed.includes('result') && v.result === 'fail' };
 }
@@ -363,7 +366,8 @@ export function findingRows(ctx: Ctx, audit_id: string): ExportRow[] {
       if (!gid) continue;
       const gf: FieldMap = readFields(ctx.db, gid);
       if (gf.note !== undefined) out[GATE_COLUMN[g]] = String(gf.note);
-      if (gf.result !== undefined) out[GATE_RESULT_COLUMN[g]] = String(gf.result);
+      // A claim shows only while the gate has no result of its own.
+      if (gf.result !== undefined) out[GATE_RESULT_COLUMN[g]] = gf.result === 'pending' && gf.claimed_result !== undefined ? `claimed:${gf.claimed_result}` : String(gf.result);
     }
     return out;
   });

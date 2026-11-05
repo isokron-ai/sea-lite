@@ -12,7 +12,9 @@ import { z } from 'zod';
 import { EVENT } from '../core/events.js';
 import { SeaError } from '../core/errors.js';
 import { mustGetRow, type Ctx } from '../core/repo.js';
-import { redactSecrets, type Db } from 'kronicle-lite';
+import type { Db } from 'kronicle-lite';
+
+import { looksLikeSecret, redactText } from './redact.js';
 
 const text = (max: number) => z.string().max(max);
 const token = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:@/#+-]+$/, 'letters, digits and ._:@/#+- only');
@@ -60,6 +62,8 @@ export const FIELD_TYPES = {
   review_note: text(4000),
   // gate tickets
   result: z.enum(GATE_RESULTS),
+  /** What an untrusted findings.csv said the gate result was; never counts toward review. */
+  claimed_result: z.enum(['pass', 'fail', 'n/a']),
   note: text(8000),
 } as const;
 export type FieldName = keyof typeof FIELD_TYPES;
@@ -68,7 +72,7 @@ export type FieldMap = Partial<Record<FieldName, FieldValue>>;
 export const FIELD_NAMES = Object.keys(FIELD_TYPES) as FieldName[];
 
 /** Set only by the audit layer (identity, gate results, the review decision), never by a caller's patch. */
-export const MANAGED_FIELDS: readonly FieldName[] = ['audit_id', 'finding_id', 'gate_of', 'gate', 'result', 'review'];
+export const MANAGED_FIELDS: readonly FieldName[] = ['audit_id', 'finding_id', 'gate_of', 'gate', 'result', 'claimed_result', 'review'];
 
 /** Validate a patch: known names, typed values; null unsets. */
 export function parseFields(patch: Record<string, unknown>, managed = false): Record<FieldName, FieldValue | null> {
@@ -113,19 +117,10 @@ export interface SetFieldsResult {
   redacted?: FieldName[];
 }
 
-/** PostHog personal API keys, which kronicle-lite's write-time detectors do not know. */
-const EXTRA_SECRETS = /\bphx_[A-Za-z0-9]{20,}\b/g;
+export { redactText } from './redact.js';
 
-/**
- * why: the chain is append-only, so a credential pasted into evidence would
- * stay in every export and backup. kronicle-lite's write-time redaction, plus
- * the vendor key shapes audits handle.
- */
-export function redactText(text: string, field: string): { text: string; redacted: boolean } {
-  const r = redactSecrets(text, field);
-  const out = r.text.replace(EXTRA_SECRETS, '[REDACTED:posthog_personal_key]');
-  return { text: out, redacted: r.findings.length > 0 || out !== r.text };
-}
+/** Token-typed fields name things (ids, refs): a credential there is refused, never rewritten. */
+const IDENTITY_TOKENS: readonly FieldName[] = ['audit_id', 'finding_id', 'gate_of', 'catalog_fingerprint', 'evidence_ref'];
 
 /** Caller holds the transaction. `expect_version` guards against a concurrent writer; `managed` is for the audit layer only. */
 export function setFields(ctx: Ctx, ticket_id: string, patch: Record<string, unknown>, expect_version?: number, opts: { managed?: boolean } = {}): SetFieldsResult {
@@ -134,6 +129,10 @@ export function setFields(ctx: Ctx, ticket_id: string, patch: Record<string, unk
   const redacted: FieldName[] = [];
   for (const [k, v] of Object.entries(parsed) as [FieldName, FieldValue | null][]) {
     if (typeof v !== 'string') continue;
+    if (IDENTITY_TOKENS.includes(k)) {
+      if (looksLikeSecret(v)) throw new SeaError('invalid_input', `field "${k}" looks like a credential; refusing to chain it`, { field: k });
+      continue;
+    }
     const r = redactText(v, k);
     if (r.redacted) {
       parsed[k] = r.text;
