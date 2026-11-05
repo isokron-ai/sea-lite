@@ -155,12 +155,12 @@ describe('strict findings.csv import', () => {
 });
 
 describe('clock probe hardening', () => {
-  it.skipIf(!POSIX)('does not follow a symlink (a canary stays intact) and refuses it', () => {
+  it.skipIf(!POSIX)('does not follow a symlink (a canary stays intact); the link is replaced', () => {
     const dir = tmp();
     const canary = join(dir, 'canary.txt');
     writeFileSync(canary, 'precious\n');
     symlinkSync(canary, join(dir, 'sea-clock.probe'));
-    expect(fsReference(dir)()).toBeNull();
+    expect(typeof fsReference(dir, () => undefined)()).toBe('number');
     expect(readFileSync(canary, 'utf8')).toBe('precious\n');
   });
 
@@ -169,21 +169,18 @@ describe('clock probe hardening', () => {
     const r = spawnSync('mkfifo', [join(dir, 'sea-clock.probe')]);
     if (r.status !== 0) return;
     const t0 = Date.now();
-    expect(fsReference(dir)()).toBeNull();
+    expect(typeof fsReference(dir, () => undefined)()).toBe('number');
     expect(Date.now() - t0).toBeLessThan(2000);
   });
 
   it('an unwritable probe warns once instead of failing open silently, and doctor reports it', async () => {
     const dir = tmp();
     const warnings: string[] = [];
-    const ref = fsReference(dir, (m) => warnings.push(m));
-    if (POSIX) {
-      symlinkSync('/nonexistent', join(dir, 'sea-clock.probe'));
-      expect(ref()).toBeNull();
-      expect(ref()).toBeNull();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toMatch(/clock check disabled/);
-    }
+    const ref = fsReference(join(dir, 'missing-dir'), (m) => warnings.push(m));
+    expect(ref()).toBeNull();
+    expect(ref()).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/clock check disabled/);
     new SeaLite({ dataDir: join(dir, 'd'), actor: 'a' }).close();
     const rep = await runDoctor({ dataDir: join(dir, 'd') });
     expect(rep.checks.find((c) => c.id === 'clock')).toMatchObject({ status: 'ok' });

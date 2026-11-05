@@ -139,3 +139,110 @@ describe('#6.6 an imported gate result is a claim unless the import is trusted',
     expect(codeOf(() => store.auditImport('a', toCsv(['id', 'title', 'repro_result'], [{ id: 'D', title: 'd', repro_result: 'claimed:maybe' }])))).toBe('invalid_input');
   });
 });
+
+describe('#6.5 a decision is reopened by any change of substance', () => {
+  const ALL = { repro: { result: 'pass' }, intent: { result: 'pass' }, docs: { result: 'pass' }, prior_reports: { result: 'pass' }, refuter: { result: 'pass' } };
+  const approved = (decision: 'approved' | 'rejected' | 'hold' = 'approved') => {
+    const { store } = fresh({ actor: 'mcp-audit' });
+    store.auditOpen({ audit_id: 'a', title: 'A' });
+    store.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'bug', severity: 'high', summary: 's' }, gates: ALL });
+    store.auditReview('a', { finding_id: 'F', decision });
+    return store;
+  };
+  const review = (s: SeaLite) => parseCsv(s.auditExport('a', 'csv') as string).rows[0]!['review'];
+  const queue = (s: SeaLite) => s.auditReviewQueue('a').items.map((i) => i.finding_id);
+
+  it('a gate back to pending takes it out of the queue until it is resolved again', () => {
+    const s = approved();
+    s.auditGate('a', { finding_id: 'F', gate: 'repro', result: 'pending' });
+    expect(review(s)).toBe('');
+    expect(queue(s)).toEqual([]);
+    expect(s.auditGate('a', { finding_id: 'F', gate: 'repro', result: 'pass' }).review).toBe('pending');
+    expect(queue(s)).toEqual(['F']);
+  });
+  it('a gate to n/a, a new severity or summary, or a new title re-queues it', () => {
+    for (const change of [
+      (s: SeaLite) => s.auditGate('a', { finding_id: 'F', gate: 'docs', result: 'n/a' }),
+      (s: SeaLite) => s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { severity: 'low' } }),
+      (s: SeaLite) => s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { summary: 'different' } }),
+      (s: SeaLite) => s.auditFinding('a', { finding_id: 'F', title: 'f renamed' }),
+    ]) {
+      const s = approved();
+      expect(change(s).review).toBe('pending');
+      expect(review(s)).toBe('pending');
+    }
+  });
+  it('rejected and hold decisions reopen too; tracker bookkeeping does not reopen anything', () => {
+    for (const d of ['rejected', 'hold'] as const) {
+      const s = approved(d);
+      s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { severity: 'medium' } });
+      expect(review(s)).toBe('pending');
+    }
+    const s = approved();
+    expect(s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { tracker_status: 'PR open', pr_or_issue: 'o/r#1', submitted_date: '2026-11-06' } }).review).toBeUndefined();
+    expect(review(s)).toBe('approved');
+  });
+});
+
+describe('#6.8 short rows', () => {
+  it('a row with fewer cells than the header is an error naming it', () => {
+    const { store } = fresh({ actor: 'mcp-audit' });
+    store.auditOpen({ audit_id: 'a', title: 'A' });
+    let msg = '';
+    try {
+      store.auditImport('a', 'id,title,verdict\nA1,one,bug\nA2,two\n');
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/row 3: 2 cells, header has 3/);
+  });
+});
+
+describe('#6.7 probe-path tampering', () => {
+  it.skipIf(!POSIX)('a hard link at the probe path is not truncated; the probe is replaced and still measures', async () => {
+    const { linkSync, statSync } = await import('node:fs');
+    const { fsReference } = await import('../src/core/clock.js');
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sea-probe-')));
+    dirs.push(dir);
+    const canary = join(dir, 'canary');
+    writeFileSync(canary, 'precious\n');
+    linkSync(canary, join(dir, 'sea-clock.probe'));
+    const ref = fsReference(dir, () => undefined)();
+    expect(typeof ref).toBe('number');
+    expect(readFileSync(canary, 'utf8')).toBe('precious\n');
+    expect(statSync(canary).nlink).toBe(1);
+  });
+
+  it.skipIf(!POSIX)('a planted symlink or FIFO is replaced, not trusted as a reason to switch the guard off', async () => {
+    const { fsReference } = await import('../src/core/clock.js');
+    for (const plant of ['symlink', 'fifo'] as const) {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sea-probe-')));
+      dirs.push(dir);
+      const probe = join(dir, 'sea-clock.probe');
+      if (plant === 'symlink') symlinkSync('/nonexistent/x', probe);
+      else if (spawnSync('mkfifo', [probe]).status !== 0) continue;
+      expect(typeof fsReference(dir, () => undefined)(), plant).toBe('number');
+      expect(lstatSync(probe).isFile()).toBe(true);
+    }
+  });
+
+  it('a probe that cannot be replaced (a directory planted there) fails closed: lease decisions are refused', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sea-probe-')));
+    dirs.push(dir);
+    const s = new SeaLite({ dataDir: dir, actor: 'a' });
+    const t = s.create({ title: 'x', body: '', kind: 'bug', priority: 'high', tags: [], status: 'triaged', dry_run: false });
+    s.close();
+    spawnSync(process.execPath, ['-e', `require('fs').mkdirSync(${JSON.stringify(join(dir, 'sea-clock.probe'))}); require('fs').writeFileSync(${JSON.stringify(join(dir, 'sea-clock.probe', 'keep'))}, 'x')`]);
+    const s2 = new SeaLite({ dataDir: dir, actor: 'a' });
+    const e = (() => {
+      try {
+        s2.claim({ ticket_ids: [t.ticket.id] });
+      } catch (err) {
+        return err as { code: string; details: Record<string, unknown> };
+      }
+      return null;
+    })();
+    expect(e).toMatchObject({ code: 'clock_skew', details: { reason: 'probe_tampered' } });
+    s2.close();
+  });
+});
