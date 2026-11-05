@@ -13,8 +13,11 @@
  * resolved to full ids, and a templated sea_apply is
  * hashed after expansion, so the same templates always hash the same.
  *
- * Events written before request hashes existed carry none; a key on one of
- * those still replays (it cannot be checked).
+ * Events written before request hashes existed (sea-lite < 0.6.0) carry
+ * none. C2-07 (0.6.2): a key bound to one of those is refused
+ * (`invalid_input`, reason `unverifiable_key`) instead of replayed — it
+ * cannot be checked, and replaying it silently returned the old result for a
+ * different request after an upgrade.
  */
 
 import { canonicalize, sha256Hex, type ChainEvent } from 'kronicle-lite';
@@ -57,7 +60,15 @@ export function priorFor(ctx: Ctx, rawKey: string | undefined, key: string | und
 
 export function assertSameRequest(prior: ChainEvent, rawKey: string, hash: string): void {
   const h = prior.payload['request_hash'];
-  if (typeof h === 'string' && h !== hash) {
+  if (typeof h !== 'string') {
+    throw new SeaError(
+      'invalid_input',
+      `idempotency_key "${rawKey}" is bound to seq ${prior.seq}, written before request hashes (sea-lite < 0.6.0), so this request cannot be checked against it; nothing was written. ` +
+        `If this retries that request, it already took effect (sea_history from seq ${prior.seq}); otherwise use a new key`,
+      { idempotency_key: rawKey, reason: 'unverifiable_key', first_seq: prior.seq },
+    );
+  }
+  if (h !== hash) {
     throw new SeaError('invalid_input', `idempotency_key "${rawKey}" reused with a different request; nothing was written (the key is bound to seq ${prior.seq})`, {
       idempotency_key: rawKey,
       reason: 'request_mismatch',

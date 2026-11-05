@@ -44,6 +44,7 @@ import { legalNextStates, validateTransition } from '../model/lifecycle.js';
 import { plainOrigins, type ApplyInput, type BatchOrigin, type CreateInput, type ExpandedBatch, type FencedItem, type GetInput, type ListInput, type TransitionInput, type TransitionManyInput, type UpdateInput } from '../model/schemas.js';
 import { expandBatch } from '../model/templates.js';
 import { findPossibleDuplicates, type PossibleDuplicate } from './dedup.js';
+import { assertClockTrusted } from '../core/clock.js';
 import { idForHash, priorFor, requestHash } from '../core/idem.js';
 
 // ───────────────────────────── create ─────────────────────────────
@@ -170,6 +171,7 @@ export function placeClaim(
   scope: Scope | null = null,
   worktree: string | null = null,
 ): { token: string; expires_at: string; seq: number } {
+  assertClockTrusted(ctx.clock, 'place a claim');
   const token = newClaimToken();
   const token_hash = hashToken(token);
   const expires_at = expiryFrom(ctx.now, lease_seconds);

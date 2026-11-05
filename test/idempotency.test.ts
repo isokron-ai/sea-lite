@@ -86,7 +86,7 @@ describe('sea_apply: a reused key with a different batch is refused, not replaye
     mismatch(() => store.apply({ ...batch('a', 3), idempotency_key: 'v', actor_id: 'other-agent' }));
   });
 
-  it('a key from before request hashes (no request_hash on the event) still replays', () => {
+  it('C2-07: a key from before request hashes (no request_hash on the event) is refused, not replayed', () => {
     const { store } = fresh();
     store.chain.append({
       event_type: EVENT.batch_applied,
@@ -95,8 +95,18 @@ describe('sea_apply: a reused key with a different batch is refused, not replaye
       payload: { batch_id: 'legacy', tickets: [], links: [], ticket_count: 0, link_count: 0 },
       idempotency_key: 'sea:old',
     });
-    const r = store.apply({ ...batch('n', 1), idempotency_key: 'old' });
-    expect(r).toMatchObject({ replayed: true, batch_id: 'legacy' });
+    const head = store.chain.head().seq;
+    let err: SeaError | undefined;
+    try {
+      store.apply({ ...batch('n', 1), idempotency_key: 'old' });
+    } catch (e) {
+      err = e as SeaError;
+    }
+    expect(err?.code).toBe('invalid_input');
+    expect(err?.details).toMatchObject({ idempotency_key: 'old', reason: 'unverifiable_key', first_seq: head });
+    expect(err?.message).toMatch(/written before request hashes/);
+    expect(store.chain.head().seq).toBe(head);
+    expect(count(store)).toBe(0);
   });
 });
 

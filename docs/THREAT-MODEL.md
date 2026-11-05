@@ -141,10 +141,22 @@ read or write that touches the ticket, the row still shows the old holder.
 Readers go through `sweepExpired`, so what sea-lite *returns* is consistent;
 what a raw `SELECT` returns may not be.
 
+**Leases assume one wall clock.** Every process judges expiry with its own
+clock against instants other processes wrote. On one host that is one
+clock; across a network share, a VM bind mount (Docker Desktop after host
+sleep) or a faked clock it may not be. Since 0.6.2 each process compares its
+clock with the file-system time stamped on a probe file in the data dir and
+refuses lease decisions (`clock_skew` on claim / next / refresh / heartbeat;
+the auto-heartbeat and the lazy sweep skip) when they differ by more than
+`SEA_LITE_MAX_CLOCK_SKEW_SECONDS` (default 30; 0 disables). This catches a
+skewed process, not a skewed file server; keep NTP running everywhere.
+
 **Idempotency keys are caller-chosen.** They share kronicle-lite's unique
 column under a `sea:` prefix. A caller that reuses a key for a different
-operation gets an `invalid_input` error; a caller that reuses *another
-caller's* key gets that caller's result. Namespace your keys per agent if
+operation, or for a different request, gets an `invalid_input` error; a key
+bound to an event from before request hashes (< 0.6.0) is refused as
+`unverifiable_key` rather than replayed. A caller that reuses *another
+caller's* key with the same request gets that caller's result. Namespace your keys per agent if
 agents are not fully trusted with each other's results.
 
 **Dedup is advisory.** `possible_duplicates` on create is an FTS/exact-title
