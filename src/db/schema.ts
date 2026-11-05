@@ -116,9 +116,12 @@ END;
 
 -- Typed fields (audit/fields.ts): one row per set field; value is TEXT in the
 -- field's declared type. Versioned per ticket in sea_field_heads, so the
--- ticket row (and older builds' rebuild of it) is untouched.
+-- ticket row (and older builds' rebuild of it) is untouched. No FOREIGN KEY
+-- to sea_tickets: a 0.6.x rebuild drops sea_tickets with foreign_keys on,
+-- which a referencing table would make fail; ticket ids are stable across
+-- rebuilds, so the rows stay correct (sea-lite verify checks their seqs).
 CREATE TABLE IF NOT EXISTS sea_fields (
-  ticket_id TEXT NOT NULL REFERENCES sea_tickets(id),
+  ticket_id TEXT NOT NULL,
   name      TEXT NOT NULL,
   value     TEXT NOT NULL,
   set_seq   INTEGER NOT NULL,
@@ -126,7 +129,7 @@ CREATE TABLE IF NOT EXISTS sea_fields (
 );
 CREATE INDEX IF NOT EXISTS sea_fields_lookup_idx ON sea_fields (name, value);
 CREATE TABLE IF NOT EXISTS sea_field_heads (
-  ticket_id TEXT PRIMARY KEY REFERENCES sea_tickets(id),
+  ticket_id TEXT PRIMARY KEY,
   version   INTEGER NOT NULL,
   last_seq  INTEGER NOT NULL
 );

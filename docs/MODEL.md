@@ -72,12 +72,14 @@ Typed fields (`src/audit/fields.ts`, a closed registry): `ticket_id`, `name`,
 `value` (TEXT in the field's type), `set_seq`; one row per set field.
 `sea_field_heads` holds each ticket's fields `version` and `last_seq`. The
 ticket row and its `row_version` are not touched, so a pre-0.7 build opens
-the store and rebuilds its own tables exactly.
+the store and rebuilds its own tables exactly. Neither table has a foreign
+key to `sea_tickets` (a 0.6.x rebuild drops that table with foreign keys on).
 
 ### `sea_leases`, `sea_lease_intents` (0.7.0)
 
 Named exclusive leases (`src/audit/lease.ts`): `name`, `epoch` (bumped on
-each change of holder), `holder`, `holder_session`, `token_hash`,
+every acquire), `holder` (actor), `holder_session` (the holder's SeaLite
+instance id, random per instance), `token_hash`,
 `expires_at`, `lease_seconds`, `last_seq`. The intent journal:
 `intent_id`, `lease_name`, `epoch`, `op`, `target`, `idempotency_key`,
 `state` (`open | happened | not_happened | may_have_happened`),
@@ -102,7 +104,7 @@ chain, inside the same `BEGIN IMMEDIATE` transaction as the row change. The
 | `sea_link.created` | `link_id from_id to_id link_type created_at` (+ `from_row_version reason` via sea_link; `batch_id` via apply, plus `from_row_version` when the from end is an existing ticket; `via` via transition) | insert active link; when `from_row_version` present, bump the from ticket |
 | `sea_link.tombstoned` | `link_id target_id from_id to_id link_type reason tombstoned_at from_row_version` | mark tombstoned; bump the from ticket |
 | `sea_ticket.fields_set` | `ticket_id set{name: value} unset[name] version` | upsert / delete `sea_fields` rows (`set_seq=seq`); `sea_field_heads.version`, `last_seq` |
-| `sea_lease.acquired` | `name epoch holder session token_hash expires_at lease_seconds` (+ `took_over{holder,epoch,expired_at}`, `may_have_happened[intent_id]`) | listed open intents → `may_have_happened`; upsert the lease row |
+| `sea_lease.acquired` | `name epoch holder session(=instance) token_hash expires_at lease_seconds` (+ `took_over{holder,epoch,expired_at}`, `may_have_happened[intent_id]`) | listed open intents → `may_have_happened`; upsert the lease row |
 | `sea_lease.released` | `name epoch holder released_by` (+ `forced`, `may_have_happened[intent_id]`) | listed open intents → `may_have_happened`; clear holder, token, expiry |
 | `sea_lease.intent_opened` | `intent_id name epoch op target idempotency_key opened_by opened_at` | insert intent, `state=open` |
 | `sea_lease.intent_closed` | `intent_id name outcome was closed_by evidence_ref` | `state=outcome`, `closed_seq`, `evidence_ref` |

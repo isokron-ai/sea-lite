@@ -13,7 +13,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { EXPORT_COLUMNS } from '../src/audit/audit.js';
-import { parseCsv, toCsv } from '../src/audit/export.js';
+import { guardCell, parseCsv, toCsv } from '../src/audit/export.js';
 import { fsReference } from '../src/core/clock.js';
 import type { SeaError } from '../src/core/errors.js';
 import { runDoctor } from '../src/doctor.js';
@@ -97,10 +97,11 @@ const NASTY = [' =1+1', '\n=1+1', ' =1+1', '　+1', '＝1+1', '＋1', '－1', '
 
 describe('CSV formula guard (#5 blocker 2) and round trip', () => {
   it('every formula-looking cell is prefixed with an apostrophe', () => {
-    const csv = toCsv(['v'], NASTY.map((v) => ({ v })));
-    const back = parseCsv(csv).rows.map((r) => r['v']);
-    for (const [k, v] of NASTY.entries()) expect(back[k], JSON.stringify(v)).toBe(`'${v}`);
-    expect(parseCsv(toCsv(['v'], [{ v: 'plain' }, { v: "it's" }])).rows.map((r) => r['v'])).toEqual(['plain', "it's"]);
+    for (const v of NASTY) expect(guardCell(v), JSON.stringify(v)).toBe(`'${v}`);
+    for (const v of ['plain', "it's", 'a=b', ' x']) expect(guardCell(v)).toBe(v);
+    // parseCsv undoes exactly one level, so the values come back as written.
+    const all = [...NASTY, 'plain', "it's"];
+    expect(parseCsv(toCsv(['v'], all.map((v) => ({ v })))).rows.map((r) => r['v'])).toEqual(all);
   });
 
   it('export → import → export is the identity (guard prefix undone, gate results from their own columns)', () => {

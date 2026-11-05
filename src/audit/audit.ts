@@ -15,7 +15,7 @@ import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
 import { tx, type Ctx } from '../core/repo.js';
 import { insertLink, insertTicket } from '../handlers/tickets.js';
-import { GATES, readFields, setFields, type FieldMap, type FieldName, type Gate } from './fields.js';
+import { GATES, MANAGED_FIELDS, readFields, redactText, setFields, type FieldMap, type FieldName, type Gate } from './fields.js';
 
 export const AUDIT_PROJECT_PREFIX = 'audit:';
 const AUDIT_ID = /^[A-Za-z0-9._-]{1,100}$/;
@@ -65,16 +65,16 @@ export function openAudit(ctx0: Ctx, input: { audit_id: string; title: string; c
       .prepare(`SELECT a.ticket_id AS id FROM sea_fields a JOIN sea_tickets t ON t.id = a.ticket_id WHERE a.name = 'audit_id' AND a.value = ? AND t.kind = 'epic'`)
       .get(input.audit_id) as { id: string } | undefined;
     if (existing) {
-      if (input.catalog_fingerprint !== undefined) setFields(ctx, existing.id, { catalog_fingerprint: input.catalog_fingerprint });
+      if (input.catalog_fingerprint !== undefined) setFields(ctx, existing.id, { catalog_fingerprint: input.catalog_fingerprint }, undefined, MANAGED);
       return { ticket_id: existing.id, created: false };
     }
     const { row } = insertTicket(ctx, { title: input.title, body: '', kind: 'epic', priority: 'medium', tags: ['audit'], assignee: ctx.actor, status: 'triaged' });
-    setFields(ctx, row.id, { audit_id: input.audit_id, ...(input.catalog_fingerprint !== undefined ? { catalog_fingerprint: input.catalog_fingerprint } : {}) });
+    setFields(ctx, row.id, { audit_id: input.audit_id, ...(input.catalog_fingerprint !== undefined ? { catalog_fingerprint: input.catalog_fingerprint } : {}) }, undefined, MANAGED);
     return { ticket_id: row.id, created: true };
   });
 }
 
-export type GateInput = { result: string; note?: string; evidence_ref?: string };
+export type GateInput = { result?: string; note?: string | null; evidence_ref?: string | null };
 
 export interface FindingInput {
   finding_id: string;
@@ -89,11 +89,11 @@ export interface UpsertFindingResult {
   created: boolean;
   version: number;
   changed: string[];
-  /** Set when this write moved the finding into the review queue. */
+  /** Set when this write moved the finding into the review queue (or sent an approval back to it). */
   review?: 'pending';
+  /** Fields (and `title`) whose credential-shaped text was redacted before it was chained. */
+  redacted?: string[];
 }
-
-const IDENTITY: readonly string[] = ['audit_id', 'finding_id', 'gate_of', 'gate', 'review'];
 
 function reviewIfReady(ctx: Ctx, audit_id: string, finding_ticket: string, finding_id: string): boolean {
   const f = readFields(ctx.db, finding_ticket);
@@ -103,9 +103,18 @@ function reviewIfReady(ctx: Ctx, audit_id: string, finding_ticket: string, findi
     const r = id ? readFields(ctx.db, id).result : undefined;
     if (r === undefined || r === 'pending') return false;
   }
-  setFields(ctx, finding_ticket, { review: 'pending' });
+  setFields(ctx, finding_ticket, { review: 'pending' }, undefined, MANAGED);
   return true;
 }
+
+/** why: an approval was given to the finding as it was; a failed gate or a new verdict sends it back to the queue. */
+function reopenApproval(ctx: Ctx, finding_ticket: string): boolean {
+  if (readFields(ctx.db, finding_ticket).review !== 'approved') return false;
+  setFields(ctx, finding_ticket, { review: 'pending' }, undefined, MANAGED);
+  return true;
+}
+
+const MANAGED = { managed: true } as const;
 
 function setTitle(ctx: Ctx, id: string, title: string): boolean {
   const row = ctx.db.prepare(`SELECT title, row_version FROM sea_tickets WHERE id = ?`).get(id) as { title: string; row_version: number };
@@ -132,33 +141,36 @@ function setTitle(ctx: Ctx, id: string, title: string): boolean {
 export function upsertFinding(ctx0: Ctx, audit_id: string, input: FindingInput): UpsertFindingResult {
   const ctx = inAudit(ctx0, audit_id);
   if (input.title.length === 0 || input.title.length > 500) throw new SeaError('invalid_input', 'title: 1-500 characters');
-  for (const k of Object.keys(input.fields ?? {})) {
-    if (IDENTITY.includes(k)) throw new SeaError('invalid_input', `field "${k}" is managed by sea-lite`, { field: k });
-  }
   return tx(ctx.db, () => {
     const epic = epicOf(ctx, audit_id);
+    const t = redactText(input.title, 'title');
+    const redacted: string[] = t.redacted ? ['title'] : [];
     let id = byField(ctx, audit_id, 'finding_id', input.finding_id);
     const created = id === null;
     const changed: string[] = [];
     if (id === null) {
-      id = insertTicket(ctx, { title: input.title, body: '', kind: 'investigation', priority: 'medium', tags: ['audit', 'finding'], assignee: ctx.actor, status: 'triaged' }).row.id;
+      id = insertTicket(ctx, { title: t.text, body: '', kind: 'investigation', priority: 'medium', tags: ['audit', 'finding'], assignee: ctx.actor, status: 'triaged' }).row.id;
       insertLink(ctx, epic, id, 'parent_of');
-      setFields(ctx, id, { audit_id, finding_id: input.finding_id, tracker_status: 'Not started' });
+      setFields(ctx, id, { audit_id, finding_id: input.finding_id, tracker_status: 'Not started' }, undefined, MANAGED);
       for (const g of GATES) {
         const gid = insertTicket(ctx, { title: `${g}: ${input.finding_id}`, body: '', kind: 'chore', priority: 'medium', tags: ['audit', 'gate'], assignee: ctx.actor, status: 'triaged' }).row.id;
         insertLink(ctx, id, gid, 'parent_of');
-        setFields(ctx, gid, { audit_id, gate_of: input.finding_id, gate: g, result: 'pending' });
+        setFields(ctx, gid, { audit_id, gate_of: input.finding_id, gate: g, result: 'pending' }, undefined, MANAGED);
       }
-    } else if (setTitle(ctx, id, input.title)) changed.push('title');
+    } else if (setTitle(ctx, id, t.text)) changed.push('title');
     const r = setFields(ctx, id, input.fields ?? {});
     changed.push(...r.changed);
+    redacted.push(...(r.redacted ?? []));
+    let reopened = r.changed.includes('verdict') && reopenApproval(ctx, id);
     for (const [g, v] of Object.entries(input.gates ?? {}) as [Gate, GateInput][]) {
       const gr = gateWrite(ctx, audit_id, input.finding_id, g, v);
-      if (gr.length > 0) changed.push(`gate.${g}`);
+      if (gr.changed.length > 0) changed.push(`gate.${g}`);
+      redacted.push(...gr.redacted.map((x) => `gate.${g}.${x}`));
+      if (gr.failed) reopened = reopenApproval(ctx, id) || reopened;
     }
-    const queued = reviewIfReady(ctx, audit_id, id, input.finding_id);
+    const queued = reviewIfReady(ctx, audit_id, id, input.finding_id) || reopened;
     const version = readVersion(ctx, id);
-    return { ticket_id: id, created, version, changed, ...(queued ? { review: 'pending' as const } : {}) };
+    return { ticket_id: id, created, version, changed, ...(queued ? { review: 'pending' as const } : {}), ...(redacted.length > 0 ? { redacted } : {}) };
   });
 }
 
@@ -166,22 +178,30 @@ function readVersion(ctx: Ctx, id: string): number {
   return (ctx.db.prepare(`SELECT version FROM sea_field_heads WHERE ticket_id = ?`).get(id) as { version: number } | undefined)?.version ?? 0;
 }
 
-function gateWrite(ctx: Ctx, audit_id: string, finding_id: string, gate: Gate, v: GateInput): string[] {
+/** `result` / `note` / `evidence_ref`: a key left out is left as is; a null or empty note / evidence_ref unsets it. */
+function gateWrite(ctx: Ctx, audit_id: string, finding_id: string, gate: Gate, v: GateInput): { changed: string[]; redacted: string[]; failed: boolean } {
   if (!(GATES as readonly string[]).includes(gate)) throw new SeaError('invalid_input', `gate must be one of ${GATES.join(', ')}`, { gate });
   const gid = byField(ctx, audit_id, 'gate_of', finding_id, { name: 'gate', value: gate });
   if (!gid) throw new SeaError('not_found', `finding ${finding_id} not found in audit ${audit_id}`, { finding_id });
-  return setFields(ctx, gid, { result: v.result, note: v.note ?? null, evidence_ref: v.evidence_ref ?? null }).changed;
+  const patch: Record<string, unknown> = {};
+  if (v.result !== undefined) patch['result'] = v.result;
+  if ('note' in v) patch['note'] = v.note || null;
+  if ('evidence_ref' in v) patch['evidence_ref'] = v.evidence_ref || null;
+  const r = setFields(ctx, gid, patch, undefined, MANAGED);
+  return { changed: r.changed, redacted: r.redacted ?? [], failed: r.changed.includes('result') && v.result === 'fail' };
 }
 
 /** Record one gate's result. Returns the gate ticket and what changed. */
 export function recordGate(ctx0: Ctx, audit_id: string, input: { finding_id: string; gate: Gate } & GateInput): { ticket_id: string; changed: string[]; review?: 'pending' } {
   const ctx = inAudit(ctx0, audit_id);
   return tx(ctx.db, () => {
-    const changed = gateWrite(ctx, audit_id, input.finding_id, input.gate, input);
-    const fid = byField(ctx, audit_id, 'finding_id', input.finding_id)!;
-    const queued = reviewIfReady(ctx, audit_id, fid, input.finding_id);
-    const gid = byField(ctx, audit_id, 'gate_of', input.finding_id, { name: 'gate', value: input.gate })!;
-    return { ticket_id: gid, changed, ...(queued ? { review: 'pending' as const } : {}) };
+    const { finding_id, gate, ...g } = input;
+    const gr = gateWrite(ctx, audit_id, finding_id, gate, g);
+    const fid = byField(ctx, audit_id, 'finding_id', finding_id)!;
+    const reopened = gr.failed && reopenApproval(ctx, fid);
+    const queued = reviewIfReady(ctx, audit_id, fid, finding_id) || reopened;
+    const gid = byField(ctx, audit_id, 'gate_of', finding_id, { name: 'gate', value: gate })!;
+    return { ticket_id: gid, changed: gr.changed, ...(queued ? { review: 'pending' as const } : {}) };
   });
 }
 
@@ -232,6 +252,7 @@ export function review(
       id,
       { review: input.decision, ...(input.submit_plan !== undefined ? { submit_plan: input.submit_plan } : {}), ...(input.note !== undefined ? { review_note: input.note } : {}) },
       input.expect_version,
+      MANAGED,
     );
     return { ticket_id: id, version: r.version, changed: r.changed };
   });
@@ -265,6 +286,11 @@ export const EXPORT_COLUMNS = [
   'our PR/issue #',
   'submitted date',
   'status',
+  'repro_result',
+  'intent_result',
+  'docs_result',
+  'prior_reports_result',
+  'refuter_result',
   'review',
   'catalog_fingerprint',
   'evidence_ref',
@@ -304,11 +330,13 @@ const GATE_COLUMN: Record<Gate, (typeof EXPORT_COLUMNS)[number]> = {
   refuter: 'gate5_refutation',
 };
 
-function gateCell(f: FieldMap): string {
-  const r = f.result === undefined || f.result === 'pending' ? '' : String(f.result);
-  const note = f.note !== undefined ? String(f.note) : '';
-  return r && note ? `${r}: ${note}` : r || note;
-}
+const GATE_RESULT_COLUMN: Record<Gate, (typeof EXPORT_COLUMNS)[number]> = {
+  repro: 'repro_result',
+  intent: 'intent_result',
+  docs: 'docs_result',
+  prior_reports: 'prior_reports_result',
+  refuter: 'refuter_result',
+};
 
 /** Every finding of an audit as export rows, ordered by finding id. */
 export function findingRows(ctx: Ctx, audit_id: string): ExportRow[] {
@@ -332,14 +360,20 @@ export function findingRows(ctx: Ctx, audit_id: string): ExportRow[] {
     }
     for (const g of GATES) {
       const gid = byField(ctx, audit_id, 'gate_of', r.finding_id, { name: 'gate', value: g });
-      if (gid) out[GATE_COLUMN[g]] = gateCell(readFields(ctx.db, gid));
+      if (!gid) continue;
+      const gf: FieldMap = readFields(ctx.db, gid);
+      if (gf.note !== undefined) out[GATE_COLUMN[g]] = String(gf.note);
+      if (gf.result !== undefined) out[GATE_RESULT_COLUMN[g]] = String(gf.result);
     }
     return out;
   });
 }
 
-/** Inverse of FIELD_COLUMN for import: a findings.csv column → field name. */
+/** Import mapping: a findings.csv column → field name (managed fields are not importable). */
 export const IMPORT_COLUMNS: Readonly<Record<string, FieldName>> = Object.freeze(
-  Object.fromEntries(Object.entries(FIELD_COLUMN).filter(([, f]) => !IDENTITY.includes(f)).map(([c, f]) => [c, f])) as Record<string, FieldName>,
+  Object.fromEntries(Object.entries(FIELD_COLUMN).filter(([, f]) => !MANAGED_FIELDS.includes(f))) as Record<string, FieldName>,
 );
 export const IMPORT_GATE_COLUMNS: Readonly<Record<string, Gate>> = Object.freeze(Object.fromEntries(Object.entries(GATE_COLUMN).map(([g, c]) => [c, g as Gate])));
+export const IMPORT_GATE_RESULT_COLUMNS: Readonly<Record<string, Gate>> = Object.freeze(Object.fromEntries(Object.entries(GATE_RESULT_COLUMN).map(([g, c]) => [c, g as Gate])));
+/** Export columns an import accepts and ignores (derived or managed). */
+export const IMPORT_IGNORED: ReadonlySet<string> = new Set(['ticket_id', 'review']);

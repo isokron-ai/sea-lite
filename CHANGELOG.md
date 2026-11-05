@@ -27,9 +27,36 @@ uses semantic versioning once past 0.x.
 - XLSX is written by a ~150-line zero-dependency writer (`src/audit/export.ts`,
   node:zlib deflate) instead of a library: CONTRIBUTING asks for minimal
   runtime dependencies. Checked with openpyxl and LibreOffice.
+- Review fixes (2026-11-05): lease holder = actor + per-instance id, every
+  acquire a new epoch that reports open intents (same-actor storm and
+  restart-within-TTL tests); CSV formula guard covers leading whitespace,
+  newlines, NBSP and fullwidth `＝＋－＠`, and import undoes it; strict import
+  (unterminated quote, ragged row, duplicate / unknown column, duplicate id
+  are errors naming the row; gate results from `<gate>_result` columns
+  only); managed fields (`review`, gate `result`, identity) cannot be set
+  through `setFields`, and an approval reopens when a gate fails or the
+  verdict changes; `Object.hasOwn` for field names (`__proto__` /
+  `constructor` were a TypeError); credential-shaped text redacted before it
+  is chained; `audit export --out` writes 0600; the clock probe no longer
+  follows a symlink or blocks on a FIFO, warns once when it cannot measure,
+  and `sea-lite doctor` has a `clock` check; the duplicate skew guards in
+  `sea_claim` / `sea_next` / `sweepAllExpired` / quiet heartbeat were removed
+  so each remaining guard has its own test.
 - Not built (scope narrowed by the toolkit council, 2026-11-05): per-pass
   audit templates via `sea_apply` — the runner orchestrates passes in code
   and creates finding tickets only after refutation.
+
+### Compatibility
+
+- **0.6.x on a store with audit data.** The new tables have no foreign key to
+  `sea_tickets`, so a 0.6.x `sea-lite rebuild` (which drops `sea_tickets` with
+  foreign keys on) still succeeds; 0.6.x ignores the new tables and events,
+  and since ticket ids are stable across rebuilds the field rows stay
+  correct. A development build of this branch from before 2026-11-05 created
+  them with foreign keys: on such a store, run a 0.7 `rebuild` before using
+  0.6.x `rebuild`.
+- `swept_expired` counts only leases actually swept (a skewed process sweeps
+  none).
 
 ### Fixed (0.6.2)
 

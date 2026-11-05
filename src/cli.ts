@@ -1177,7 +1177,9 @@ function auditCmd(positional: string[], flags: Args['flags']): number {
         process.stdout.write(data);
         return 0;
       }
-      writeFileSync(file, data);
+      // why: a tracker carries unreported vulnerabilities; 0600 also when the file existed with wider bits.
+      writeFileSync(file, data, { mode: 0o600 });
+      chmodSync(file, 0o600);
       process.stderr.write(`wrote ${file} (${store.auditRows(audit).length} findings)\n`);
       return 0;
     }

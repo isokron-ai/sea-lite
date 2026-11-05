@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { EVENT } from '../core/events.js';
 import { SeaError } from '../core/errors.js';
 import { mustGetRow, type Ctx } from '../core/repo.js';
-import type { Db } from 'kronicle-lite';
+import { redactSecrets, type Db } from 'kronicle-lite';
 
 const text = (max: number) => z.string().max(max);
 const token = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:@/#+-]+$/, 'letters, digits and ._:@/#+- only');
@@ -67,12 +67,16 @@ export type FieldValue = string | number;
 export type FieldMap = Partial<Record<FieldName, FieldValue>>;
 export const FIELD_NAMES = Object.keys(FIELD_TYPES) as FieldName[];
 
+/** Set only by the audit layer (identity, gate results, the review decision), never by a caller's patch. */
+export const MANAGED_FIELDS: readonly FieldName[] = ['audit_id', 'finding_id', 'gate_of', 'gate', 'result', 'review'];
+
 /** Validate a patch: known names, typed values; null unsets. */
-export function parseFields(patch: Record<string, unknown>): Record<FieldName, FieldValue | null> {
+export function parseFields(patch: Record<string, unknown>, managed = false): Record<FieldName, FieldValue | null> {
   const out = {} as Record<FieldName, FieldValue | null>;
   for (const [k, v] of Object.entries(patch)) {
-    if (!(k in FIELD_TYPES)) throw new SeaError('invalid_input', `unknown field "${k}"`, { field: k, known: FIELD_NAMES });
+    if (!Object.hasOwn(FIELD_TYPES, k)) throw new SeaError('invalid_input', `unknown field "${k}"`, { field: k, known: FIELD_NAMES });
     const name = k as FieldName;
+    if (!managed && MANAGED_FIELDS.includes(name)) throw new SeaError('invalid_input', `field "${k}" is managed by sea-lite`, { field: k });
     if (v === null || v === undefined) {
       out[name] = null;
       continue;
@@ -105,12 +109,37 @@ export interface SetFieldsResult {
   version: number;
   /** Names whose value changed (set or unset). Empty: nothing written. */
   changed: FieldName[];
+  /** Names whose text had a credential-shaped part replaced by `[REDACTED:<detector>]` before it was chained. */
+  redacted?: FieldName[];
 }
 
-/** Caller holds the transaction. `expect_version` guards against a concurrent writer. */
-export function setFields(ctx: Ctx, ticket_id: string, patch: Record<string, unknown>, expect_version?: number): SetFieldsResult {
+/** PostHog personal API keys, which kronicle-lite's write-time detectors do not know. */
+const EXTRA_SECRETS = /\bphx_[A-Za-z0-9]{20,}\b/g;
+
+/**
+ * why: the chain is append-only, so a credential pasted into evidence would
+ * stay in every export and backup. kronicle-lite's write-time redaction, plus
+ * the vendor key shapes audits handle.
+ */
+export function redactText(text: string, field: string): { text: string; redacted: boolean } {
+  const r = redactSecrets(text, field);
+  const out = r.text.replace(EXTRA_SECRETS, '[REDACTED:posthog_personal_key]');
+  return { text: out, redacted: r.findings.length > 0 || out !== r.text };
+}
+
+/** Caller holds the transaction. `expect_version` guards against a concurrent writer; `managed` is for the audit layer only. */
+export function setFields(ctx: Ctx, ticket_id: string, patch: Record<string, unknown>, expect_version?: number, opts: { managed?: boolean } = {}): SetFieldsResult {
   mustGetRow(ctx.db, ticket_id);
-  const parsed = parseFields(patch);
+  const parsed = parseFields(patch, opts.managed === true);
+  const redacted: FieldName[] = [];
+  for (const [k, v] of Object.entries(parsed) as [FieldName, FieldValue | null][]) {
+    if (typeof v !== 'string') continue;
+    const r = redactText(v, k);
+    if (r.redacted) {
+      parsed[k] = r.text;
+      redacted.push(k);
+    }
+  }
   const current = readFields(ctx.db, ticket_id);
   const version = fieldsVersion(ctx.db, ticket_id);
   if (expect_version !== undefined && expect_version !== version) {
@@ -124,7 +153,8 @@ export function setFields(ctx: Ctx, ticket_id: string, patch: Record<string, unk
     } else if (current[k] !== v) set[k] = v;
   }
   const changed = [...(Object.keys(set) as FieldName[]), ...unset];
-  if (changed.length === 0) return { ticket_id, version, changed };
+  const red = redacted.length > 0 ? { redacted } : {};
+  if (changed.length === 0) return { ticket_id, version, changed, ...red };
   const next = version + 1;
   const r = ctx.chain.append({
     event_type: EVENT.ticket_fields_set,
@@ -133,7 +163,7 @@ export function setFields(ctx: Ctx, ticket_id: string, patch: Record<string, unk
     payload: { ticket_id, set, unset, version: next },
   });
   applyFieldsSet(ctx.db, { ticket_id, set, unset, version: next }, r.event.seq);
-  return { ticket_id, version: next, changed };
+  return { ticket_id, version: next, changed, ...red };
 }
 
 /** The projection of one `sea_ticket.fields_set` (live and rebuild). */

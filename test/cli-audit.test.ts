@@ -34,7 +34,7 @@ describe('sea-lite audit / lease', () => {
     const csv = join(base, 'findings.csv');
     writeFileSync(
       csv,
-      'id,title,verdict,gate1_repro,gate2_intent,gate3_docs,gate4_prior_links,gate5_refutation\n' +
+      'id,title,verdict,repro_result,intent_result,docs_result,prior_reports_result,refuter_result\n' +
         'X1,"dispatcher drops ""limit""",bug,pass,pass,n/a,pass,pass\n' +
         'X2,second,design-gap,,,,,\n',
     );

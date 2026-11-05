@@ -118,7 +118,6 @@ export function assertScopeFree(ctx: Ctx, scope: Scope, excludeIds: ReadonlySet<
 
 export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
   const lease = clampLease(input.lease_seconds);
-  assertClockTrusted(ctx.clock, 'claim');
   const { scope, worktree } = resolveClaimScope(input.scope, ctx.root);
   return tx(ctx.db, () => {
     // Resolve, de-duplicate, and lock in one order so two processes claiming
@@ -297,7 +296,6 @@ export interface NextResult {
  */
 export function next(ctx: Ctx, input: NextInput): NextResult {
   const lease = clampLease(input.lease_seconds);
-  assertClockTrusted(ctx.clock, 'dispatch (sea_next)');
   const { scope, worktree } = resolveClaimScope(input.scope, ctx.root);
   return tx(ctx.db, () => {
     sweepAllExpired(ctx);
@@ -425,7 +423,6 @@ export interface HeartbeatResult {
  * layer's per-call touch).
  */
 export function heartbeat(ctx: Ctx, opts: { quiet?: boolean } = {}): HeartbeatResult {
-  if (opts.quiet && ctx.clock?.untrusted()) return { renewed: [], lapsed: [], head: ctx.chain.head() };
   assertClockTrusted(ctx.clock, 'renew leases');
   return tx(ctx.db, () => {
     const rows = ctx.db

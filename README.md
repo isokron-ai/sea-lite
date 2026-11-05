@@ -650,17 +650,24 @@ sea.auditFinding('posthog-2', { finding_id: 'L3', title: '500 still persists the
 sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', evidence_ref: 'kl:1234' });
 ```
 
-- **Named exclusive lease** (`sandbox:<id>`): one live holder; `epoch` bumps on
-  every change of holder; a stale holder's token stops fencing. Takeover of a
-  lapsed lease, or `leaseRelease({ abandon: true })` (an abort), turns every
-  open intent into `may_have_happened`; the next holder gets them in
-  `unresolved` and cannot open a new intent until it has verified and closed
-  each one. Clock-skew guarded like claims.
+- **Named exclusive lease** (`sandbox:<id>`): one live holder, identified by
+  actor **and** SeaLite instance (a random id per instance), so a second
+  process of the same actor — including the runner restarted after a crash —
+  is refused until the lease lapses (or an operator force-releases it). Every
+  acquire is a new `epoch` and token; a stale token stops fencing. Any acquire
+  (takeover, or the holder's own re-acquire) and
+  `leaseRelease({ abandon: true })` (an abort) turn every open intent into
+  `may_have_happened`; the next holder gets them in `unresolved` and cannot
+  open a new intent until it has verified and closed each one. Clock-skew
+  guarded like claims.
 - **Typed fields** (`setFields` / `fields`): a closed registry — `verdict`,
   `severity`, `confidence`, `submit_plan`, `pr_or_issue`, `submitted_date`,
   `tracker_status`, `catalog_fingerprint`, `evidence_ref` (kronicle event id),
   `review`, and the tracker's text columns. Unknown names and bad values are
-  `invalid_input`; `expect_version` guards concurrent writers.
+  `invalid_input`; `expect_version` guards concurrent writers. Identity
+  fields, gate results and `review` are managed: only the audit calls set
+  them. Credential-shaped text (kronicle-lite's write-time detectors, plus
+  PostHog `phx_` keys) is redacted before it is chained.
 - **Findings and gates**: tickets live in project `audit:<id>`, so they stay
   out of every code project's `sea_next` / `sea_list`. A finding gets gate
   sub-tickets `repro`, `intent`, `docs`, `prior_reports`, `refuter`
@@ -669,12 +676,19 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
 - **Human review queue**: once every gate has a result (`pass | fail | n/a`)
   the finding is `review: pending`; `sea-lite audit queue AUDIT`, then
   `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]`.
+  An approval goes back to `pending` when a gate turns `fail` or the verdict
+  changes.
 - **Export / import**: `sea-lite audit export AUDIT [--format csv|xlsx] [--out F]`
-  writes the PostHog tracker's columns in order (then `review`,
-  `catalog_fingerprint`, `evidence_ref`, `ticket_id`); CSV cells that would run
-  as formulas get a leading `'`. XLSX is written without a dependency.
-  `sea-lite audit import AUDIT findings.csv` upserts a pass's findings by `id`
-  in one transaction.
+  (mode 0600) writes the PostHog tracker's columns in order (gate columns hold
+  the gate notes), then one `<gate>_result` column per gate, `review`,
+  `catalog_fingerprint`, `evidence_ref`, `ticket_id`. A CSV cell whose first
+  non-space character is `= + - @` (or fullwidth `＝ ＋ － ＠`), or that starts
+  with a tab or CR, gets a leading `'`. XLSX is written without a dependency.
+  `sea-lite audit import AUDIT findings.csv` upserts by `id` in one
+  transaction; it undoes the `'` guard (export → import round-trips), takes
+  gate results only from the `<gate>_result` columns, and refuses an
+  unterminated quote, a ragged row, a duplicate or unknown column and a
+  duplicate id, naming the row.
 
 ## Limitations (read these)
 

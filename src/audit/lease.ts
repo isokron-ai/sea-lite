@@ -3,7 +3,8 @@
  *
  * A lease (`sandbox:<id>`) has at most one live holder. Acquire returns a
  * one-time token (only its sha256 is stored) and an `epoch` that increases on
- * every change of holder. Renew is row-only, like sea_refresh. A lapsed lease
+ * every acquire. The holder is the actor plus the SeaLite instance (a random
+ * id per instance), so two processes of one actor are two holders. Renew is row-only, like sea_refresh. A lapsed lease
  * is taken over by the next acquire; there is no sweeper.
  *
  * The journal makes a crash mid-write detectable. Before a side effect the
@@ -20,8 +21,8 @@ import { SeaError } from '../core/errors.js';
 import { EVENT } from '../core/events.js';
 import { assertClockTrusted } from '../core/clock.js';
 import { clampLease, expiryFrom, hashToken, newClaimToken, tokenMatches } from '../core/fence.js';
-import { sameOwner } from '../core/identity.js';
 import { tx, uuid, type Ctx } from '../core/repo.js';
+import { redactText } from './fields.js';
 import type { Db } from 'kronicle-lite';
 
 export interface LeaseRow {
@@ -144,10 +145,13 @@ export function acquire(ctx: Ctx, input: { name: string; lease_seconds?: number 
   checkName(input.name);
   const lease = clampLease(input.lease_seconds);
   assertClockTrusted(ctx.clock, `acquire lease ${input.name}`);
+  // why: with sessions null in library use, actor alone made every process of one actor the holder (#5 review).
+  const instance = ctx.instance;
+  if (instance === undefined) throw new SeaError('invalid_input', 'a named lease needs a per-instance id (use SeaLite, not a bare Ctx)');
   return tx(ctx.db, () => {
     const row = getLease(ctx.db, input.name);
-    const mine = live(row, ctx.now) && sameOwner(row.holder, row.holder_session, { actor: ctx.actor, session: ctx.session });
-    if (live(row, ctx.now) && !mine) {
+    const isLive = live(row, ctx.now);
+    if (isLive && !(row.holder === ctx.actor && row.holder_session === instance)) {
       throw new SeaError('already_claimed', `lease ${input.name} is held by "${row.holder}" until ${row.expires_at}`, {
         name: input.name,
         holder: row.holder,
@@ -155,17 +159,18 @@ export function acquire(ctx: Ctx, input: { name: string; lease_seconds?: number 
         epoch: row.epoch,
       });
     }
-    // Re-acquire by the live holder rotates the token in the same epoch; anything else is a new epoch.
-    const epoch = mine ? row!.epoch : (row?.epoch ?? 0) + 1;
-    const open = mine ? [] : (row ? unresolved(ctx.db, input.name, ['open']).map((u) => u.intent_id) : []);
-    const took_over = !mine && row && row.token_hash !== null ? { holder: row.holder ?? '', epoch: row.epoch, expired_at: row.expires_at ?? '' } : undefined;
+    // Every acquire is a new epoch with a new token, the live holder's own re-acquire included:
+    // whatever was open under the old token may have happened.
+    const epoch = (row?.epoch ?? 0) + 1;
+    const open = row ? unresolved(ctx.db, input.name, ['open']).map((u) => u.intent_id) : [];
+    const took_over = row && row.token_hash !== null && !isLive ? { holder: row.holder ?? '', epoch: row.epoch, expired_at: row.expires_at ?? '' } : undefined;
     const token = newClaimToken();
     const expires_at = expiryFrom(ctx.now, lease);
     append(ctx, EVENT.lease_acquired, {
       name: input.name,
       epoch,
       holder: ctx.actor,
-      session: ctx.session,
+      session: instance,
       token_hash: hashToken(token),
       expires_at,
       lease_seconds: lease,
@@ -245,8 +250,8 @@ export function openIntent(ctx: Ctx, input: { name: string; token: string; op: s
       name: input.name,
       epoch: row.epoch,
       op: input.op,
-      ...(input.target !== undefined ? { target: input.target.slice(0, 500) } : {}),
-      ...(input.idempotency_key !== undefined ? { idempotency_key: input.idempotency_key.slice(0, 200) } : {}),
+      ...(input.target !== undefined ? { target: redactText(input.target.slice(0, 500), 'target').text } : {}),
+      ...(input.idempotency_key !== undefined ? { idempotency_key: redactText(input.idempotency_key.slice(0, 200), 'idempotency_key').text } : {}),
       opened_by: ctx.actor,
       opened_at: ctx.now.toISOString(),
     });

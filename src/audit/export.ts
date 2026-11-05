@@ -9,21 +9,38 @@
 
 import { deflateRawSync } from 'node:zlib';
 
+import { SeaError } from '../core/errors.js';
 import { TRACKER_STATUSES } from './fields.js';
 
 // ───────────────────────────── CSV ─────────────────────────────
 
 /**
- * why: findings quote vendor-controlled text; a cell starting with = + - @
- * (or a tab / CR) runs as a formula when the CSV is opened in a spreadsheet.
- * Such cells get a leading apostrophe (OWASP CSV-injection advice).
+ * why: findings quote vendor-controlled text; a cell whose first non-space
+ * character is = + - @ (or their fullwidth forms), or that starts with a tab
+ * or CR, can run as a formula when the CSV is opened in a spreadsheet (some
+ * importers trim leading spaces first). Such cells get a leading apostrophe
+ * (OWASP CSV injection). A cell that already starts with an apostrophe in
+ * front of one gets another, so `unguardCell` undoes exactly one level and
+ * export → import round-trips.
  */
-function csvSafe(v: string): string {
-  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+const FORMULA_START = /^[=+\-@\uff1d\uff0b\uff0d\uff20]/;
+function needsGuard(v: string): boolean {
+  if (/^[\t\r]/.test(v)) return true;
+  if (FORMULA_START.test(v.replace(/^[\s\u180e\u200b]+/u, ''))) return true;
+  return v.startsWith("'") && needsGuard(v.slice(1));
+}
+
+export function guardCell(v: string): string {
+  return needsGuard(v) ? `'${v}` : v;
+}
+
+/** Inverse of guardCell. */
+export function unguardCell(v: string): string {
+  return v.startsWith("'") && needsGuard(v.slice(1)) ? v.slice(1) : v;
 }
 
 function csvCell(v: string): string {
-  const s = csvSafe(v);
+  const s = guardCell(v);
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -33,13 +50,23 @@ export function toCsv(columns: readonly string[], rows: readonly Record<string, 
   return lines.join('\r\n') + '\r\n';
 }
 
-/** RFC 4180 parse (quoted fields, "" escapes, CRLF or LF, optional BOM) into header-keyed rows. */
-export function parseCsv(text: string): { header: string[]; rows: Record<string, string>[] } {
+/**
+ * Strict RFC 4180 parse (quoted fields, "" escapes, CRLF or LF, optional
+ * BOM) into header-keyed rows. Errors name the 1-based line of the record:
+ * an unterminated quote, text after a closing quote, a record with more
+ * cells than the header, a duplicate or empty header name.
+ */
+export function parseCsv(text: string): { header: string[]; rows: Record<string, string>[]; lines: number[] } {
   const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  const records: string[][] = [];
+  const records: { cells: string[]; line: number }[] = [];
   let rec: string[] = [];
   let cell = '';
   let quoted = false;
+  let afterQuote = false;
+  let line = 1;
+  let recLine = 1;
+  let quoteLine = 1;
+  const bad = (msg: string, at: number) => new SeaError('invalid_input', `CSV row ${at}: ${msg}`, { row: at });
   let i = 0;
   while (i < src.length) {
     const ch = src[i]!;
@@ -51,30 +78,55 @@ export function parseCsv(text: string): { header: string[]; rows: Record<string,
           continue;
         }
         quoted = false;
-      } else cell += ch;
+        afterQuote = true;
+      } else {
+        if (ch === '\n') line++;
+        cell += ch;
+      }
       i++;
       continue;
     }
-    if (ch === '"' && cell === '') quoted = true;
-    else if (ch === ',') {
+    if (ch === '"' && cell === '' && !afterQuote) {
+      quoted = true;
+      quoteLine = recLine;
+    } else if (ch === ',') {
       rec.push(cell);
       cell = '';
+      afterQuote = false;
     } else if (ch === '\n' || ch === '\r') {
       rec.push(cell);
       cell = '';
-      records.push(rec);
+      afterQuote = false;
+      records.push({ cells: rec, line: recLine });
       rec = [];
       if (ch === '\r' && src[i + 1] === '\n') i++;
+      line++;
+      recLine = line;
+    } else if (afterQuote) {
+      throw bad('text after a closing quote', recLine);
     } else cell += ch;
     i++;
   }
+  if (quoted) throw bad('unterminated quoted field', quoteLine);
   if (cell !== '' || rec.length > 0) {
     rec.push(cell);
-    records.push(rec);
+    records.push({ cells: rec, line: recLine });
   }
-  const nonEmpty = records.filter((r) => !(r.length === 1 && r[0] === ''));
-  const header = (nonEmpty.shift() ?? []).map((h) => h.trim());
-  return { header, rows: nonEmpty.map((r) => Object.fromEntries(header.map((h, k) => [h, r[k] ?? '']))) };
+  const nonEmpty = records.filter((r) => !(r.cells.length === 1 && r.cells[0] === ''));
+  const head = nonEmpty.shift();
+  const header = (head?.cells ?? []).map((h) => h.trim());
+  const seen = new Set<string>();
+  for (const h of header) {
+    if (h === '') throw bad('empty column name in the header', head?.line ?? 1);
+    if (seen.has(h)) throw bad(`duplicate column "${h}"`, head?.line ?? 1);
+    seen.add(h);
+  }
+  for (const r of nonEmpty) if (r.cells.length > header.length) throw bad(`${r.cells.length} cells, header has ${header.length}`, r.line);
+  return {
+    header,
+    rows: nonEmpty.map((r) => Object.fromEntries(header.map((h, k) => [h, unguardCell(r.cells[k] ?? '')]))),
+    lines: nonEmpty.map((r) => r.line),
+  };
 }
 
 // ───────────────────────────── XLSX ─────────────────────────────

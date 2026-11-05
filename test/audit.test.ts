@@ -88,20 +88,20 @@ describe('acceptance test 1: crash mid-write', () => {
 });
 
 describe('named exclusive lease', () => {
-  it('one holder; re-acquire by the holder rotates the token in the same epoch; release refuses open intents unless abandon', () => {
+  it('one holder; re-acquire by the holder rotates the token and the epoch; release refuses open intents unless abandon', () => {
     const clock = new Clock();
     const { w1, w2 } = pair(clock);
     const a = w1.leaseAcquire({ name: 'sandbox:1' });
     expect(Object.keys(a).sort()).toEqual(['epoch', 'expires_at', 'name', 'token']);
     const a2 = w1.leaseAcquire({ name: 'sandbox:1' });
-    expect(a2.epoch).toBe(1);
+    expect(a2.epoch).toBe(2);
     expect(codeOf(() => w1.leaseRenew({ name: 'sandbox:1', token: a.token }))).toBe('fence_invalid');
     clock.advance(10);
     expect(Date.parse(w1.leaseRenew({ name: 'sandbox:1', token: a2.token }).expires_at)).toBeGreaterThan(Date.parse(a2.expires_at));
     expect(codeOf(() => w2.leaseRenew({ name: 'sandbox:1', token: a2.token }))).toBe('fence_foreign_holder');
     w1.leaseIntent({ name: 'sandbox:1', token: a2.token, op: 'write' });
     expect(codeOf(() => w1.leaseRelease({ name: 'sandbox:1', token: a2.token }))).toBe('invalid_input');
-    expect(w1.leaseRelease({ name: 'sandbox:1', token: a2.token, abandon: true })).toEqual({ epoch: 1, may_have_happened: 1 });
+    expect(w1.leaseRelease({ name: 'sandbox:1', token: a2.token, abandon: true })).toEqual({ epoch: 2, may_have_happened: 1 });
     const b = w2.leaseAcquire({ name: 'sandbox:1' });
     expect(b.took_over).toBeUndefined();
     expect(b.unresolved).toHaveLength(1);
@@ -222,10 +222,12 @@ describe('export and import', () => {
     expect(header).toEqual([...EXPORT_COLUMNS]);
     expect(rows.map((r) => r['id'])).toEqual(['A1', 'V4']);
     const v4 = rows[1]!;
-    expect(v4['title']).toBe(`'=HYPERLINK("http://x")`);
+    expect(csv).toContain(`"'=HYPERLINK(""http://x"")"`);
+    expect(v4['title']).toBe('=HYPERLINK("http://x")');
     expect(v4['summary']).toBe('line1\nline2, "quoted"');
-    expect(v4['gate1_repro']).toBe('pass: live repro');
-    expect(v4['gate3_docs']).toBe('n/a');
+    expect(v4['gate1_repro']).toBe('live repro');
+    expect(v4['repro_result']).toBe('pass');
+    expect(v4['docs_result']).toBe('n/a');
     expect(v4['status']).toBe('Not started');
     expect(v4['review']).toBe('pending');
     expect(rows[0]!['affected_count']).toBe('2');
@@ -241,26 +243,27 @@ describe('export and import', () => {
     const sheet = files['xl/worksheets/sheet1.xml']!;
     expect(sheet).toContain('<t xml:space="preserve">a &lt;b&gt; &amp; c</t>');
     expect(sheet).toContain('state="frozen"');
-    expect(sheet).toContain('<autoFilter ref="A1:AD2"/>');
+    expect(sheet).toContain('<autoFilter ref="A1:AI2"/>');
     expect(sheet).toContain('type="list"');
     expect(sheet).toContain('our PR/issue #');
     // Deterministic bytes for the same rows.
     expect((store.auditExport('posthog-2', 'xlsx') as Buffer).equals(buf)).toBe(true);
   });
 
-  it('import of an analysis pass findings.csv: idempotent by finding id, gate prefixes parsed, all-or-nothing', () => {
+  it('import of an analysis pass findings.csv: idempotent by finding id, gate results from their own columns, all-or-nothing', () => {
     const { store } = audit();
-    const csv = toCsv(['id', 'title', 'verdict', 'confidence', 'component', 'gate1_repro', 'gate2_intent', 'gate3_docs', 'gate4_prior_links', 'gate5_refutation'], [
-      { id: 'K1', title: 'guidance contradicts schema', verdict: 'bug', confidence: 'high', component: 'guidance', gate1_repro: 'PASS: seen live', gate2_intent: 'pass', gate3_docs: 'n/a', gate4_prior_links: 'pass', gate5_refutation: 'pass — held' },
-      { id: 'K2', title: 'untyped node', verdict: 'design-gap', confidence: 'low', component: 'schema', gate1_repro: 'reproduced twice', gate2_intent: '', gate3_docs: '', gate4_prior_links: '', gate5_refutation: '' },
+    const cols = ['id', 'title', 'verdict', 'confidence', 'component', 'gate1_repro', 'repro_result', 'intent_result', 'docs_result', 'prior_reports_result', 'refuter_result'];
+    const csv = toCsv(cols, [
+      { id: 'K1', title: 'guidance contradicts schema', verdict: 'bug', confidence: 'high', component: 'guidance', gate1_repro: 'seen live', repro_result: 'pass', intent_result: 'pass', docs_result: 'n/a', prior_reports_result: 'pass', refuter_result: 'pass' },
+      { id: 'K2', title: 'untyped node', verdict: 'design-gap', confidence: 'low', component: 'schema', gate1_repro: 'pass: reproduced twice', repro_result: '', intent_result: '', docs_result: '', prior_reports_result: '', refuter_result: '' },
     ]);
     expect(store.auditImport('posthog-2', csv)).toEqual({ created: 2, updated: 0, unchanged: 0, queued: 1 });
     const head = store.chain.head().seq;
     expect(store.auditImport('posthog-2', csv)).toEqual({ created: 0, updated: 0, unchanged: 2, queued: 0 });
     expect(store.chain.head().seq).toBe(head);
     const rows = parseCsv(store.auditExport('posthog-2', 'csv') as string).rows;
-    expect(rows.find((r) => r['id'] === 'K1')).toMatchObject({ gate1_repro: 'pass: seen live', gate5_refutation: 'pass: held', review: 'pending' });
-    expect(rows.find((r) => r['id'] === 'K2')).toMatchObject({ gate1_repro: 'reproduced twice', review: '' });
+    expect(rows.find((r) => r['id'] === 'K1')).toMatchObject({ gate1_repro: 'seen live', repro_result: 'pass', review: 'pending' });
+    expect(rows.find((r) => r['id'] === 'K2')).toMatchObject({ gate1_repro: 'pass: reproduced twice', repro_result: 'pending', review: '' });
     // A bad row rolls back the whole file.
     const bad = toCsv(['id', 'title', 'verdict'], [
       { id: 'K3', title: 'ok', verdict: 'bug' },
