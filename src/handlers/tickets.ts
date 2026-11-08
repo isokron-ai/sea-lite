@@ -6,6 +6,7 @@
 
 import type { ChainHead } from 'kronicle-lite';
 
+import { reopenAfterWrite } from '../audit/review-state.js';
 import { SeaError } from '../core/errors.js';
 import { EVENT, idemKey } from '../core/events.js';
 import { clampLease, expiryFrom, hashToken, newClaimToken, validateFence } from '../core/fence.js';
@@ -15,6 +16,7 @@ import {
   addNote,
   checkVersion,
   jsonBytes,
+  assertWritable,
   mustGetRow,
   notesFor,
   ownsClaim,
@@ -413,10 +415,12 @@ function validateExisting(ctx: Ctx, input: ExpandedBatch & Pick<ApplyInput, 'cla
     if (resolved.has(raw)) return resolved.get(raw)!;
     try {
       const id = resolveId(ctx.db, raw);
+      assertWritable(ctx, mustGetRow(ctx.db, id));
       resolved.set(raw, id);
       return id;
     } catch (e) {
-      problems.push(located(o, { code: 'unknown_ticket', message: `${field} "${raw}": ${e instanceof Error ? e.message : String(e)}`, at: raw }));
+      const code = e instanceof SeaError && e.code === 'forbidden' ? 'forbidden' : 'unknown_ticket';
+      problems.push(located(o, { code, message: `${field} "${raw}": ${e instanceof Error ? e.message : String(e)}`, at: raw }));
       return null;
     }
   };
@@ -656,7 +660,7 @@ export function update(ctx: Ctx, input: UpdateInput): UpdateResult {
       }
     }
     const id = resolveId(ctx.db, input.ticket_id);
-    const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
+    const row = sweepExpired(ctx, assertWritable(ctx, mustGetRow(ctx.db, id)));
     validateFence(row, input.claim_token, ctx.actor, ctx.now);
     checkVersion(row, input.expected_version);
 
@@ -721,6 +725,8 @@ export function update(ctx: Ctx, input: UpdateInput): UpdateResult {
           r.event.seq,
           id,
         );
+      // #8 stack review: renaming an approved audit finding through sea_update reopens its decision.
+      reopenAfterWrite(ctx, id, changed);
     }
     const note = input.note !== undefined ? addNote(ctx, id, input.note) : null;
     return {
@@ -794,7 +800,7 @@ export function transition(ctx: Ctx, input: TransitionInput, payloadExtra: Recor
       }
     }
     const id = resolveId(ctx.db, input.ticket_id);
-    const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
+    const row = sweepExpired(ctx, assertWritable(ctx, mustGetRow(ctx.db, id)));
     validateFence(row, input.claim_token, ctx.actor, ctx.now);
     checkVersion(row, input.expected_version);
 

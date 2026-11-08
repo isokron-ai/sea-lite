@@ -34,7 +34,10 @@ sea-lite is a small MCP server where tickets are **fenced**:
   same for Cursor, Codex, Copilot and humans.
 - Tickets belong to the **project** (git repository) they were created in,
   so one shared store serves many repositories without one repo's queue or
-  locks leaking into another.
+  locks leaking into another. A server scoped to a project (`--project`)
+  writes only that project's tickets (and legacy ones without a project):
+  claiming, updating, transitioning, linking or releasing another project's
+  ticket by id is `forbidden`. Reads by id stay open.
 - Tickets carry **typed links** (`depends_on`, `blocks`, `parent_of`, …).
   `sea_next` will not hand out a ticket whose predecessors are still open, and
   the precedence graph is kept acyclic on every write.
@@ -691,9 +694,16 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]`.
   A decision (approved / rejected / hold) goes back to `pending` when the
   title, a finding field other than tracker bookkeeping (`pr_or_issue`,
-  `submitted_date`, `tracker_status`, `submit_plan`, `review_note`), or a
-  gate's result / note / evidence changes; a gate back to `pending` takes
-  the finding out of the queue.
+  `submitted_date`, `tracker_status`), or a gate's result / note / evidence
+  changes; a gate back to `pending` takes the finding out of the queue. The
+  plan and note the reviewer decided with (`submit_plan`, `review_note`) are
+  part of the decision: a finding write or an import that changes them
+  reopens it; the reviewer changes them with `audit review … --plan`. This
+  holds on every path, not only the audit calls: renaming a finding (or
+  changing its body) with `sea_update`, or changing a finding field or a
+  gate's note / evidence with library `setFields`, reopens the decision too.
+  Reviewer-decided: title, body, every finding field except `pr_or_issue`,
+  `submitted_date`, `tracker_status`; a gate's result, note, evidence_ref.
 - **Export / import**: `sea-lite audit export AUDIT [--format csv|xlsx] [--out F]`
   (mode 0600) writes the PostHog tracker's columns in order (gate columns hold
   the gate notes), then one `<gate>_result` column per gate, `review`,

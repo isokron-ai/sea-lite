@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { parseCsv } from '../src/audit/export.js';
 import * as redactMod from '../src/audit/redact.js';
 import { assertClockTrusted, clockGuard, fsReference, type ProbeFs } from '../src/core/clock.js';
 import { runDoctor } from '../src/doctor.js';
@@ -572,6 +573,45 @@ describe('#8 surviving mutant: O_EXCL on the export temp file', () => {
   });
 });
 
+// ── #8.7 the approved plan is part of the decision ──
+
+describe('#8.7 import (or any finding write) cannot change submit_plan after a decision without reopening it', () => {
+  const ALL = { repro: { result: 'pass' }, intent: { result: 'pass' }, docs: { result: 'pass' }, prior_reports: { result: 'pass' }, refuter: { result: 'pass' } };
+  const decided = (decision: 'approved' | 'rejected' | 'hold' = 'approved') => {
+    const s = new SeaLite({ memory: true, actor: 'mcp-audit' });
+    s.auditOpen({ audit_id: 'a', title: 'A' });
+    s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'bug', severity: 'high' }, gates: ALL });
+    s.auditReview('a', { finding_id: 'F', decision, submit_plan: 'file a private report', note: 'ok by me' });
+    return s;
+  };
+  const row = (s: SeaLite) => parseCsv(s.auditExport('a', 'csv') as string).rows[0]!;
+  it('a findings.csv that changes submit_plan sends the approval back to pending', () => {
+    const s = decided();
+    const r = s.auditImport('a', 'id,title,submit_plan\nF,f,open a public PR now\n');
+    expect(r).toMatchObject({ updated: 1, queued: 1 });
+    expect(row(s)).toMatchObject({ review: 'pending', submit_plan: 'open a public PR now' });
+    s.close();
+  });
+  it('so does a direct finding write changing submit_plan or the review note, for every decision', () => {
+    for (const d of ['approved', 'rejected', 'hold'] as const) {
+      for (const fields of [{ submit_plan: 'something else' }, { review_note: 'agent rewrote the note' }]) {
+        const s = decided(d);
+        expect(s.auditFinding('a', { finding_id: 'F', title: 'f', fields }).review, `${d} ${Object.keys(fields)[0]}`).toBe('pending');
+        s.close();
+      }
+    }
+  });
+  it('re-importing an unchanged export leaves the decision alone; the reviewer can still change the plan', () => {
+    const s = decided();
+    const csv = s.auditExport('a', 'csv') as string;
+    expect(s.auditImport('a', csv)).toMatchObject({ queued: 0 }); // (gate results come back as claims: not substance)
+    expect(row(s).review).toBe('approved');
+    s.auditReview('a', { finding_id: 'F', decision: 'approved', submit_plan: 'file it upstream' });
+    expect(row(s)).toMatchObject({ review: 'approved', submit_plan: 'file it upstream' });
+    s.close();
+  });
+});
+
 // ── #8 review of the stack: an unwritable probe, and the moved-aside pile ──
 
 describe('#8 follow-up: a probe made unwritable (chmod 0444, same uid) is replaced; unmeasurable fails closed', () => {
@@ -708,5 +748,133 @@ describe('#8 follow-up: temp files left by a killed export are removed by the ne
     for (const n of [stale, live, other]) writeFileSync(join(dir, n), 'tracker rows', { mode: 0o600 });
     writePrivateFile(join(dir, 'tracker.csv'), 'id\n');
     expect(readdirSync(dir).sort()).toEqual([live, other, 'tracker.csv'].sort());
+  });
+});
+
+// ── #8 review of the stack: writes stay in the server's project; every path reopens a decision ──
+
+describe('#8 follow-up: writes are confined to the server\'s project', () => {
+  const setup = () => {
+    const q = new SeaLite({ memory: true, actor: 'agent', project: 'q' });
+    const t = q.create({ title: 'theirs', ...NEW }).ticket.id;
+    const mine = q.as('agent', 'agent', { project: 'p' }).create({ title: 'mine', ...NEW }).ticket.id;
+    const legacy = q.as('agent', 'agent', { project: null }).create({ title: 'legacy', ...NEW }).ticket.id;
+    const token = q.claim({ ticket_ids: [t] }).claims[0]!.claim_token;
+    return { q, p: q.as('agent', 'agent', { project: 'p' }), t, mine, legacy, token };
+  };
+  const code = (f: () => unknown) => {
+    try {
+      f();
+      return 'ok';
+    } catch (e) {
+      return (e as { code: string }).code;
+    }
+  };
+  it('claim, update, transition, link, release from another project are forbidden', () => {
+    const { p, t, mine, token } = setup();
+    const v = p.get({ id: t }).ticket.row_version;
+    expect(code(() => p.claim({ ticket_ids: [t] }))).toBe('forbidden');
+    expect(code(() => p.update({ ticket_id: t, claim_token: token, dry_run: false, title: 'renamed' }))).toBe('forbidden');
+    expect(code(() => p.transition({ ticket_id: t, claim_token: token, dry_run: false, to: 'in_progress' }))).toBe('forbidden');
+    expect(code(() => p.link({ action: 'add', from_id: t, to_id: mine, link_type: 'blocks', claim_token: token, expected_version: v, dry_run: false }))).toBe('forbidden');
+    expect(code(() => p.release({ ticket_id: t, claim_token: token, force: false }))).toBe('forbidden');
+    expect(code(() => p.refresh({ ticket_id: t, claim_token: token }))).toBe('forbidden');
+    expect(code(() => p.finish({ ticket_id: t, claim_token: token, outcome: 'done', note: 'n', dry_run: false }))).toBe('forbidden');
+    let problems = '';
+    try {
+      p.apply({ tickets: [{ ref: 'n', title: 'new', body: '', kind: 'bug', priority: 'high', tags: [], status: 'triaged' }], links: [{ from_id: t, to_ref: 'n', link_type: 'blocks' }], claims: [{ ticket_id: t, claim_token: token }], dry_run: false });
+    } catch (e) {
+      problems = JSON.stringify((e as { details: unknown }).details);
+    }
+    expect(problems).toMatch(/"code":"forbidden"/);
+    void mine;
+    expect(p.get({ id: t }).ticket.title).toBe('theirs');
+  });
+  it('a link from my ticket to another project\'s ticket is forbidden too; legacy (project-less) tickets stay writable', () => {
+    const { p, t, mine, legacy } = setup();
+    const tok = p.claim({ ticket_ids: [mine] }).claims[0]!.claim_token;
+    const v = p.get({ id: mine }).ticket.row_version;
+    expect(code(() => p.link({ action: 'add', from_id: mine, to_id: t, link_type: 'blocks', claim_token: tok, expected_version: v, dry_run: false }))).toBe('forbidden');
+    expect(p.claim({ ticket_ids: [legacy] }).claims).toHaveLength(1);
+  });
+  it('the owning project and an every-project server can write', () => {
+    const { q, t, token } = setup();
+    expect(q.update({ ticket_id: t, claim_token: token, dry_run: false, title: 'renamed' }).changed).toEqual(['title']);
+    const all = q.as('agent', 'agent', { project: null });
+    expect(all.update({ ticket_id: t, claim_token: token, dry_run: false, title: 'again' }).changed).toEqual(['title']);
+  });
+});
+
+describe('#8 follow-up: every path that changes what the reviewer decided on reopens the decision', () => {
+  const ALL = { repro: { result: 'pass' }, intent: { result: 'pass' }, docs: { result: 'pass' }, prior_reports: { result: 'pass' }, refuter: { result: 'pass' } };
+  const decided = () => {
+    const s = new SeaLite({ memory: true, actor: 'mcp-audit' });
+    s.auditOpen({ audit_id: 'a', title: 'A' });
+    const f = s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'bug', severity: 'high' }, gates: ALL });
+    s.auditReview('a', { finding_id: 'F', decision: 'approved', submit_plan: 'plan' });
+    const gid = (s.db.prepare(`SELECT ticket_id FROM sea_fields WHERE name = 'gate' AND value = 'repro'`).get() as { ticket_id: string }).ticket_id;
+    return { s, fid: f.ticket_id, gid };
+  };
+  const review = (s: SeaLite) => parseCsv(s.auditExport('a', 'csv') as string).rows[0]!['review'];
+  it('sea_claim + sea_update of the title or body (MCP path, any project that may write it)', () => {
+    for (const change of [{ title: 'renamed' }, { body: 'new body' }]) {
+      const { s, fid } = decided();
+      const tok = s.claim({ ticket_ids: [fid] }).claims[0]!.claim_token;
+      s.update({ ticket_id: fid, claim_token: tok, dry_run: false, ...change });
+      expect(review(s), Object.keys(change)[0]).toBe('pending');
+    }
+  });
+  it('library setFields of a finding field or a gate note / evidence', () => {
+    for (const [which, patch] of [
+      ['finding', { severity: 'low' }],
+      ['finding', { submit_plan: 'other plan' }],
+      ['finding', { review_note: 'rewritten' }],
+      ['gate', { note: 'new note' }],
+      ['gate', { evidence_ref: 'kl:9' }],
+    ] as const) {
+      const { s, fid, gid } = decided();
+      s.setFields(which === 'finding' ? fid : gid, patch);
+      expect(review(s), JSON.stringify(patch)).toBe('pending');
+    }
+  });
+  it('bookkeeping does not reopen: tracker fields, priority, tags', () => {
+    const { s, fid } = decided();
+    s.setFields(fid, { tracker_status: 'PR open', pr_or_issue: 'o/r#1', submitted_date: '2026-11-08' });
+    const tok = s.claim({ ticket_ids: [fid] }).claims[0]!.claim_token;
+    s.update({ ticket_id: fid, claim_token: tok, dry_run: false, priority: 'low', add_tags: ['x'] });
+    expect(review(s)).toBe('approved');
+  });
+  it('a gate ticket\'s bookkeeping (priority) does not reopen; library setFields stays in its project', () => {
+    const { s, fid, gid } = decided();
+    const tok = s.claim({ ticket_ids: [gid] }).claims[0]!.claim_token;
+    s.update({ ticket_id: gid, claim_token: tok, dry_run: false, priority: 'low' });
+    expect(review(s)).toBe('approved');
+    let code = '';
+    try {
+      s.as('agent', 'agent', { project: 'some-repo' }).setFields(fid, { severity: 'low' });
+    } catch (e) {
+      code = (e as { code: string }).code;
+    }
+    expect(code).toBe('forbidden');
+    expect(review(s)).toBe('approved');
+  });
+});
+
+describe('#8 follow-up over MCP: a server for another project cannot claim or rename an audit finding', () => {
+  it('sea_claim on the finding is forbidden; the approval and the exported title stay as they were', async () => {
+    const { connectInMemory, parse } = await import('./mcp-helpers.js');
+    const ALL = { repro: { result: 'pass' }, intent: { result: 'pass' }, docs: { result: 'pass' }, prior_reports: { result: 'pass' }, refuter: { result: 'pass' } };
+    const s = new SeaLite({ memory: true, actor: 'mcp-audit' });
+    s.auditOpen({ audit_id: 'a', title: 'A' });
+    const f = s.auditFinding('a', { finding_id: 'F', title: 'f', gates: ALL });
+    s.auditReview('a', { finding_id: 'F', decision: 'approved' });
+    const other = s.as('agent', 'agent', { project: 'some-repo' });
+    const { client, close } = await connectInMemory(other);
+    const r = (await client.callTool({ name: 'sea_claim', arguments: { ticket_ids: [f.ticket_id] } })) as { isError?: boolean };
+    expect(r.isError).toBe(true);
+    expect(parse<{ error: string }>(r)).toMatchObject({ error: 'forbidden' });
+    await close();
+    expect(parseCsv(s.auditExport('a', 'csv') as string).rows[0]).toMatchObject({ title: 'f', review: 'approved' });
+    s.close();
   });
 });

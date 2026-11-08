@@ -101,6 +101,23 @@ export function getRow(db: Db, id: string): TicketRow | null {
   return (db.prepare(`SELECT * FROM sea_tickets WHERE id = ?`).get(id) as TicketRow | undefined) ?? null;
 }
 
+/**
+ * #8 stack review: a server scoped to one project could claim and edit
+ * another project's ticket by id (an audit finding included). Writes are
+ * confined to the server's project; a server for every project (null) and
+ * legacy tickets without a project are unaffected. Reads by id stay open.
+ */
+export function assertWritable(ctx: Pick<Ctx, 'project'>, row: TicketRow): TicketRow {
+  if (ctx.project !== null && row.project !== null && row.project !== ctx.project) {
+    throw new SeaError('forbidden', `ticket ${row.id} belongs to project "${row.project}", not this server's project "${ctx.project}"; writes stay in their project`, {
+      ticket_id: row.id,
+      project: row.project,
+      server_project: ctx.project,
+    });
+  }
+  return row;
+}
+
 export function mustGetRow(db: Db, id: string): TicketRow {
   const row = getRow(db, id);
   if (!row) throw notFound(id);

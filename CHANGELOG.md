@@ -171,6 +171,24 @@ uses semantic versioning once past 0.x.
   (`.<name>.<pid>.<hex>.tmp` whose pid is gone) are removed by the next
   export to the same path.
 
+- **Import could change an approved plan.** `submit_plan` (and
+  `review_note`) counted as tracker bookkeeping, so a findings.csv could
+  replace the plan a reviewer approved without reopening the decision. Both
+  are now part of the decision: changing them through a finding write or an
+  import sends approved / rejected / hold back to `pending`; `auditReview`
+  still sets them with the decision.
+- **Writes stay in their project; every path reopens a decision** (review
+  of the #8 stack). A server scoped to another project could `sea_claim` +
+  `sea_update` an approved audit finding by id and rename it while review
+  stayed approved. Writes by id (claim, update, transition, link — both
+  ends —, release, refresh, batch links from existing tickets, library
+  `setFields`) now need the ticket to be in the server's project (or have
+  none); otherwise `forbidden`. And any change to what the reviewer decided
+  on — title, body, finding fields other than tracker bookkeeping, a gate's
+  result / note / evidence — reopens the decision whichever path made it
+  (`sea_update`, library `setFields`, the audit calls), via
+  `src/audit/review-state.ts`.
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to
