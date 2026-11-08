@@ -136,6 +136,14 @@ uses semantic versioning once past 0.x.
   before anything is written, and any failure after the temp file exists
   removes it (`writePrivateFile`, `src/audit/export.ts`). A file or link
   already at the temp name is never opened (`O_EXCL`); another name is tried.
+- **Export writes every byte or nothing** (review of the #8 stack). One
+  `writeSync` on a full disk wrote 64 KB of 200 KB, reported success and
+  renamed the truncated file over the existing export. Writes now loop
+  until done (no progress is an error), the temp file is fsynced and its
+  size checked before the rename; on any failure the old export stays and
+  the temp file is removed. Temp files left by an export killed mid-write
+  (`.<name>.<pid>.<hex>.tmp` whose pid is gone) are removed by the next
+  export to the same path.
 
 ### Compatibility
 
