@@ -538,7 +538,11 @@ describe('#8 follow-up: a probe made unwritable (chmod 0444, same uid) is replac
     const dir = tmp();
     new SeaLite({ dataDir: dir, actor: 'a' }).close();
     const { checkClockWith } = await import('../src/doctor.js');
-    expect(checkClockWith(dir, new Date(), () => null).status).toBe('fail');
+    const c = checkClockWith(dir, new Date(), () => null);
+    expect(c.status).toBe('fail');
+    // #8 re-review: say exactly how to recover
+    expect(c.detail).toContain(`chmod u+w ${dir} ${join(dir, PROBE)}`);
+    expect(c.detail).toMatch(/or, knowingly, set SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0/);
   });
 });
 
