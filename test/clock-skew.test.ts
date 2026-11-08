@@ -60,10 +60,10 @@ describe('clock skew guard (C2-06)', () => {
     }
   });
 
-  it('within tolerance and with an unknown reference, nothing changes', () => {
+  it('within tolerance and an unknown reference is untrusted (#8 review)', () => {
     const g = clockGuard(() => new Date(Date.now() + 10_000), () => Date.now(), 30);
     expect(g.untrusted()).toBeNull();
-    expect(clockGuard(() => new Date(0), () => null, 30).untrusted()).toBeNull();
+    expect(clockGuard(() => new Date(0), () => null, 30).untrusted()).toMatchObject({ unavailable: true }); // #8 review: unmeasurable fails closed
     expect(clockGuard(() => new Date(Date.now() + 60_000), () => Date.now(), 30).untrusted()).toMatchObject({ max_ms: 30_000 });
     expect(parseMaxSkew(undefined)).toBe(30);
     expect(() => parseMaxSkew('-1')).toThrow(/non-negative/);

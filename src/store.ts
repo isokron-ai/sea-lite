@@ -9,8 +9,9 @@ import { randomUUID } from 'node:crypto';
 import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kronicle-lite';
 
 import { clockGuard, fsReference, parseMaxSkew, type ClockGuard, type Reference } from './core/clock.js';
+import { reopenAfterWrite } from './audit/review-state.js';
 import { SeaError } from './core/errors.js';
-import { isBusy, resolveId, tx, type Ctx } from './core/repo.js';
+import { assertWritable, isBusy, mustGetRow, resolveId, tx, type Ctx } from './core/repo.js';
 import { SEA_MIGRATIONS, SEA_NEWEST_TABLE, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
 import * as auditH from './audit/audit.js';
 import * as exportH from './audit/export.js';
@@ -370,7 +371,13 @@ export class SeaLite {
   setFields(ticket_id: string, patch: Record<string, unknown>, expect_version?: number): fieldsH.SetFieldsResult {
     const ctx = this.ctx();
     const prepared = fieldsH.prepareFields(patch); // #8: scanned before the transaction
-    return tx(ctx.db, () => fieldsH.setFields(ctx, resolveId(ctx.db, ticket_id), prepared, expect_version));
+    return tx(ctx.db, () => {
+      const id = resolveId(ctx.db, ticket_id);
+      assertWritable(ctx, mustGetRow(ctx.db, id));
+      const r = fieldsH.setFields(ctx, id, prepared, expect_version);
+      reopenAfterWrite(ctx, id, r.changed); // #8 stack review: the library path reopens a decision too
+      return r;
+    });
   }
   fields(ticket_id: string): { ticket_id: string; version: number; fields: fieldsH.FieldMap } {
     const id = resolveId(this.db, ticket_id);

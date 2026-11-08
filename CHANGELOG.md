@@ -89,6 +89,15 @@ uses semantic versioning once past 0.x.
   These are now retried; only a path still contested after ten attempts,
   and for the one-shot probe as well, is `probe_tampered`. Tested with 12
   processes healing 25 plants with the race window widened.
+- **Unmeasurable clock fails closed** (review of the #8 stack). A probe
+  made read-only (`chmod 0444`, same uid) gave `EACCES`, which counted as
+  "cannot measure" and let every lease decision through, so a 15-minute skew
+  went unnoticed. A read-only probe is now replaced like any other plant,
+  and a clock that cannot be measured at all refuses lease decisions
+  (`clock_skew`, `reason: probe_unavailable`; doctor `clock` fails) unless
+  `SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`. Moved-aside plants are capped: the
+  newest 8 are kept, older ones removed and counted
+  (`sea-clock.probe.removed-count`, shown by doctor).
 
 - **Redaction false positives.** `sk-…` and `xox?-…` matched any long
   enough id, so `sandbox:sk-prod-cluster-east-0001`,
@@ -105,6 +114,18 @@ uses semantic versioning once past 0.x.
   prepares every row first). kronicle-lite's write-time detectors are
   mirrored with bounded quantifiers; a parity test checks that everything
   they flag is still redacted. Timing tests on 17 adversarial 128 KB shapes.
+- **Shape, not entropy, for known formats; prefixes at token boundaries**
+  (review of the #8 stack). The randomness gate let about 1 in 6 000
+  generated Anthropic keys and 1 in 8 000 `xoxb` tokens through. `sk-ant-`,
+  `sk-proj-` / `sk-svcacct-` / `sk-admin-`, legacy 48-character `sk-`,
+  `gh?_`, `github_pat_`, `xox?-` (numeric segments, then the secret) and
+  `AKIA` / `ASIA` are now matched by documented shape and length only; the
+  randomness check is left for a bare `sk-` with none of those shapes. A
+  prefix counts only at a token boundary, so `task-<ULID>`, `disk-…`,
+  `helpdesk-…`, `laughs_…`, `snpm_…` are ordinary ids again; a prefix glued
+  to a letter or digit still counts at the format's full length (GitHub 36,
+  fine-grained / project / Anthropic 80+, legacy `sk-` 48). Property test:
+  100 000 generated keys of each of 13 formats, all redacted.
 - **Redaction misses closed**: a letter or digit glued in front of a key,
   base64 of `x`+key, base64 in URL paths, MIME-wrapped base64, hex, and
   nested encodings (up to four levels; printable text nested deeper is
@@ -115,6 +136,14 @@ uses semantic versioning once past 0.x.
   before anything is written, and any failure after the temp file exists
   removes it (`writePrivateFile`, `src/audit/export.ts`). A file or link
   already at the temp name is never opened (`O_EXCL`); another name is tried.
+- **Export writes every byte or nothing** (review of the #8 stack). One
+  `writeSync` on a full disk wrote 64 KB of 200 KB, reported success and
+  renamed the truncated file over the existing export. Writes now loop
+  until done (no progress is an error), the temp file is fsynced and its
+  size checked before the rename; on any failure the old export stays and
+  the temp file is removed. Temp files left by an export killed mid-write
+  (`.<name>.<pid>.<hex>.tmp` whose pid is gone) are removed by the next
+  export to the same path.
 
 - **Import could change an approved plan.** `submit_plan` (and
   `review_note`) counted as tracker bookkeeping, so a findings.csv could
@@ -122,6 +151,17 @@ uses semantic versioning once past 0.x.
   are now part of the decision: changing them through a finding write or an
   import sends approved / rejected / hold back to `pending`; `auditReview`
   still sets them with the decision.
+- **Writes stay in their project; every path reopens a decision** (review
+  of the #8 stack). A server scoped to another project could `sea_claim` +
+  `sea_update` an approved audit finding by id and rename it while review
+  stayed approved. Writes by id (claim, update, transition, link — both
+  ends —, release, refresh, batch links from existing tickets, library
+  `setFields`) now need the ticket to be in the server's project (or have
+  none); otherwise `forbidden`. And any change to what the reviewer decided
+  on — title, body, finding fields other than tracker bookkeeping, a gate's
+  result / note / evidence — reopens the decision whichever path made it
+  (`sea_update`, library `setFields`, the audit calls), via
+  `src/audit/review-state.ts`.
 
 - **Known limit, documented:** `--role operator` is self-asserted, so any
   process that can run the CLI can `audit import --trusted --role operator`
