@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import * as redactMod from '../src/audit/redact.js';
-import { fsReference, type ProbeFs } from '../src/core/clock.js';
+import { assertClockTrusted, clockGuard, fsReference, type ProbeFs } from '../src/core/clock.js';
 import { runDoctor } from '../src/doctor.js';
 import { SeaLite } from '../src/store.js';
 
@@ -427,7 +427,7 @@ describe('#8.4 redaction is linear in the size of a cell', () => {
   });
 });
 
-describe('#8.3 the randomness rule for sk- / xox- bodies, edge by edge', () => {
+describe('#8.3 the randomness rule for bare sk- bodies, edge by edge', () => {
   const secret = (s: string) => redactMod.looksLikeSecret(s);
   it('a 16-char segment that switches class only 4 times is a name (sk-Build2024Release-v12)', () => {
     expect(secret('sk-Build2024Release-v12')).toBe(false);
@@ -441,9 +441,9 @@ describe('#8.3 the randomness rule for sk- / xox- bodies, edge by edge', () => {
   it('a 16-char random segment is a key', () => {
     expect(secret('sk-aB3dE5gH7jK9mN1p-qRs')).toBe(true);
   });
-  it('32+ lowercase hex digits are a key even with few class switches (xoxp hex secret)', () => {
-    expect(secret('xo' + 'xp-1234567890-1234567890-' + '0123456789abcdef'.repeat(2))).toBe(true);
-    expect(secret('xo' + 'xp-1234567890-1234567890-' + '0123456789ABCDEF'.repeat(2))).toBe(false); // uppercase: not the hex form, and 2 switches
+  it('a bare sk- with 32+ lowercase hex digits is a key even with few class switches', () => {
+    expect(secret('sk-' + '0123456789abcdef'.repeat(2))).toBe(true);
+    expect(secret('sk-' + '0123456789ABCDEF'.repeat(2))).toBe(false); // uppercase: not the hex form, and 3 switches
   });
 });
 
@@ -569,5 +569,81 @@ describe('#8 surviving mutant: O_EXCL on the export temp file', () => {
     const names = [planted, join(dir, '.fresh.tmp')];
     writePrivateFile(join(dir, 'tracker.csv'), 'id\n', { tmpName: () => names.shift()! });
     expect(readFileSync(victim, 'utf8')).toBe('precious\n');
+  });
+});
+
+// ── #8 review of the stack: an unwritable probe, and the moved-aside pile ──
+
+describe('#8 follow-up: a probe made unwritable (chmod 0444, same uid) is replaced; unmeasurable fails closed', () => {
+  it('EACCES on the probe is healed: the probe is replaced and the 15-minute skew is still caught', () => {
+    const dir = tmp();
+    writeFileSync(join(dir, PROBE), '1\n', { mode: 0o444 });
+    const real = fakeFs({});
+    // root ignores file modes, so the EACCES the planter caused is injected for the probe path
+    let denied = 0;
+    const fs = fakeFs({
+      open(p, f, m) {
+        if (p.endsWith(PROBE) && nodeFs.existsSync(p) && (nodeFs.statSync(p).mode & 0o200) === 0) {
+          denied++;
+          throw errno('EACCES');
+        }
+        return real.open(p, f, m);
+      },
+    });
+    const warnings: string[] = [];
+    const ref = fsReference(dir, (m) => warnings.push(m), fs);
+    expect(typeof ref()).toBe('number');
+    expect(denied).toBe(1);
+    expect(warnings.join('\n')).toMatch(/not writable \(EACCES\); replaced/);
+    expect(nodeFs.statSync(join(dir, PROBE)).mode & 0o777).toBe(0o600);
+    const guard = clockGuard(() => new Date(Date.now() + 15 * 60_000), ref, 30);
+    expect(guard.untrusted()).toMatchObject({ max_ms: 30_000 });
+  });
+
+  it('a probe that cannot be measured at all refuses lease decisions (not "trust this clock"); the knob set to 0 is the operator\'s ack', () => {
+    const down = () => null;
+    expect(() => assertClockTrusted(clockGuard(() => new Date(), down, 30), 'place a claim')).toThrow(expect.objectContaining({ code: 'clock_skew', details: { reason: 'probe_unavailable' } }));
+    expect(() => assertClockTrusted(clockGuard(() => new Date(), down, 0), 'place a claim')).not.toThrow();
+  });
+
+  it('a skewed store whose probe is denied end to end: claims are refused', () => {
+    const dir = tmp();
+    const s = new SeaLite({ dataDir: dir, actor: 'a', now: () => new Date(Date.now() + 15 * 60_000), clockReference: () => null });
+    const t = s.create({ title: 'x', ...NEW });
+    let code = '';
+    try {
+      s.claim({ ticket_ids: [t.ticket.id] });
+    } catch (e) {
+      code = (e as { code: string }).code;
+    }
+    expect(code).toBe('clock_skew');
+    s.close();
+  });
+
+  it('doctor fails the clock check when it cannot measure', async () => {
+    const dir = tmp();
+    new SeaLite({ dataDir: dir, actor: 'a' }).close();
+    const { checkClockWith } = await import('../src/doctor.js');
+    expect(checkClockWith(dir, new Date(), () => null).status).toBe('fail');
+  });
+});
+
+describe('#8 follow-up: moved-aside plants are capped', () => {
+  it('keeps the newest 8, removes the rest and counts them; doctor reports both', async () => {
+    const dir = tmp();
+    const ref = fsReference(dir, () => undefined);
+    for (let i = 0; i < 20; i++) {
+      rmSync(join(dir, PROBE), { force: true });
+      mkdirSync(join(dir, PROBE));
+      writeFileSync(join(dir, PROBE, `n${i}`), String(i));
+      expect(typeof ref()).toBe('number');
+    }
+    const kept = asides(dir).sort();
+    expect(kept).toHaveLength(8);
+    expect(kept.map((a) => readdirSync(join(dir, a))[0]).sort()).toEqual(Array.from({ length: 8 }, (_, i) => `n${12 + i}`).sort());
+    const { runDoctor: doctor } = await import('../src/doctor.js');
+    const clock = (await doctor({ dataDir: dir })).checks.find((c) => c.id === 'clock');
+    expect(clock?.detail).toMatch(/12 older plants were removed/);
+    expect(clock?.data).toMatchObject({ removed_earlier: 12 });
   });
 });
