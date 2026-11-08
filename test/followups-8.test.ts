@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import * as redactMod from '../src/audit/redact.js';
 import { fsReference, type ProbeFs } from '../src/core/clock.js';
 import { runDoctor } from '../src/doctor.js';
 import { SeaLite } from '../src/store.js';
@@ -283,5 +284,274 @@ describe('#8 surviving mutants: the probe open error mapping and the post-open f
     expect(typeof fsReference(dir, (m) => warnings.push(m), once)()).toBe('number');
     expect(warnings).toEqual([]);
     expect(once.writes).toBe(1);
+  });
+});
+
+// ── #8.3–#8.5 redaction: false positives, linear time, misses ──
+
+/** Deterministic pseudo-random strings so fixtures are key-shaped without being anyone's key. */
+function prng(seed: number): (alphabet: string, n: number) => string {
+  let x = seed >>> 0;
+  return (alphabet, n) => {
+    let s = '';
+    for (let i = 0; i < n; i++) {
+      x = (Math.imul(x ^ (x >>> 15), 0x2c1b3c6d) + 0x9e3779b9) >>> 0;
+      s += alphabet[x % alphabet.length];
+    }
+    return s;
+  };
+}
+const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const rnd = prng(8);
+const GHP8 = 'ghp_' + rnd(ALNUM, 36);
+const SK = 'sk-' + rnd(ALNUM, 48);
+const SK_PROJ = 'sk-' + 'proj-' + rnd(ALNUM + '-_', 120);
+const SK_ANT = 'sk-' + 'ant-api03-' + rnd(ALNUM + '-_', 93) + 'AA';
+const XOXB = 'xo' + 'xb-' + rnd('0123456789', 12) + '-' + rnd('0123456789', 13) + '-' + rnd(ALNUM, 24);
+const XOXP = 'xo' + 'xp-' + rnd('0123456789', 12) + '-' + rnd('0123456789', 12) + '-' + rnd('0123456789', 13) + '-' + rnd('0123456789abcdef', 32);
+const b64 = (s: string | Buffer) => Buffer.from(s).toString('base64');
+
+describe('#8.3 redaction false positives: ordinary ids pass, real-looking keys are still caught', () => {
+  const ordinary = [
+    'sandbox:sk-prod-cluster-east-0001',
+    'sk-create-sandbox-attempt-0001',
+    'xoxb-prod-runner-pool-1',
+    'F-sk-learn-regression-0001',
+    'refs/heads/sk-proj-redaction-false-positives',
+    'task-create-sandbox-attempt-0001',
+    'sk-proj-supercalifragilisticexpialidocious',
+    'xoxp-staging-deploy-notifications-0042',
+    'risk-assessment-2026-q4-final',
+  ];
+  for (const id of ordinary) {
+    it(`"${id}" is neither refused as an identity nor redacted from free text`, () => {
+      const { redactText, looksLikeSecret } = redactMod;
+      expect(looksLikeSecret(id)).toBe(false);
+      expect(redactText(`see ${id} here`, 'x')).toEqual({ text: `see ${id} here`, redacted: false });
+    });
+  }
+  it('they work as lease names, finding ids and titles end to end', () => {
+    const s = new SeaLite({ memory: true, actor: 'a' });
+    expect(s.leaseAcquire({ name: 'sandbox:sk-prod-cluster-east-0001' }).epoch).toBe(1);
+    s.auditOpen({ audit_id: 'au', title: 't' });
+    const r = s.auditFinding('au', { finding_id: 'F-sk-learn-regression-0001', title: 'on refs/heads/sk-proj-redaction-false-positives (xoxb-prod-runner-pool-1)' });
+    expect(r.redacted).toBeUndefined();
+    s.close();
+  });
+  for (const [what, key] of [
+    ['sk- legacy', SK],
+    ['sk-proj-', SK_PROJ],
+    ['sk-ant-', SK_ANT],
+    ['xoxb-', XOXB],
+    ['xoxp- (hex secret)', XOXP],
+  ] as const) {
+    it(`a real-looking ${what} key is still redacted and refused`, () => {
+      const { redactText, looksLikeSecret } = redactMod;
+      expect(looksLikeSecret(key)).toBe(true);
+      const r = redactText(`k=${key};`, 'x');
+      expect(r.redacted).toBe(true);
+      expect(r.text).not.toContain(key.slice(8, 30));
+    });
+  }
+  it('every credential kronicle-lite detects is still redacted (parity with its write-time detectors)', async () => {
+    const { scanForSecrets } = await import('kronicle-lite');
+    const { redactText } = redactMod;
+    const r2 = prng(3);
+    const corpus = [
+      `-----BEGIN RSA PRIVATE KEY-----\n${r2(ALNUM, 64)}\n${r2(ALNUM, 64)}\n-----END RSA PRIVATE KEY-----`,
+      'AKIA' + r2('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567', 16),
+      `aws_secret_access_key = ${r2(ALNUM + '/+', 40)}`,
+      GHP8,
+      'github_pat_' + r2(ALNUM + '_', 82),
+      'glpat-' + r2(ALNUM, 20),
+      SK_ANT,
+      SK_PROJ,
+      XOXB,
+      'sk_' + 'live_' + r2(ALNUM, 24),
+      'AIza' + r2(ALNUM + '-_', 35),
+      'npm_' + r2(ALNUM, 36),
+      'hvs.' + r2(ALNUM, 90),
+      'dp.pt.' + r2(ALNUM, 43),
+      `eyJ${r2(ALNUM, 20)}.eyJ${r2(ALNUM, 30)}.${r2(ALNUM, 43)}`,
+      `postgres://app:${r2(ALNUM, 16)}@db.internal:5432/prod`,
+      `Authorization: Bearer ${r2(ALNUM, 40)}`,
+      `export API_TOKEN=${r2(ALNUM, 32)}`,
+      `password: "${r2(ALNUM, 20)}"`,
+    ];
+    for (const t of corpus) {
+      expect(scanForSecrets(t).length, `kronicle should flag: ${t.slice(0, 20)}`).toBeGreaterThan(0);
+      expect(redactText(t, 'x').redacted, t.slice(0, 30)).toBe(true);
+    }
+  });
+});
+
+describe('#8.5 redaction misses', () => {
+  const wrap = (s: string, w: number) => s.match(new RegExp(`.{1,${w}}`, 'g'))!.join('\r\n');
+  const hex = (s: string) => Buffer.from(s).toString('hex');
+  const cases: [string, string][] = [
+    ['a letter glued to the key', `token${GHP8}`],
+    ['a digit glued to the key', `1${GHP8}`],
+    ['a word glued to an sk- key', `apikey${SK}`],
+    ['base64 of x+key', b64(`x${GHP8}`)],
+    ['base64 of x+key (sk-proj)', b64(`x${SK_PROJ}`)],
+    ['base64 in a URL path', `https://h.test/v1/${b64(GHP8)}/info`],
+    ['base64url in a URL path', `https://h.test/cb/${Buffer.from(`id:${SK}`).toString('base64url')}?a=1`],
+    ['base64 glued after a path segment', `/files/x${b64(`secret ${GHP8} end`)}`],
+    ['MIME-wrapped base64 (76 columns)', wrap(b64(`Authorization: token ${GHP8} and some more text to wrap a few lines over`), 76)],
+    ['MIME-wrapped base64 (key split across lines)', wrap(b64(`k=${XOXB}`), 16)],
+    ['hex', hex(GHP8)],
+    ['uppercase hex', hex(`key ${SK}`).toUpperCase()],
+    ['hex at an odd offset (a hex digit glued in front)', `a${hex(GHP8)}`],
+    ['base64 with a letter glued in front', `Q${b64(`secret ${GHP8} end`)}`],
+    ['double base64', b64(b64(GHP8))],
+    ['triple base64', b64(b64(b64(`k=${SK_ANT}`)))],
+    ['base64 of hex', b64(hex(GHP8))],
+    ['URL-encoded base64', encodeURIComponent(b64(`t ${GHP8}`))],
+  ];
+  for (const [what, text] of cases) {
+    it(what, () => {
+      const { redactText, looksLikeSecret } = redactMod;
+      const r = redactText(`see ${text} here`, 'evidence');
+      expect(r.redacted).toBe(true);
+      expect(r.text).not.toContain(text.split('\r\n')[0]!.slice(0, 40));
+      expect(r.text.startsWith('see ')).toBe(true);
+      expect(r.text.endsWith(' here')).toBe(true);
+      expect(looksLikeSecret(text)).toBe(true);
+    });
+  }
+  it('leaves hashes, uuids, hex digests and base64 / hex of ordinary text alone', () => {
+    const { redactText } = redactMod;
+    for (const t of [
+      'sha256:' + 'ab'.repeat(32),
+      'commit ' + rnd('0123456789abcdef', 40),
+      'sha512-' + b64(Buffer.from(Array.from({ length: 64 }, (_, i) => (i * 97 + 13) & 255))),
+      hex('a perfectly ordinary sentence, nothing secret here'),
+      b64(b64('a perfectly ordinary sentence, nothing secret here')),
+      wrap(b64('a perfectly ordinary sentence, nothing secret here at all, wrapped over lines'), 20),
+      'https://example.com/v1/' + b64('ordinary/path/segment') + '/x',
+    ]) expect(redactText(t, 'x'), t).toEqual({ text: t, redacted: false });
+  });
+});
+
+describe('#8 surviving mutant: the 0.9 printable-ratio threshold on decoded base64', () => {
+  // A key inside decoded bytes that are exactly 90% printable is looked at; 89% is treated as binary.
+  const blob = (printable: number) => {
+    const key = Buffer.from(` ${GHP8} `); // 42 printable bytes
+    const pad = Buffer.alloc(printable - key.length, 0x2e); // '.'
+    const noise = Buffer.alloc(100 - printable, 0x01);
+    return b64(Buffer.concat([key, pad, noise]));
+  };
+  it('90% printable: decoded and redacted', () => {
+    expect(redactMod.redactText(`x ${blob(90)} y`, 'x').redacted).toBe(true);
+  });
+  it('89% printable: treated as binary, left alone', () => {
+    expect(redactMod.redactText(`x ${blob(89)} y`, 'x').redacted).toBe(false);
+  });
+});
+
+describe('#8.4 redaction is linear in the size of a cell', () => {
+  const r3 = prng(5);
+  const shapes: Record<string, (n: number) => string> = {
+    'one 64K-char word': (n) => 'a'.repeat(n),
+    'random alnum': (n) => r3(ALNUM, n),
+    'dashed id': (n) => 'ab-'.repeat(n / 3),
+    'percent runs': (n) => 'a%4'.repeat(n / 3),
+    'sk- repeated': (n) => 'sk-'.repeat(n / 3),
+    'xoxb- repeated': (n) => 'xoxb-'.repeat(n / 5),
+    'TOKEN line': (n) => 'TOKEN'.repeat(n / 5),
+    'TOKEN lines with x=': (n) => ('TOKEN'.repeat(20) + ' x=\n').repeat(n / 104),
+    'PEM headers': (n) => '-----BEGIN PRIVATE KEY-----\n'.repeat(n / 28),
+    'scheme runs': (n) => 'a://x:'.repeat(n / 6),
+    'eyJ runs': (n) => 'eyJ'.repeat(n / 3),
+    'base64 of text': (n) => b64('x'.repeat((n * 3) / 4)),
+    'nested base64': (n) => b64(b64(b64('x '.repeat(n / 5)))),
+    'hex': (n) => r3('0123456789abcdef', n),
+    'MIME lines': (n) => (r3(ALNUM, 76) + '\r\n').repeat(n / 78),
+    'Bearer runs': (n) => 'Bearer '.repeat(n / 7),
+    'many keys': (n) => (GHP8 + ' ').repeat(n / 41),
+  };
+  const time = (f: () => void) => {
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      f();
+      best = Math.min(best, performance.now() - t0);
+    }
+    return best;
+  };
+  for (const [what, make] of Object.entries(shapes)) {
+    it(what, () => {
+      const small = make(16_384);
+      const big = make(131_072);
+      const ts = time(() => redactMod.redactText(small, 'x'));
+      const tb = time(() => redactMod.redactText(big, 'x'));
+      // 8× the input: linear is ~8× the time, quadratic ~64×. Allow noise, and a floor for tiny timings.
+      expect(tb, `${ts.toFixed(2)} ms → ${tb.toFixed(2)} ms`).toBeLessThan(Math.max(ts, 2) * 24);
+      expect(tb).toBeLessThan(2_000);
+    });
+  }
+  it('an 8 KB cell takes well under the 130 ms the review measured', () => {
+    const cell = r3(ALNUM + '-_', 8192); // one 8 KB word: the old URL-run regex was quadratic in it
+    expect(time(() => redactMod.redactText(cell, 'x'))).toBeLessThan(25);
+  });
+});
+
+describe('#8.3 the randomness rule for sk- / xox- bodies, edge by edge', () => {
+  const secret = (s: string) => redactMod.looksLikeSecret(s);
+  it('a 16-char segment that switches class only 4 times is a name (sk-Build2024Release-v12)', () => {
+    expect(secret('sk-Build2024Release-v12')).toBe(false);
+  });
+  it('5 switches spread over a long segment (< 25%) is a name', () => {
+    expect(secret('sk-productionrelease2026candidatebuild7fixes9')).toBe(false);
+  });
+  it('random-looking segments shorter than 16 are not a key', () => {
+    expect(secret('sk-aB3dE5gH7jK9mN1-pQrS')).toBe(false);
+  });
+  it('a 16-char random segment is a key', () => {
+    expect(secret('sk-aB3dE5gH7jK9mN1p-qRs')).toBe(true);
+  });
+  it('32+ lowercase hex digits are a key even with few class switches (xoxp hex secret)', () => {
+    expect(secret('xo' + 'xp-1234567890-1234567890-' + '0123456789abcdef'.repeat(2))).toBe(true);
+    expect(secret('xo' + 'xp-1234567890-1234567890-' + '0123456789ABCDEF'.repeat(2))).toBe(false); // uppercase: not the hex form, and 2 switches
+  });
+});
+
+describe('#8.5 nesting depth and the scan budget fail closed', () => {
+  const nest = (s: string, n: number) => Array.from({ length: n }).reduce<string>((t) => b64(t), s);
+  const text = 'a perfectly ordinary sentence, nothing secret here';
+  it('four levels of base64 are looked through: a key is found, ordinary text is left alone', () => {
+    expect(redactMod.redactText(nest(`k=${GHP8}`, 4), 'x').redacted).toBe(true);
+    expect(redactMod.redactText(nest(text, 4), 'x').redacted).toBe(false);
+  });
+  it('text nested five levels deep is not looked into: it is redacted', () => {
+    expect(redactMod.redactText(nest(text, 5), 'x')).toMatchObject({ redacted: true });
+  });
+  it('input whose decoding exceeds the budget is replaced whole', () => {
+    expect(redactMod.redactWithBudget(nest(text, 3), 10)).toEqual({ text: '[REDACTED:undecidable]', redacted: true });
+    expect(redactMod.redactWithBudget(nest(text, 3), 10_000)).toEqual({ text: nest(text, 3), redacted: false });
+  });
+});
+
+describe('#8 context detectors keep kronicle-lite\'s exclusions (placeholders, accept rules, exact lengths)', () => {
+  const r4 = prng(11);
+  const cases: [string, string][] = [
+    ['AWS key id with 20 chars is not the 16-char form', 'AKIA' + r4('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567', 20)],
+    ['AWS documentation example key', 'AKIA' + 'IOSFODNN7EXAMPLE'],
+    ['PEM armour without a key body', '-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----'],
+    ['placeholder password value', 'password = "your_password_123"'],
+    ['Bearer value without a digit', 'Authorization: Bearer abcdefghijklmnopqrstuvwxyzabcd'],
+    ['env value read from the environment', 'export API_TOKEN=os.getenv(X1)'],
+  ];
+  for (const [what, t] of cases) {
+    it(`${what}: neither kronicle-lite nor sea-lite flags it`, async () => {
+      const { scanForSecrets } = await import('kronicle-lite');
+      expect(scanForSecrets(t)).toEqual([]);
+      expect(redactMod.redactText(t, 'x')).toEqual({ text: t, redacted: false });
+    });
+  }
+  it('a PEM key body without its footer is still redacted', () => {
+    const t = `-----BEGIN PRIVATE KEY-----\n${r4(ALNUM, 64)}\n${r4(ALNUM, 64)}\n\nafter`;
+    const r = redactMod.redactText(t, 'x');
+    expect(r.text).toBe('[REDACTED:private_key]\n\nafter');
   });
 });
