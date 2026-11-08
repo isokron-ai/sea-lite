@@ -114,7 +114,8 @@ describe('#8.2 healing race: EEXIST while healing is a retry, not tampering', ()
       const s = new SeaLite({ dataDir: dir, actor: name });
       const bad = [];
       process.on('warning', (w) => { if (/disabled|one-shot|contested/.test(w.message)) bad.push(w.message); });
-      while (Date.now() < Number(at)) {}
+      const until = (t) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, t - Date.now() - 2)); while (Date.now() < t) {} };
+      until(Number(at));
       let r = 'ok';
       try { s.leaseAcquire({ name }); } catch (e) { r = e.code + ':' + (e.details?.reason ?? ''); } finally { s.close(); }
       await new Promise((res) => setTimeout(res, 20));
@@ -143,14 +144,16 @@ describe('#8.2 healing race: EEXIST while healing is a retry, not tampering', ()
       const sfs = { lstat: slow(fs.lstatSync), open: slow(fs.openSync), fstat: fs.fstatSync, unlink: slow(fs.unlinkSync), rename: slow(fs.renameSync),
         ftruncate: fs.ftruncateSync, write: (fd, s) => void fs.writeSync(fd, s), close: fs.closeSync };
       const probe = dir + '/sea-clock.probe';
+      // sleep, then spin only the last 2 ms: twelve spinning children starved the rest of the suite on CI
+      const until = (t) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, t - Date.now() - 2)); while (Date.now() < t) {} };
       const bad = [];
       for (let r = 0; r < Number(rounds); r++) {
         const start = Number(t0) + r * 100;
-        while (Date.now() < start) {}
+        until(start);
         for (let i = 0; k === '0' && i < 50; i++) {
           try { fs.rmSync(probe, { recursive: true, force: true }); if (r % 2) fs.symlinkSync('/nonexistent/x', probe); else fs.mkdirSync(probe); break; } catch {}
         }
-        while (Date.now() < start + 10) {}
+        until(start + 10);
         const w = [];
         const ref = fsReference(dir, (m) => w.push(m), sfs)();
         if (typeof ref !== 'number') bad.push(JSON.stringify(ref));
