@@ -86,7 +86,7 @@ uses semantic versioning once past 0.x.
   moved is measured around with a one-shot probe under an unpredictable name.
 - **Healing race.** Processes healing the same plant at once got `EEXIST`
   (or `ENOENT`, `EISDIR`) and reported tampering, refusing leases for 60 s.
-  These are now retried; only a path still contested after five attempts,
+  These are now retried; only a path still contested after ten attempts,
   and for the one-shot probe as well, is `probe_tampered`. Tested with 12
   processes healing 25 plants with the race window widened.
 
