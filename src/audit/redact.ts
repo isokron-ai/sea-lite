@@ -115,6 +115,16 @@ export function switches(body: string): number {
 /** #8 re-review: what a glued key or a long subtype body must also show — not a slug, not all letters, not all digits. */
 const keyish = (b: string) => switches(b) >= 3 && /[0-9]/.test(b) && /[A-Za-z]/.test(b);
 
+/**
+ * #8 third review: the shape of a real key is one contiguous run of 20+
+ * letters and digits. At a token boundary such a body is a key with no
+ * entropy or case gate (main caught every one of them: lowercase+digit,
+ * uppercase+digit, letters only). The randomness check is only for bodies
+ * split into `-` / `_` segments (`sk-prod-cluster-east-0001`), where the
+ * original false positives came from.
+ */
+const ONE_RUN = /^[A-Za-z0-9]{20,}$/;
+
 /** Share of vowels among the letters (words run ~35-45%, random letters ~19%); 1 when there are fewer than 8 letters. */
 export function vowelShare(body: string): number {
   let letters = 0;
@@ -138,7 +148,7 @@ export function vowelShare(body: string): number {
  * the property test pins it.
  */
 const subtype = (b: string, glued: boolean) =>
-  glued ? b.length >= 80 && keyish(b) : b.length >= 20 && (switches(b) >= 3 || (switches(b) === 2 && vowelShare(b) < 0.3));
+  glued ? b.length >= 80 && keyish(b) : ONE_RUN.test(b) || (b.length >= 20 && (switches(b) >= 3 || (switches(b) === 2 && vowelShare(b) < 0.3)));
 
 function vendorOf(prefix: string): Vendor {
   if (prefix === 'github_pat_') return { id: 'github_pat', cls: ALNUM_US, accept: (b, glued) => (glued ? b.length >= 80 && keyish(b) : b.length >= 30) };
@@ -157,9 +167,15 @@ function vendorOf(prefix: string): Vendor {
   return { id: 'aws_access_key', cls: UPPER_DIGIT, exact: 16, accept: (b, glued) => !glued && b.length === 16 && !b.includes('EXAMPLE') };
 }
 
-/** A bare `sk-`: the OpenAI marker, a legacy 48-alphanumeric body, or (unglued) a random-looking one. */
+
+/** A bare `sk-`: the OpenAI marker, one 20+ alphanumeric run (unglued), a legacy 48 (glued: keyish), or (unglued) a random-looking segmented body. */
 function BARE_SK(b: string, glued: boolean): boolean {
-  return b.includes(OPENAI_MARKER) || (/^[A-Za-z0-9]{48}$/.test(b) && (!glued || keyish(b))) || (!glued && b.length >= 20 && randomLooking(b));
+  return (
+    b.includes(OPENAI_MARKER) ||
+    (!glued && ONE_RUN.test(b)) ||
+    (glued && /^[A-Za-z0-9]{48}$/.test(b) && keyish(b)) ||
+    (!glued && b.length >= 20 && randomLooking(b))
+  );
 }
 
 /**

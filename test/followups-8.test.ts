@@ -249,7 +249,7 @@ describe('#8.3 redaction false positives: ordinary ids pass, real-looking keys a
     'F-sk-learn-regression-0001',
     'refs/heads/sk-proj-redaction-false-positives',
     'task-create-sandbox-attempt-0001',
-    'sk-proj-supercalifragilisticexpialidocious',
+    'sk-proj-super-cali-fragilistic-expiali-docious',
     'xoxp-staging-deploy-notifications-0042',
     'risk-assessment-2026-q4-final',
   ];
@@ -432,7 +432,7 @@ describe('#8.3 the randomness rule for bare sk- bodies, edge by edge', () => {
     expect(secret('sk-Build2024Release-v12')).toBe(false);
   });
   it('5 switches spread over a long segment (< 25%) is a name', () => {
-    expect(secret('sk-productionrelease2026candidatebuild7fixes9')).toBe(false);
+    expect(secret('sk-productionrelease2026candidatebuild7fixes9-x')).toBe(false); // segmented: the randomness path (one run would be a key)
   });
   it('random-looking segments shorter than 16 are not a key', () => {
     expect(secret('sk-aB3dE5gH7jK9mN1-pQrS')).toBe(false);
@@ -441,8 +441,8 @@ describe('#8.3 the randomness rule for bare sk- bodies, edge by edge', () => {
     expect(secret('sk-aB3dE5gH7jK9mN1p-qRs')).toBe(true);
   });
   it('a bare sk- with 32+ lowercase hex digits is a key even with few class switches', () => {
-    expect(secret('sk-' + '0123456789abcdef'.repeat(2))).toBe(true);
-    expect(secret('sk-' + '0123456789ABCDEF'.repeat(2))).toBe(false); // uppercase: not the hex form, and 3 switches
+    expect(secret('sk-' + '0123456789abcdef'.repeat(2) + '-x')).toBe(true);
+    expect(secret('sk-' + '0123456789ABCDEF'.repeat(2) + '-x')).toBe(false); // segmented, uppercase: not the hex form, and 3 switches
   });
 });
 

@@ -677,8 +677,9 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   are matched by their documented shape (`xoxb-<digits>-<digits>-<secret>`,
   `sk-proj-` with 80+ characters, …) at a token boundary, so ids like
   `sandbox:sk-prod-cluster-east-0001`, `xoxb-prod-runner-pool-1` or
-  `task-<ULID>` pass; a bare `sk-…` of no known shape counts only with a
-  random-looking body.
+  `task-<ULID>` pass; an `sk-…` body that is one run of 20+ letters and
+  digits is always a key, one split into `-` / `_` segments only when it
+  looks random.
   The scan is linear in the text and runs before the write transaction.
 - **Findings and gates**: tickets live in project `audit:<id>`, so they stay
   out of every code project's `sea_next` / `sea_list`. A finding gets gate
