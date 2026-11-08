@@ -5,7 +5,7 @@
  * post-open fstat check) are killed.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync as nodeSpawnSync } from 'node:child_process';
 import * as nodeFs from 'node:fs';
 import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -553,5 +553,90 @@ describe('#8 context detectors keep kronicle-lite\'s exclusions (placeholders, a
     const t = `-----BEGIN PRIVATE KEY-----\n${r4(ALNUM, 64)}\n${r4(ALNUM, 64)}\n\nafter`;
     const r = redactMod.redactText(t, 'x');
     expect(r.text).toBe('[REDACTED:private_key]\n\nafter');
+  });
+});
+
+// ── #8.6 export --out, and the O_EXCL mutant ──
+
+describe('#8.6 audit export --out pointing at an existing directory', () => {
+  it('is a clean error, and no temp file holding the tracker is left behind', () => {
+    const dir = tmp();
+    const data = join(dir, 'data');
+    const s = new SeaLite({ dataDir: data, actor: 'mcp-audit' });
+    s.auditOpen({ audit_id: 'a', title: 'A' });
+    s.auditFinding('a', { finding_id: 'F1', title: 'tracker-canary-title' });
+    s.close();
+    const out = join(dir, 'out');
+    mkdirSync(out);
+    const r = nodeSpawnSync(process.execPath, [join(process.cwd(), 'dist', 'cli.js'), 'audit', 'export', 'a', '--out', out, '--data-dir', data], {
+      encoding: 'utf8',
+      env: { PATH: process.env['PATH'] ?? '', HOME: dir },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/is a directory/);
+    expect(r.stderr).not.toMatch(/\n\s+at /); // no stack trace
+    expect(readdirSync(dir).sort()).toEqual(['data', 'out']);
+    expect(readdirSync(out)).toEqual([]);
+  });
+
+  it('a failure after the temp file is written (rename refused) removes the temp file', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const dir = tmp();
+    const target = join(dir, 'race');
+    // the target turns into a non-empty directory between the check and the rename
+    const names = [join(dir, '.t1.tmp')];
+    let err: unknown;
+    try {
+      writePrivateFile(target, 'tracker', {
+        tmpName: () => {
+          mkdirSync(target);
+          writeFileSync(join(target, 'x'), 'x');
+          return names.shift()!;
+        },
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toMatchObject({ code: 'invalid_input' });
+    expect(readdirSync(dir)).toEqual(['race']);
+  });
+
+  it('a directory at the path is refused before any temp file is created', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const dir = tmp();
+    let made = 0;
+    expect(() => writePrivateFile(dir, 'tracker', { tmpName: () => (made++, join(dir, '.x.tmp')) })).toThrow(/is a directory; give a file path/);
+    expect(made).toBe(0);
+  });
+});
+
+describe('#8 surviving mutant: O_EXCL on the export temp file', () => {
+  it.skipIf(!POSIX)('a file planted at the temp name is never written through; a fresh name is used', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { openSync, readSync, closeSync } = nodeFs;
+    const dir = tmp();
+    const planted = join(dir, '.planted.tmp');
+    writeFileSync(planted, '', { mode: 0o666 });
+    const spy = openSync(planted, 'r'); // the planter keeps a read handle
+    const names = [planted, join(dir, '.fresh.tmp')];
+    writePrivateFile(join(dir, 'tracker.csv'), 'id,title\nF1,secret finding\n', { tmpName: () => names.shift()! });
+    const buf = Buffer.alloc(64);
+    expect(readSync(spy, buf, 0, 64, 0)).toBe(0); // nothing reached the planter
+    closeSync(spy);
+    expect(readFileSync(planted, 'utf8')).toBe('');
+    expect(readFileSync(join(dir, 'tracker.csv'), 'utf8')).toMatch(/secret finding/);
+    expect(lstatSync(join(dir, 'tracker.csv')).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir).sort()).toEqual(['.planted.tmp', 'tracker.csv']);
+  });
+  it.skipIf(!POSIX)('a symlink planted at the temp name is not followed', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const dir = tmp();
+    const victim = join(dir, 'victim');
+    writeFileSync(victim, 'precious\n');
+    const planted = join(dir, '.link.tmp');
+    symlinkSync(victim, planted);
+    const names = [planted, join(dir, '.fresh.tmp')];
+    writePrivateFile(join(dir, 'tracker.csv'), 'id\n', { tmpName: () => names.shift()! });
+    expect(readFileSync(victim, 'utf8')).toBe('precious\n');
   });
 });
