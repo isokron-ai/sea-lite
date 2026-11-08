@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { parseCsv } from '../src/audit/export.js';
 import * as redactMod from '../src/audit/redact.js';
 import { fsReference, type ProbeFs } from '../src/core/clock.js';
 import { runDoctor } from '../src/doctor.js';
@@ -641,5 +642,44 @@ describe('#8 surviving mutant: O_EXCL on the export temp file', () => {
     const names = [planted, join(dir, '.fresh.tmp')];
     writePrivateFile(join(dir, 'tracker.csv'), 'id\n', { tmpName: () => names.shift()! });
     expect(readFileSync(victim, 'utf8')).toBe('precious\n');
+  });
+});
+
+// ── #8.7 the approved plan is part of the decision ──
+
+describe('#8.7 import (or any finding write) cannot change submit_plan after a decision without reopening it', () => {
+  const ALL = { repro: { result: 'pass' }, intent: { result: 'pass' }, docs: { result: 'pass' }, prior_reports: { result: 'pass' }, refuter: { result: 'pass' } };
+  const decided = (decision: 'approved' | 'rejected' | 'hold' = 'approved') => {
+    const s = new SeaLite({ memory: true, actor: 'mcp-audit' });
+    s.auditOpen({ audit_id: 'a', title: 'A' });
+    s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'bug', severity: 'high' }, gates: ALL });
+    s.auditReview('a', { finding_id: 'F', decision, submit_plan: 'file a private report', note: 'ok by me' });
+    return s;
+  };
+  const row = (s: SeaLite) => parseCsv(s.auditExport('a', 'csv') as string).rows[0]!;
+  it('a findings.csv that changes submit_plan sends the approval back to pending', () => {
+    const s = decided();
+    const r = s.auditImport('a', 'id,title,submit_plan\nF,f,open a public PR now\n');
+    expect(r).toMatchObject({ updated: 1, queued: 1 });
+    expect(row(s)).toMatchObject({ review: 'pending', submit_plan: 'open a public PR now' });
+    s.close();
+  });
+  it('so does a direct finding write changing submit_plan or the review note, for every decision', () => {
+    for (const d of ['approved', 'rejected', 'hold'] as const) {
+      for (const fields of [{ submit_plan: 'something else' }, { review_note: 'agent rewrote the note' }]) {
+        const s = decided(d);
+        expect(s.auditFinding('a', { finding_id: 'F', title: 'f', fields }).review, `${d} ${Object.keys(fields)[0]}`).toBe('pending');
+        s.close();
+      }
+    }
+  });
+  it('re-importing an unchanged export leaves the decision alone; the reviewer can still change the plan', () => {
+    const s = decided();
+    const csv = s.auditExport('a', 'csv') as string;
+    expect(s.auditImport('a', csv)).toMatchObject({ queued: 0 }); // (gate results come back as claims: not substance)
+    expect(row(s).review).toBe('approved');
+    s.auditReview('a', { finding_id: 'F', decision: 'approved', submit_plan: 'file it upstream' });
+    expect(row(s)).toMatchObject({ review: 'approved', submit_plan: 'file it upstream' });
+    s.close();
   });
 });
