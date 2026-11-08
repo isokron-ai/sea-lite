@@ -426,7 +426,7 @@ describe('#8.4 redaction is linear in the size of a cell', () => {
   });
 });
 
-describe('#8.3 the randomness rule for sk- / xox- bodies, edge by edge', () => {
+describe('#8.3 the randomness rule for bare sk- bodies, edge by edge', () => {
   const secret = (s: string) => redactMod.looksLikeSecret(s);
   it('a 16-char segment that switches class only 4 times is a name (sk-Build2024Release-v12)', () => {
     expect(secret('sk-Build2024Release-v12')).toBe(false);
@@ -440,9 +440,9 @@ describe('#8.3 the randomness rule for sk- / xox- bodies, edge by edge', () => {
   it('a 16-char random segment is a key', () => {
     expect(secret('sk-aB3dE5gH7jK9mN1p-qRs')).toBe(true);
   });
-  it('32+ lowercase hex digits are a key even with few class switches (xoxp hex secret)', () => {
-    expect(secret('xo' + 'xp-1234567890-1234567890-' + '0123456789abcdef'.repeat(2))).toBe(true);
-    expect(secret('xo' + 'xp-1234567890-1234567890-' + '0123456789ABCDEF'.repeat(2))).toBe(false); // uppercase: not the hex form, and 2 switches
+  it('a bare sk- with 32+ lowercase hex digits is a key even with few class switches', () => {
+    expect(secret('sk-' + '0123456789abcdef'.repeat(2))).toBe(true);
+    expect(secret('sk-' + '0123456789ABCDEF'.repeat(2))).toBe(false); // uppercase: not the hex form, and 3 switches
   });
 });
 

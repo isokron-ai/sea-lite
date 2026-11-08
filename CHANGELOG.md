@@ -114,6 +114,18 @@ uses semantic versioning once past 0.x.
   prepares every row first). kronicle-lite's write-time detectors are
   mirrored with bounded quantifiers; a parity test checks that everything
   they flag is still redacted. Timing tests on 17 adversarial 128 KB shapes.
+- **Shape, not entropy, for known formats; prefixes at token boundaries**
+  (review of the #8 stack). The randomness gate let about 1 in 6 000
+  generated Anthropic keys and 1 in 8 000 `xoxb` tokens through. `sk-ant-`,
+  `sk-proj-` / `sk-svcacct-` / `sk-admin-`, legacy 48-character `sk-`,
+  `gh?_`, `github_pat_`, `xox?-` (numeric segments, then the secret) and
+  `AKIA` / `ASIA` are now matched by documented shape and length only; the
+  randomness check is left for a bare `sk-` with none of those shapes. A
+  prefix counts only at a token boundary, so `task-<ULID>`, `disk-…`,
+  `helpdesk-…`, `laughs_…`, `snpm_…` are ordinary ids again; a prefix glued
+  to a letter or digit still counts at the format's full length (GitHub 36,
+  fine-grained / project / Anthropic 80+, legacy `sk-` 48). Property test:
+  100 000 generated keys of each of 13 formats, all redacted.
 - **Redaction misses closed**: a letter or digit glued in front of a key,
   base64 of `x`+key, base64 in URL paths, MIME-wrapped base64, hex, and
   nested encodings (up to four levels; printable text nested deeper is

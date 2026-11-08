@@ -64,31 +64,44 @@ function inClass(c: number, cls: number): boolean {
 interface Vendor {
   id: string;
   cls: number;
-  /** Minimum body length. */
-  min: number;
+  /** The documented shape of the body that follows the prefix; `glued`: the prefix is not at a token boundary. */
+  accept: (body: string, glued: boolean) => boolean;
   /** Exact body length (the body is cut there; the next char must not continue it). */
   exact?: number;
-  /** Body must look random (#8: the `sk-` / `xox?-` families collide with ordinary ids). */
-  random?: boolean;
-  reject?: (body: string) => boolean;
 }
 
-const PREFIX = /gh[pousr]_|github_pat_|glpat-|phx_|xox[abeoprs]-|sk-ant-|sk-|[sr]k_(?:live|test)_|AIza|npm_|hvs\.|dp\.(?:pt|st|ct|sa|scim|audit)\.|AKIA|ASIA/g;
+/**
+ * #8 stack review: well-known formats are matched by their documented shape
+ * and length only (an entropy gate let ~1 in 6 000 real Anthropic keys
+ * through), and a prefix counts only at a token boundary (start, or after a
+ * non-alphanumeric character), so `task-…`, `disk-…`, `laughs_…`, `snpm_…`
+ * are ordinary ids. A prefix glued to a letter or digit (`tokenghp_…`) still
+ * counts when the body has the full length of its format: exactly 36 for
+ * GitHub's `gh?_`, 80+ for fine-grained / project / Anthropic keys, exactly
+ * 48 alphanumerics for a legacy `sk-` key. Only a bare `sk-` with none of
+ * those shapes goes through the randomness check.
+ */
+const PREFIX = /gh[pousr]_|github_pat_|glpat-|phx_|xox[a-z]-|sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|[sr]k_(?:live|test)_|AIza|npm_|hvs\.|dp\.(?:pt|st|ct|sa|scim|audit)\.|AKIA|ASIA/g;
+
+const atLeast = (n: number) => (b: string, glued: boolean) => !glued && b.length >= n;
+/** Slack: numeric segments, then the secret (`xoxb-<team>-<bot>-<24>`, `xoxp-…-…-…-<32 hex>`, `xoxa-2-…`). */
+const SLACK_SHAPE = /^(?:\d+-){1,4}[A-Za-z0-9]{16,}/;
 
 function vendorOf(prefix: string): Vendor {
-  if (prefix.startsWith('github_pat_')) return { id: 'github_pat', cls: ALNUM_US, min: 30 };
-  if (prefix.startsWith('gh')) return { id: 'github_token', cls: ALNUM, min: 30 };
-  if (prefix === 'glpat-') return { id: 'gitlab_token', cls: ALNUM_US_DASH, min: 20 };
-  if (prefix === 'phx_') return { id: 'posthog_personal_key', cls: ALNUM, min: 20 };
-  if (prefix.startsWith('xox')) return { id: 'slack_token', cls: ALNUM_DASH, min: 10, random: true };
-  if (prefix === 'sk-ant-') return { id: 'anthropic_key', cls: ALNUM_US_DASH, min: 24, random: true };
-  if (prefix === 'sk-') return { id: 'llm_api_key', cls: ALNUM_US_DASH, min: 20, random: true };
-  if (prefix.endsWith('_live_') || prefix.endsWith('_test_')) return { id: 'stripe_key', cls: ALNUM, min: 16 };
-  if (prefix === 'AIza') return { id: 'google_api_key', cls: ALNUM_US_DASH, min: 35, exact: 35 };
-  if (prefix === 'npm_') return { id: 'npm_token', cls: ALNUM, min: 36 };
-  if (prefix === 'hvs.') return { id: 'vault_token', cls: ALNUM_US_DASH, min: 24 };
-  if (prefix.startsWith('dp.')) return { id: 'doppler_token', cls: ALNUM, min: 32 };
-  return { id: 'aws_access_key', cls: UPPER_DIGIT, min: 16, exact: 16, reject: (b) => b.includes('EXAMPLE') };
+  if (prefix === 'github_pat_') return { id: 'github_pat', cls: ALNUM_US, accept: (b, glued) => b.length >= (glued ? 80 : 30) };
+  if (prefix.startsWith('gh')) return { id: 'github_token', cls: ALNUM, accept: (b, glued) => (glued ? b.length === 36 : b.length >= 30) };
+  if (prefix === 'glpat-') return { id: 'gitlab_token', cls: ALNUM_US_DASH, accept: atLeast(20) };
+  if (prefix === 'phx_') return { id: 'posthog_personal_key', cls: ALNUM, accept: atLeast(20) };
+  if (prefix.startsWith('xox')) return { id: 'slack_token', cls: ALNUM_DASH, accept: (b, glued) => !glued && SLACK_SHAPE.test(b) };
+  if (prefix === 'sk-ant-') return { id: 'anthropic_key', cls: ALNUM_US_DASH, accept: (b, glued) => b.length >= (glued ? 80 : 24) };
+  if (prefix !== 'sk-' && prefix.startsWith('sk-')) return { id: 'llm_api_key', cls: ALNUM_US_DASH, accept: (b) => b.length >= 80 };
+  if (prefix === 'sk-') return { id: 'llm_api_key', cls: ALNUM_US_DASH, accept: (b, glued) => /^[A-Za-z0-9]{48}$/.test(b) || (!glued && b.length >= 20 && randomLooking(b)) };
+  if (prefix.endsWith('_live_') || prefix.endsWith('_test_')) return { id: 'stripe_key', cls: ALNUM, accept: atLeast(16) };
+  if (prefix === 'AIza') return { id: 'google_api_key', cls: ALNUM_US_DASH, exact: 35, accept: atLeast(35) };
+  if (prefix === 'npm_') return { id: 'npm_token', cls: ALNUM, accept: atLeast(36) };
+  if (prefix === 'hvs.') return { id: 'vault_token', cls: ALNUM_US_DASH, accept: atLeast(24) };
+  if (prefix.startsWith('dp.')) return { id: 'doppler_token', cls: ALNUM, accept: atLeast(32) };
+  return { id: 'aws_access_key', cls: UPPER_DIGIT, exact: 16, accept: (b, glued) => !glued && b.length === 16 && !b.includes('EXAMPLE') };
 }
 
 /**
@@ -130,12 +143,14 @@ function vendorSpans(text: string, out: Span[]): void {
   while ((m = re.exec(text)) !== null) {
     const v = vendorOf(m[0]);
     const from = m.index + m[0].length;
+    const before = m.index > 0 ? text.charCodeAt(m.index - 1) : 0;
+    const glued = inClass(before, ALNUM);
     let j = from;
     const cap = v.exact ?? BODY_WINDOW;
     while (j < text.length && j - from < cap && inClass(text.charCodeAt(j), v.cls)) j++;
-    const body = text.slice(from, j);
-    let ok = body.length >= v.min && (!v.random || randomLooking(body)) && !(v.reject?.(body) ?? false);
-    if (ok && v.exact !== undefined && j < text.length && inClass(text.charCodeAt(j), v.cls)) ok = false;
+    let ok = !(j < text.length && j - from === cap && v.exact !== undefined && inClass(text.charCodeAt(j), v.cls));
+    // why: a body longer than the window is judged by its first BODY_WINDOW chars; its length is at least that.
+    if (ok) ok = v.accept(text.slice(from, j), glued);
     if (!ok) continue; // why: resume right after the prefix; at most BODY_WINDOW chars were read for it
     if (v.exact === undefined) while (j < text.length && inClass(text.charCodeAt(j), v.cls)) j++;
     out.push({ start: m.index, end: j, id: v.id });
