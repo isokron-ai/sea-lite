@@ -89,6 +89,15 @@ uses semantic versioning once past 0.x.
   These are now retried; only a path still contested after ten attempts,
   and for the one-shot probe as well, is `probe_tampered`. Tested with 12
   processes healing 25 plants with the race window widened.
+- **Unmeasurable clock fails closed** (review of the #8 stack). A probe
+  made read-only (`chmod 0444`, same uid) gave `EACCES`, which counted as
+  "cannot measure" and let every lease decision through, so a 15-minute skew
+  went unnoticed. A read-only probe is now replaced like any other plant,
+  and a clock that cannot be measured at all refuses lease decisions
+  (`clock_skew`, `reason: probe_unavailable`; doctor `clock` fails) unless
+  `SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`. Moved-aside plants are capped: the
+  newest 8 are kept, older ones removed and counted
+  (`sea-clock.probe.removed-count`, shown by doctor).
 
 ### Compatibility
 

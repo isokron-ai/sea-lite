@@ -17,7 +17,7 @@
 
 import { randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs';
-import { constants, type Stats } from 'node:fs';
+import { constants, readdirSync, renameSync, rmSync, writeFileSync, type Stats } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { SeaError } from './errors.js';
@@ -28,6 +28,64 @@ const PROBE_EVERY_MS = 60_000;
 export const PROBE_FILE = 'sea-clock.probe';
 /** A plant that cannot be unlinked (a directory) is renamed to `<probe>.tampered-<ms>-<hex>` and kept as evidence. */
 export const PROBE_ASIDE_PREFIX = `${PROBE_FILE}.tampered-`;
+/** Moved-aside plants kept as evidence; older ones are removed and counted in PROBE_REMOVED_FILE (#8 review: 121 in 3 s). */
+export const PROBE_ASIDE_KEEP = 8;
+export const PROBE_REMOVED_FILE = `${PROBE_FILE}.removed-count`;
+const ASIDE_NAME = /^\d{1,16}-[0-9a-f]{8}$/;
+
+/** Our own moved-aside names in `dir`, oldest first. */
+export function probeAsides(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+      .filter((n) => n.startsWith(PROBE_ASIDE_PREFIX) && ASIDE_NAME.test(n.slice(PROBE_ASIDE_PREFIX.length)))
+      .sort((a, b) => Number(a.slice(PROBE_ASIDE_PREFIX.length).split('-')[0]) - Number(b.slice(PROBE_ASIDE_PREFIX.length).split('-')[0]) || (a < b ? -1 : 1));
+  } catch {
+    return [];
+  }
+}
+
+/** How many moved-aside plants were removed so far (an agent-writable counter: informational only). */
+export function probeRemovedCount(dir: string): number {
+  let fd: number | null = null;
+  try {
+    fd = nodeFs.openSync(join(dir, PROBE_REMOVED_FILE), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    if (!nodeFs.fstatSync(fd).isFile()) return 0;
+    const buf = Buffer.alloc(16);
+    const n = Number(buf.subarray(0, nodeFs.readSync(fd, buf, 0, 16, 0)).toString('latin1').trim());
+    return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+  } catch {
+    return 0;
+  } finally {
+    if (fd !== null) nodeFs.closeSync(fd);
+  }
+}
+
+/** Keep the newest PROBE_ASIDE_KEEP asides; remove older ones (never following links) and add them to the counter. */
+function pruneAsides(dir: string): void {
+  const all = probeAsides(dir);
+  const old = all.slice(0, Math.max(0, all.length - PROBE_ASIDE_KEEP));
+  if (old.length === 0) return;
+  let removed = 0;
+  for (const a of old) {
+    try {
+      rmSync(join(dir, a), { recursive: true, force: true });
+      removed++;
+    } catch {
+      /* keep it; counted next time */
+    }
+  }
+  const tmp = join(dir, `${PROBE_REMOVED_FILE}.${process.pid}.${randomBytes(4).toString('hex')}`);
+  try {
+    writeFileSync(tmp, String(probeRemovedCount(dir) + removed), { flag: 'wx', mode: 0o600 });
+    renameSync(tmp, join(dir, PROBE_REMOVED_FILE));
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* nothing */
+    }
+  }
+}
 /** Heal-and-reopen rounds before falling back to a one-shot probe (concurrent healers, a racing planter). */
 const ATTEMPTS = 10;
 /** Open errors that mean "something other than our file is at the path right now": retried, and tampering if it persists. */
@@ -100,10 +158,12 @@ const RETRY = '\0retry';
  * unlink / rename and EEXIST / ELOOP / ENXIO / EISDIR from open (another
  * healer, or a planter, got there between our lstat and our call) are
  * retried. Only a path still contested after every attempt, and for the
- * one-shot probe too, is tampering (fail closed). A data dir that cannot be
- * written at all (read-only mount) is not an attack: the reading is null, the
- * guard allows lease decisions, and `warn` says so once (default: a process
- * warning on stderr); `sea-lite doctor` reports it too.
+ * one-shot probe too, is tampering (fail closed). A probe made unwritable
+ * (EACCES / EPERM) is replaced like any other plant. When no probe can be
+ * written at all the reading is null: the guard then refuses lease decisions
+ * (#8 review: it used to trust this process's clock, so `chmod 0444` on the
+ * probe switched it off), and `warn` says so once; SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0
+ * is the operator's way to accept an unmeasured clock.
  */
 export function fsReference(dir: string, warn: (message: string) => void = defaultWarn, fs: ProbeFs = NODE_FS): () => Reference {
   const file = join(dir, PROBE_FILE);
@@ -111,7 +171,7 @@ export function fsReference(dir: string, warn: (message: string) => void = defau
   const unavailable = (why: string): null => {
     if (!warned) {
       warned = true;
-      warn(`sea-lite: clock check disabled for ${dir}: ${why}; leases then trust this process's clock`);
+      warn(`sea-lite: cannot measure the clock in ${dir}: ${why}; lease decisions are refused (SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0 accepts an unmeasured clock)`);
     }
     return null;
   };
@@ -152,6 +212,7 @@ export function fsReference(dir: string, warn: (message: string) => void = defau
         return null;
       }
       warn(`sea-lite: clock probe ${file} was a directory; moved aside to ${basename(aside)}`);
+      pruneAsides(dir);
       return null;
     }
     try {
@@ -166,8 +227,9 @@ export function fsReference(dir: string, warn: (message: string) => void = defau
   };
   const attempt = (): Attempt => {
     let fd: number | null = null;
+    let pre: Stats | null = null;
     try {
-      const pre = lstatOrNull(file);
+      pre = lstatOrNull(file);
       if (pre && (!pre.isFile() || pre.nlink > 1)) {
         const stuck = clear(pre);
         if (stuck === RETRY) return { retry: `${file} changed while it was being removed` };
@@ -180,6 +242,16 @@ export function fsReference(dir: string, warn: (message: string) => void = defau
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (code !== undefined && CONTESTED.has(code)) return { retry: `${file}: ${code} while opening the probe` };
+      if ((code === 'EACCES' || code === 'EPERM') && pre !== null) {
+        // #8 review: a probe made read-only (chmod 0444, same uid) is a plant too: replace it.
+        try {
+          fs.unlink(file);
+        } catch (u) {
+          if ((u as NodeJS.ErrnoException).code !== 'ENOENT') return { done: oneShot(`${file} is not writable (${code}) and cannot be removed; measured with a one-shot probe`) };
+        }
+        warn(`sea-lite: clock probe ${file} was not writable (${code}); replaced`);
+        return { retry: `${file}: ${code}` };
+      }
       return { done: unavailable(`${file}: ${code ?? String(e)}`) };
     } finally {
       if (fd !== null) fs.close(fd);
@@ -229,6 +301,8 @@ export interface Untrusted {
   max_ms: number;
   /** Set when the probe path was tampered with and could not be repaired. */
   tampered?: string;
+  /** Set when the clock could not be measured at all (fail closed). */
+  unavailable?: true;
 }
 
 export function clockGuard(clock: () => Date, reference: () => Reference, maxSkewSeconds: number): ClockGuard {
@@ -245,7 +319,7 @@ export function clockGuard(clock: () => Date, reference: () => Reference, maxSke
         at = clock().getTime();
         measuredAt = t;
       }
-      if (last === null) return null;
+      if (last === null) return { skew_ms: NaN, max_ms, unavailable: true };
       if (typeof last === 'object') return { skew_ms: NaN, max_ms, tampered: last.tampered };
       const skew = at - last;
       return Math.abs(skew) > max_ms ? { skew_ms: Math.round(skew), max_ms } : null;
@@ -257,6 +331,13 @@ export function clockGuard(clock: () => Date, reference: () => Reference, maxSke
 export function assertClockTrusted(guard: ClockGuard | undefined, what: string): void {
   const u = guard?.untrusted() ?? null;
   if (u === null) return;
+  if (u.unavailable) {
+    throw new SeaError(
+      'clock_skew',
+      `refusing to ${what}: this process's clock could not be checked against the data dir's (the clock probe cannot be written; see the SEA_LITE_CLOCK_PROBE warning). Fix the data dir, or set SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0 to accept an unmeasured clock`,
+      { reason: 'probe_unavailable' },
+    );
+  }
   if (u.tampered !== undefined) {
     throw new SeaError('clock_skew', `refusing to ${what}: the clock probe was tampered with and could not be repaired (${u.tampered}); remove it`, {
       reason: 'probe_tampered',
