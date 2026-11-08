@@ -32,6 +32,7 @@ export const PROBE_ASIDE_PREFIX = `${PROBE_FILE}.tampered-`;
 export const PROBE_ASIDE_KEEP = 8;
 export const PROBE_REMOVED_FILE = `${PROBE_FILE}.removed-count`;
 const ASIDE_NAME = /^\d{1,16}-[0-9a-f]{8}$/;
+let asideSeq = 0;
 
 /** Our own moved-aside names in `dir`, oldest first. */
 export function probeAsides(dir: string): string[] {
@@ -195,7 +196,8 @@ export function fsReference(dir: string, warn: (message: string) => void = defau
   const clear = (pre: Stats): string | null => {
     const code = (e: unknown): string => (e as NodeJS.ErrnoException).code ?? String(e);
     if (pre.isDirectory()) {
-      const aside = join(dir, `${PROBE_ASIDE_PREFIX}${Date.now()}-${randomBytes(4).toString('hex')}`);
+      // why: ms × 1000 + a per-process sequence, so asides made in the same millisecond still sort oldest-first.
+      const aside = join(dir, `${PROBE_ASIDE_PREFIX}${Date.now() * 1000 + (asideSeq++ % 1000)}-${randomBytes(4).toString('hex')}`);
       try {
         fs.rename(file, aside);
       } catch (e) {
