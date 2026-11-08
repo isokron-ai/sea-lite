@@ -130,6 +130,19 @@ uses semantic versioning once past 0.x.
   to a letter or digit still counts at the format's full length (GitHub 36,
   fine-grained / project / Anthropic 80+, legacy `sk-` 48). Property test:
   100 000 generated keys of each of 13 formats, all redacted.
+- **Re-review of the shape rules.** `sk-proj-` / `sk-svcacct-` /
+  `sk-admin-` / `sk-ant-` bodies under 80 characters were no longer
+  redacted (the 80+ rule fired first). A subtype body now counts at 20+
+  characters when it looks random (3+ lower / upper / digit switches, or 2
+  and few vowels), which accepts everything the bare `sk-` rule would; a
+  bare `sk-` with the OpenAI marker (`T3BlbkFJ`) counts at any length.
+  Glued and 80+ rules now also need a key-like body (switches, a digit and
+  a letter), so `refs/heads/sk-proj-<word slug>`, `helpdesk-admin-<slug>`,
+  `task-<48 letters>`, `laughs_<36 digits>` pass; the Slack prefix is
+  `xox[abprse]-` again (`xoxo-…` passes). Property test: 50 000 generated
+  short subtype keys per format (7 formats) all redacted; simulated residual
+  miss rate for random 20-character subtype bodies about 3 in 100 000
+  (24+: under 1 in 300 000).
 - **Redaction misses closed**: a letter or digit glued in front of a key,
   base64 of `x`+key, base64 in URL paths, MIME-wrapped base64, hex, and
   nested encodings (up to four levels; printable text nested deeper is
