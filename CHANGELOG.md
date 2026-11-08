@@ -110,6 +110,12 @@ uses semantic versioning once past 0.x.
   nested encodings (up to four levels; printable text nested deeper is
   redacted).
 
+- **`audit export --out <existing dir>`** crashed with `EISDIR` and left a
+  0600 temp file holding the tracker. A directory is now `invalid_input`
+  before anything is written, and any failure after the temp file exists
+  removes it (`writePrivateFile`, `src/audit/export.ts`). A file or link
+  already at the temp name is never opened (`O_EXCL`); another name is tried.
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to

@@ -7,6 +7,9 @@
  * xlsx writers are 0.5–1 MB with transitive deps for a feature this narrow.
  */
 
+import { randomBytes } from 'node:crypto';
+import { closeSync, constants, fchmodSync, lstatSync, openSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 
 import { SeaError } from '../core/errors.js';
@@ -285,4 +288,58 @@ export function toXlsx(columns: readonly string[], rows: readonly Record<string,
     { name: 'xl/styles.xml', data: styles },
   ];
   return zip(files.map((f) => ({ name: f.name, data: Buffer.from(f.data, 'utf8') })));
+}
+
+/** Fresh temp names tried before giving up (a name that exists is someone else's file). */
+const TEMP_ATTEMPTS = 8;
+
+/**
+ * Write `data` to `file` with mode 0600, never through anything planted there
+ * (#6, #8). A tracker carries unreported vulnerabilities, so it goes to a
+ * fresh temp file next to `file`, created with O_EXCL | O_NOFOLLOW (an
+ * existing file or link at the temp name is never opened: another name is
+ * tried), then renamed over `file`, which replaces a planted symlink or hard
+ * link instead of writing through it. `file` being a directory is
+ * `invalid_input`, and any failure after the temp file exists removes it.
+ */
+export function writePrivateFile(file: string, data: string | Buffer, opts: { tmpName?: () => string } = {}): void {
+  let st: ReturnType<typeof lstatSync> | null = null;
+  try {
+    st = lstatSync(file);
+  } catch {
+    /* absent: fine */
+  }
+  if (st?.isDirectory()) throw new SeaError('invalid_input', `--out ${file} is a directory; give a file path`, { path: file });
+  const tmpName = opts.tmpName ?? (() => join(dirname(resolve(file)), `.${basename(file)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`));
+  let tmp = '';
+  let fd: number | null = null;
+  for (let i = 0; fd === null; i++) {
+    tmp = tmpName();
+    try {
+      fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST' || i + 1 >= TEMP_ATTEMPTS) throw e;
+    }
+  }
+  try {
+    try {
+      writeSync(fd, typeof data === 'string' ? Buffer.from(data, 'utf8') : data);
+      fchmodSync(fd, 0o600);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, file);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* already gone */
+    }
+    const code = (e as NodeJS.ErrnoException).code;
+    // why: a directory that appeared after the check (EPERM is Windows' answer).
+    if (code === 'EISDIR' || code === 'EPERM') {
+      throw new SeaError('invalid_input', `--out ${file}: could not replace it (${code}); is it a directory?`, { path: file, code });
+    }
+    throw e;
+  }
 }
