@@ -509,7 +509,7 @@ describe('#8 follow-up: a probe made unwritable (chmod 0444, same uid) is replac
     expect(typeof ref()).toBe('number');
     expect(denied).toBe(1);
     expect(warnings.join('\n')).toMatch(/not writable \(EACCES\); replaced/);
-    expect(nodeFs.statSync(join(dir, PROBE)).mode & 0o777).toBe(0o600);
+    if (POSIX) expect(nodeFs.statSync(join(dir, PROBE)).mode & 0o777).toBe(0o600);
     const guard = clockGuard(() => new Date(Date.now() + 15 * 60_000), ref, 30);
     expect(guard.untrusted()).toMatchObject({ max_ms: 30_000 });
   });
