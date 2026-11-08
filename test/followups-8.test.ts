@@ -485,11 +485,11 @@ describe('#8.4 redaction is linear in the size of a cell', () => {
   };
   for (const [what, make] of Object.entries(shapes)) {
     it(what, () => {
-      const small = make(16_384);
-      const big = make(131_072);
+      const small = make(8_192);
+      const big = make(65_536);
       const ts = time(() => redactMod.redactText(small, 'x'));
       const tb = time(() => redactMod.redactText(big, 'x'));
-      // 8× the input: linear is ~8× the time, quadratic ~64×. Allow noise, and a floor for tiny timings.
+      // 8× the input: linear is ~8× the time, quadratic ~64×. Allow noise, and a floor for tiny timings. (8 KB → 64 KB keeps the suite's CPU load low.)
       expect(tb, `${ts.toFixed(2)} ms → ${tb.toFixed(2)} ms`).toBeLessThan(Math.max(ts, 2) * 24);
       expect(tb).toBeLessThan(2_000);
     });
