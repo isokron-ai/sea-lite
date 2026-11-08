@@ -15,7 +15,7 @@ import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './
 import { SEA_SCHEMA_META_KEY, SEA_SCHEMA_VERSION } from './db/schema.js';
 import { ACTORS_FILE_NAME, BEARER_FILE_NAME, MIN_TOKEN_CHARS, parseActorsFile } from './http.js';
 import { verifySea } from './rebuild.js';
-import { fsReference, parseMaxSkew, PROBE_ASIDE_KEEP, probeAsides, probeRemovedCount, type Reference } from './core/clock.js';
+import { fsReference, parseMaxSkew, PROBE_ASIDE_KEEP, PROBE_FILE, probeAsides, probeRemovedCount, type Reference } from './core/clock.js';
 import { VERSION } from './version.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
@@ -300,7 +300,14 @@ export function checkClockWith(dataDir: string, now: Date, reference: () => Refe
     const why = notes.join('; ') || 'clock probe failed';
     return max === 0
       ? { id: 'clock', status: 'warn', detail: `${why}; accepted because SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0` }
-      : { id: 'clock', status: 'fail', detail: `${why}; claims and leases are refused until the probe can be written` };
+      : {
+          id: 'clock',
+          status: 'fail',
+          detail:
+            `${why}; claims and leases are refused until the probe can be written. ` +
+            `Recover: restore write permission (\`chmod u+w ${dataDir} ${join(dataDir, PROBE_FILE)}\`, or remove the probe), ` +
+            `or, knowingly, set SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0 to let leases trust each process's clock unmeasured`,
+        };
   }
   if (typeof ref === 'object') return { id: 'clock', status: 'fail', detail: `clock probe tampered with: ${ref.tampered}; claims and leases will be refused until it is removed` };
   const tampering =

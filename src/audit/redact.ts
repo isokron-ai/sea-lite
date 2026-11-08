@@ -81,27 +81,85 @@ interface Vendor {
  * 48 alphanumerics for a legacy `sk-` key. Only a bare `sk-` with none of
  * those shapes goes through the randomness check.
  */
-const PREFIX = /gh[pousr]_|github_pat_|glpat-|phx_|xox[a-z]-|sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|[sr]k_(?:live|test)_|AIza|npm_|hvs\.|dp\.(?:pt|st|ct|sa|scim|audit)\.|AKIA|ASIA/g;
+const PREFIX = /gh[pousr]_|github_pat_|glpat-|phx_|xox[abprse]-|sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|[sr]k_(?:live|test)_|AIza|npm_|hvs\.|dp\.(?:pt|st|ct|sa|scim|audit)\.|AKIA|ASIA/g;
 
 const atLeast = (n: number) => (b: string, glued: boolean) => !glued && b.length >= n;
 /** Slack: numeric segments, then the secret (`xoxb-<team>-<bot>-<24>`, `xoxp-…-…-…-<32 hex>`, `xoxa-2-…`). */
 const SLACK_SHAPE = /^(?:\d+-){1,4}[A-Za-z0-9]{16,}/;
+/** Base64 of "OpenAI": inside every OpenAI key body, whatever its length. */
+const OPENAI_MARKER = 'T3BlbkFJ';
+
+/**
+ * Class switches (lower / upper / digit) inside separator-delimited runs,
+ * not counting a Capitalized word's first switch. Random keys switch
+ * constantly; slugs of words, all-digit and single-case runs hardly at all
+ * (`fix-issue123-redaction` 1, `New-York-2024-Q3-Report` 1).
+ */
+export function switches(body: string): number {
+  let t = 0;
+  let prev = 0;
+  let pos = 0;
+  for (let i = 0; i < body.length && i < BODY_WINDOW; i++) {
+    const c = body.charCodeAt(i);
+    const k = c >= 48 && c <= 57 ? 1 : c >= 65 && c <= 90 ? 2 : c >= 97 && c <= 122 ? 4 : 0;
+    if (k === 0) {
+      prev = pos = 0;
+      continue;
+    }
+    if (prev !== 0 && prev !== k && !(pos === 1 && prev === 2 && k === 4)) t++;
+    prev = k;
+    pos++;
+  }
+  return t;
+}
+/** #8 re-review: what a glued key or a long subtype body must also show — not a slug, not all letters, not all digits. */
+const keyish = (b: string) => switches(b) >= 3 && /[0-9]/.test(b) && /[A-Za-z]/.test(b);
+
+/** Share of vowels among the letters (words run ~35-45%, random letters ~19%); 1 when there are fewer than 8 letters. */
+export function vowelShare(body: string): number {
+  let letters = 0;
+  let vowels = 0;
+  for (let i = 0; i < body.length && i < BODY_WINDOW; i++) {
+    const c = body.charCodeAt(i) | 0x20;
+    if (c < 97 || c > 122) continue;
+    letters++;
+    if (c === 97 || c === 101 || c === 105 || c === 111 || c === 117) vowels++;
+  }
+  return letters < 8 ? 1 : vowels / letters;
+}
+
+/**
+ * `sk-ant-` / `sk-proj-` / `sk-svcacct-` / `sk-admin-`: a random-looking body
+ * — 20+ characters unglued with 3+ class switches (or 2 and few vowels, so a
+ * lowercase-heavy random key is not mistaken for a slug), 80+ glued and
+ * keyish. #8 re-review: this accepts every body the bare `sk-` rule would
+ * (the OpenAI marker alone has 4 switches; a randomLooking body has 5+), so a
+ * subtype's non-match never hides a key the fallback would have caught;
+ * the property test pins it.
+ */
+const subtype = (b: string, glued: boolean) =>
+  glued ? b.length >= 80 && keyish(b) : b.length >= 20 && (switches(b) >= 3 || (switches(b) === 2 && vowelShare(b) < 0.3));
 
 function vendorOf(prefix: string): Vendor {
-  if (prefix === 'github_pat_') return { id: 'github_pat', cls: ALNUM_US, accept: (b, glued) => b.length >= (glued ? 80 : 30) };
-  if (prefix.startsWith('gh')) return { id: 'github_token', cls: ALNUM, accept: (b, glued) => (glued ? b.length === 36 : b.length >= 30) };
+  if (prefix === 'github_pat_') return { id: 'github_pat', cls: ALNUM_US, accept: (b, glued) => (glued ? b.length >= 80 && keyish(b) : b.length >= 30) };
+  if (prefix.startsWith('gh')) return { id: 'github_token', cls: ALNUM, accept: (b, glued) => (glued ? b.length === 36 && keyish(b) : b.length >= 30) };
   if (prefix === 'glpat-') return { id: 'gitlab_token', cls: ALNUM_US_DASH, accept: atLeast(20) };
   if (prefix === 'phx_') return { id: 'posthog_personal_key', cls: ALNUM, accept: atLeast(20) };
   if (prefix.startsWith('xox')) return { id: 'slack_token', cls: ALNUM_DASH, accept: (b, glued) => !glued && SLACK_SHAPE.test(b) };
-  if (prefix === 'sk-ant-') return { id: 'anthropic_key', cls: ALNUM_US_DASH, accept: (b, glued) => b.length >= (glued ? 80 : 24) };
-  if (prefix !== 'sk-' && prefix.startsWith('sk-')) return { id: 'llm_api_key', cls: ALNUM_US_DASH, accept: (b) => b.length >= 80 };
-  if (prefix === 'sk-') return { id: 'llm_api_key', cls: ALNUM_US_DASH, accept: (b, glued) => /^[A-Za-z0-9]{48}$/.test(b) || (!glued && b.length >= 20 && randomLooking(b)) };
+  if (prefix === 'sk-ant-') return { id: 'anthropic_key', cls: ALNUM_US_DASH, accept: subtype };
+  if (prefix !== 'sk-' && prefix.startsWith('sk-')) return { id: 'llm_api_key', cls: ALNUM_US_DASH, accept: subtype };
+  if (prefix === 'sk-') return { id: 'llm_api_key', cls: ALNUM_US_DASH, accept: BARE_SK };
   if (prefix.endsWith('_live_') || prefix.endsWith('_test_')) return { id: 'stripe_key', cls: ALNUM, accept: atLeast(16) };
   if (prefix === 'AIza') return { id: 'google_api_key', cls: ALNUM_US_DASH, exact: 35, accept: atLeast(35) };
   if (prefix === 'npm_') return { id: 'npm_token', cls: ALNUM, accept: atLeast(36) };
   if (prefix === 'hvs.') return { id: 'vault_token', cls: ALNUM_US_DASH, accept: atLeast(24) };
   if (prefix.startsWith('dp.')) return { id: 'doppler_token', cls: ALNUM, accept: atLeast(32) };
   return { id: 'aws_access_key', cls: UPPER_DIGIT, exact: 16, accept: (b, glued) => !glued && b.length === 16 && !b.includes('EXAMPLE') };
+}
+
+/** A bare `sk-`: the OpenAI marker, a legacy 48-alphanumeric body, or (unglued) a random-looking one. */
+function BARE_SK(b: string, glued: boolean): boolean {
+  return b.includes(OPENAI_MARKER) || (/^[A-Za-z0-9]{48}$/.test(b) && (!glued || keyish(b))) || (!glued && b.length >= 20 && randomLooking(b));
 }
 
 /**

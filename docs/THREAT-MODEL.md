@@ -164,7 +164,14 @@ When no probe can be written at all the guard fails closed: lease decisions
 are refused (`clock_skew`, `reason: probe_unavailable`) until the data dir
 is fixed, or the operator accepts an unmeasured clock with
 `SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`. An agent that can keep the data dir
-unwritable can therefore stop leases (a denial of service), not skew them.
+unwritable can therefore stop leases (a denial of service), not skew them:
+`chmod 0444 sea-clock.probe; chmod 0555 <data-dir>` by the same uid makes
+every claim and lease acquire fail with `probe_unavailable`. Fail-closed is
+deliberate (lease integrity over availability). Recovery: restore write
+permission on the data dir and the probe, or set
+`SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0` knowingly; `sea-lite doctor` prints
+both. Same-uid agents denying service is closed by running them in
+agent-sandbox, as for `--trusted --role operator`.
 
 **Idempotency keys are caller-chosen.** They share kronicle-lite's unique
 column under a `sea:` prefix. A caller that reuses a key for a different
