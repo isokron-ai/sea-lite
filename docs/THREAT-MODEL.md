@@ -113,7 +113,12 @@ until it releases them.
 **`--role operator` is self-asserted.** Whoever starts the server picks the
 role. Force release is gated on it so an *agent* configured as an agent cannot
 reach for it by accident, and so the record says `claim_force_released` with a
-`released_by`. It is an audit distinction, not an access control.
+`released_by`. It is an audit distinction, not an access control. The same
+holds for `audit import --trusted` (0.7.0): it needs the operator role, so
+an agent cannot record its own gate results by accident, but any process
+that can run the CLI can claim the role. Closing that needs the agents to
+run where they cannot reach the CLI or the data dir (agent-sandbox); until
+then it is a documented limit (README, Limitations).
 
 **It is not file-level protection.** Any process that can open the SQLite
 file can `UPDATE sea_tickets SET claim_token_hash = NULL` and take a ticket.

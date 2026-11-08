@@ -745,6 +745,25 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   within 10 minutes of the upgrade).
 - **One file, one trust domain.** stdio, or loopback HTTP with bearer
   tokens; no TLS, no per-ticket permissions, no multi-tenant isolation.
+- **`--trusted --role operator` is a known gap (0.7.0).** A trusted import
+  records a findings.csv's `<gate>_result` columns as results, and only the
+  operator role may ask for it — but the role is self-asserted, so any
+  process that can run `sea-lite` (an agent with a shell included) can pass
+  `audit import … --trusted --role operator` and pass its own gates. Until
+  the runner executes agents inside agent-sandbox, which keeps the CLI and
+  the data dir out of their reach, treat the gate results of an audit as
+  only as trustworthy as every process on the machine; a gate's
+  `sea_history` shows which actor recorded its result.
+- **A same-uid agent can block leases (0.7.0, known limit).** The clock
+  guard fails closed: when the probe in the data dir cannot be written,
+  every claim and lease acquire fails with `clock_skew`
+  (`reason: probe_unavailable`). So an agent running as your user can deny
+  service with `chmod 0444 <data-dir>/sea-clock.probe; chmod 0555
+  <data-dir>` — it cannot skew leases, only stop them. Recover by restoring
+  write permission (`chmod u+w <data-dir> <data-dir>/sea-clock.probe`) or,
+  knowingly, `SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`; `sea-lite doctor` prints
+  both. Closed, like the `--trusted` gap, by running agents in
+  agent-sandbox.
 
 ## Roadmap
 

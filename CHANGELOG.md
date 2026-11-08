@@ -189,6 +189,11 @@ uses semantic versioning once past 0.x.
   (`sea_update`, library `setFields`, the audit calls), via
   `src/audit/review-state.ts`.
 
+- **Known limit, documented:** `--role operator` is self-asserted, so any
+  process that can run the CLI can `audit import --trusted --role operator`
+  and record its own gate results. README (Limitations) and
+  docs/THREAT-MODEL.md say so; agent-sandbox is to close it. No code change.
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to
