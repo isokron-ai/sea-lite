@@ -11,7 +11,7 @@ import { SeaError } from '../core/errors.js';
 import { EVENT, idemKey } from '../core/events.js';
 import { idForHash, priorFor, requestHash } from '../core/idem.js';
 import { validateFence } from '../core/fence.js';
-import { checkVersion, mustGetRow, resolveId, sweepExpired, tx, type Ctx } from '../core/repo.js';
+import { assertWritable, checkVersion, mustGetRow, resolveId, sweepExpired, tx, type Ctx } from '../core/repo.js';
 import { rowToLink, type LinkRow, type LinkView } from '../core/types.js';
 import { detectCycle, type DirectedEdge } from '../model/cycle-check.js';
 import { DAG_LINK_TYPES, sqlIn } from '../model/enums.js';
@@ -96,8 +96,8 @@ export function link(ctx: Ctx, input: LinkInput): LinkResult {
     const from_id = resolveId(ctx.db, input.from_id);
     const to_id = resolveId(ctx.db, input.to_id);
     if (from_id === to_id) throw new SeaError('self_loop', `a ticket cannot ${input.link_type} itself`, { ticket_id: from_id });
-    const from = sweepExpired(ctx, mustGetRow(ctx.db, from_id));
-    mustGetRow(ctx.db, to_id);
+    const from = sweepExpired(ctx, assertWritable(ctx, mustGetRow(ctx.db, from_id)));
+    assertWritable(ctx, mustGetRow(ctx.db, to_id));
     validateFence(from, input.claim_token, ctx.actor, ctx.now);
     checkVersion(from, input.expected_version);
 

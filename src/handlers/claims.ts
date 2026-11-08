@@ -13,7 +13,7 @@ import { assertClockTrusted } from '../core/clock.js';
 import { clampLease, DEFAULT_LEASE_SECONDS, expiryFrom, hasLiveClaim, MAX_LEASE_SECONDS, validateFence } from '../core/fence.js';
 import { holderLabel } from '../core/identity.js';
 import type { Blocker, WaitInfo } from '../core/wait.js';
-import { addNote, mustGetRow, ownsClaim, projectFilter, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
+import { addNote, assertWritable, mustGetRow, ownsClaim, projectFilter, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
 import {
   findOverlaps,
   normalizeScope,
@@ -125,7 +125,7 @@ export function claim(ctx: Ctx, input: ClaimInput): ClaimResult {
     const ids = [...new Set(input.ticket_ids.map((x) => resolveId(ctx.db, x)))].sort();
     const rows: TicketRow[] = [];
     for (const id of ids) {
-      const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
+      const row = sweepExpired(ctx, assertWritable(ctx, mustGetRow(ctx.db, id)));
       if (hasLiveClaim(row, ctx.now) && !ownsClaim({ actor: ctx.actor, session: ctx.session }, row.claim_actor, row.claim_session)) {
         const label = holderLabel(row.claim_actor ?? '?', row.claim_session);
         throw new SeaError('already_claimed', `ticket ${id} is claimed by "${label}" until ${row.claim_expires_at}`, {
@@ -191,7 +191,7 @@ export function refresh(ctx: Ctx, input: RefreshInput): RefreshResult {
   assertClockTrusted(ctx.clock, 'refresh a lease');
   return tx(ctx.db, () => {
     const id = resolveId(ctx.db, input.ticket_id);
-    const row = mustGetRow(ctx.db, id);
+    const row = assertWritable(ctx, mustGetRow(ctx.db, id));
     validateFence(row, input.claim_token, ctx.actor, ctx.now);
     const by = input.extend_by_seconds ?? row.claim_lease_seconds ?? DEFAULT_LEASE_SECONDS;
     const proposed = Date.parse(expiryFrom(ctx.now, by));
@@ -214,7 +214,7 @@ export interface ReleaseResult {
 export function release(ctx: Ctx, input: ReleaseInput): ReleaseResult {
   return tx(ctx.db, () => {
     const id = resolveId(ctx.db, input.ticket_id);
-    const row = sweepExpired(ctx, mustGetRow(ctx.db, id));
+    const row = sweepExpired(ctx, assertWritable(ctx, mustGetRow(ctx.db, id)));
     if (input.force) {
       if (ctx.role !== 'operator') {
         // P2-12: an HTTP actor's role comes from its token, not from the server's --role.
