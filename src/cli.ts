@@ -12,8 +12,8 @@ import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/s
 import { defaultDataDir } from 'kronicle-lite';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, constants, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { SeaError } from './core/errors.js';
 import {
@@ -49,6 +49,7 @@ import type { ActorStats, StatsResult } from './handlers/stats.js';
 import { createServer, PROFILES, type Profile } from './server.js';
 import type { WaitInfo } from './core/wait.js';
 import { DEFAULT_ACTOR, parseRole, parseTracks, SeaLite } from './store.js';
+import { writePrivateFile } from './audit/export.js';
 
 export { VERSION } from './version.js';
 import { VERSION } from './version.js';
@@ -1178,18 +1179,7 @@ function auditCmd(positional: string[], flags: Args['flags']): number {
         process.stdout.write(data);
         return 0;
       }
-      // why: a tracker carries unreported vulnerabilities. Written to a fresh 0600
-      // temp file (O_EXCL, never through a link) and renamed over the path, so a
-      // symlink or hard link planted at --out is replaced, not written through.
-      const tmpOut = join(dirname(resolve(file)), `.${basename(file)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
-      const fd = openSync(tmpOut, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-      try {
-        writeSync(fd, typeof data === 'string' ? Buffer.from(data, 'utf8') : data);
-        fchmodSync(fd, 0o600);
-      } finally {
-        closeSync(fd);
-      }
-      renameSync(tmpOut, file);
+      writePrivateFile(file, data); // 0600, O_EXCL temp + rename: never written through a plant (audit/export.ts)
       process.stderr.write(`wrote ${file} (${store.auditRows(audit).length} findings)\n`);
       return 0;
     }

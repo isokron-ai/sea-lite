@@ -5,6 +5,7 @@
  * post-open fstat check) are killed.
  */
 
+import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import * as nodeFs from 'node:fs';
 import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -486,6 +487,91 @@ describe('#8 context detectors keep kronicle-lite\'s exclusions (placeholders, a
   });
 });
 
+// ── #8.6 export --out, and the O_EXCL mutant ──
+
+describe('#8.6 audit export --out pointing at an existing directory', () => {
+  it('is a clean error, and no temp file holding the tracker is left behind', () => {
+    const dir = tmp();
+    const data = join(dir, 'data');
+    const s = new SeaLite({ dataDir: data, actor: 'mcp-audit' });
+    s.auditOpen({ audit_id: 'a', title: 'A' });
+    s.auditFinding('a', { finding_id: 'F1', title: 'tracker-canary-title' });
+    s.close();
+    const out = join(dir, 'out');
+    mkdirSync(out);
+    const r = nodeSpawnSync(process.execPath, [join(process.cwd(), 'dist', 'cli.js'), 'audit', 'export', 'a', '--out', out, '--data-dir', data], {
+      encoding: 'utf8',
+      env: { PATH: process.env['PATH'] ?? '', HOME: dir },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/is a directory/);
+    expect(r.stderr).not.toMatch(/\n\s+at /); // no stack trace
+    expect(readdirSync(dir).sort()).toEqual(['data', 'out']);
+    expect(readdirSync(out)).toEqual([]);
+  });
+
+  it('a failure after the temp file is written (rename refused) removes the temp file', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const dir = tmp();
+    const target = join(dir, 'race');
+    // the target turns into a non-empty directory between the check and the rename
+    const names = [join(dir, '.t1.tmp')];
+    let err: unknown;
+    try {
+      writePrivateFile(target, 'tracker', {
+        tmpName: () => {
+          mkdirSync(target);
+          writeFileSync(join(target, 'x'), 'x');
+          return names.shift()!;
+        },
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toMatchObject({ code: 'invalid_input' });
+    expect(readdirSync(dir)).toEqual(['race']);
+  });
+
+  it('a directory at the path is refused before any temp file is created', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const dir = tmp();
+    let made = 0;
+    expect(() => writePrivateFile(dir, 'tracker', { tmpName: () => (made++, join(dir, '.x.tmp')) })).toThrow(/is a directory; give a file path/);
+    expect(made).toBe(0);
+  });
+});
+
+describe('#8 surviving mutant: O_EXCL on the export temp file', () => {
+  it.skipIf(!POSIX)('a file planted at the temp name is never written through; a fresh name is used', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { openSync, readSync, closeSync } = nodeFs;
+    const dir = tmp();
+    const planted = join(dir, '.planted.tmp');
+    writeFileSync(planted, '', { mode: 0o666 });
+    const spy = openSync(planted, 'r'); // the planter keeps a read handle
+    const names = [planted, join(dir, '.fresh.tmp')];
+    writePrivateFile(join(dir, 'tracker.csv'), 'id,title\nF1,secret finding\n', { tmpName: () => names.shift()! });
+    const buf = Buffer.alloc(64);
+    expect(readSync(spy, buf, 0, 64, 0)).toBe(0); // nothing reached the planter
+    closeSync(spy);
+    expect(readFileSync(planted, 'utf8')).toBe('');
+    expect(readFileSync(join(dir, 'tracker.csv'), 'utf8')).toMatch(/secret finding/);
+    expect(lstatSync(join(dir, 'tracker.csv')).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir).sort()).toEqual(['.planted.tmp', 'tracker.csv']);
+  });
+  it.skipIf(!POSIX)('a symlink planted at the temp name is not followed', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const dir = tmp();
+    const victim = join(dir, 'victim');
+    writeFileSync(victim, 'precious\n');
+    const planted = join(dir, '.link.tmp');
+    symlinkSync(victim, planted);
+    const names = [planted, join(dir, '.fresh.tmp')];
+    writePrivateFile(join(dir, 'tracker.csv'), 'id\n', { tmpName: () => names.shift()! });
+    expect(readFileSync(victim, 'utf8')).toBe('precious\n');
+  });
+});
+
 // ── #8 review of the stack: an unwritable probe, and the moved-aside pile ──
 
 describe('#8 follow-up: a probe made unwritable (chmod 0444, same uid) is replaced; unmeasurable fails closed', () => {
@@ -563,5 +649,64 @@ describe('#8 follow-up: moved-aside plants are capped', () => {
     const clock = (await doctor({ dataDir: dir })).checks.find((c) => c.id === 'clock');
     expect(clock?.detail).toMatch(/12 older plants were removed/);
     expect(clock?.data).toMatchObject({ removed_earlier: 12 });
+  });
+});
+
+// ── #8 review of the stack: export writes all bytes or nothing, and stale temp files ──
+
+describe('#8 follow-up: writePrivateFile never replaces an export with a partial one', () => {
+  const setup = () => {
+    const dir = tmp();
+    const out = join(dir, 'tracker.csv');
+    writeFileSync(out, 'old export\n', { mode: 0o600 });
+    return { dir, out, data: Buffer.alloc(204_800, 0x61) };
+  };
+  it('short writes are continued until every byte is written', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { out, data } = setup();
+    writePrivateFile(out, data, { write: (fd, b, off, len) => nodeFs.writeSync(fd, b, off, Math.min(len, 1000)) });
+    expect(nodeFs.statSync(out).size).toBe(data.length);
+  });
+  it('ENOSPC part-way: an error, the old export intact, no temp file left', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { dir, out, data } = setup();
+    let written = 0;
+    const write = (fd: number, b: Buffer, off: number, len: number) => {
+      if (written >= 65_536) throw errno('ENOSPC');
+      const n = nodeFs.writeSync(fd, b, off, Math.min(len, 65_536 - written));
+      written += n;
+      return n;
+    };
+    expect(() => writePrivateFile(out, data, { write })).toThrow(/ENOSPC/);
+    expect(readFileSync(out, 'utf8')).toBe('old export\n');
+    expect(readdirSync(dir)).toEqual(['tracker.csv']);
+  });
+  it('a write that makes no progress is an error, not a loop', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { out, data } = setup();
+    expect(() => writePrivateFile(out, data, { write: () => 0 })).toThrow(/no progress/);
+    expect(readFileSync(out, 'utf8')).toBe('old export\n');
+  });
+  it('a write that claims more than reached the file is caught by the size check before the rename', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { dir, out, data } = setup();
+    const lying = (fd: number, b: Buffer, off: number, len: number) => (nodeFs.writeSync(fd, b, off, Math.ceil(len / 2)), len);
+    expect(() => writePrivateFile(out, data, { write: lying })).toThrow(/102400 of 204800 bytes/);
+    expect(readFileSync(out, 'utf8')).toBe('old export\n');
+    expect(readdirSync(dir)).toEqual(['tracker.csv']);
+  });
+});
+
+describe('#8 follow-up: temp files left by a killed export are removed by the next one', () => {
+  it.skipIf(!POSIX)("a dead pid's temp file is removed; a live pid's and other names are kept", async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const dir = tmp();
+    const dead = nodeSpawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
+    const stale = `.tracker.csv.${dead}.0123456789ab.tmp`;
+    const live = `.tracker.csv.${process.pid}.0123456789ab.tmp`;
+    const other = `.notes.csv.${dead}.0123456789ab.tmp`;
+    for (const n of [stale, live, other]) writeFileSync(join(dir, n), 'tracker rows', { mode: 0o600 });
+    writePrivateFile(join(dir, 'tracker.csv'), 'id\n');
+    expect(readdirSync(dir).sort()).toEqual([live, other, 'tracker.csv'].sort());
   });
 });
