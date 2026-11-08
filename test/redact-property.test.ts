@@ -54,6 +54,42 @@ const FORMATS: Record<string, () => string> = {
   'aws AKIA': () => 'AKIA' + r('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567', 16),
 };
 
+const SHORT: Record<string, () => string> = {
+  // the re-review's repro shape: an OpenAI key marker inside a short body
+  'short sk-proj- (OpenAI marker)': () => 'sk-' + 'proj-' + r(A, span(4, 30)) + 'T3BlbkFJ' + r(A, span(8, 40)),
+  'short sk-svcacct- (OpenAI marker)': () => 'sk-' + 'svcacct-' + r(A, span(4, 30)) + 'T3BlbkFJ' + r(A, span(8, 40)),
+  'short sk-admin- (OpenAI marker)': () => 'sk-' + 'admin-' + r(A, span(4, 30)) + 'T3BlbkFJ' + r(A, span(8, 40)),
+  'short sk-proj- (random 24-79)': () => 'sk-' + 'proj-' + r(B64URL, span(24, 79)),
+  'short sk-svcacct- (random 24-79)': () => 'sk-' + 'svcacct-' + r(B64URL, span(24, 79)),
+  'short sk-admin- (random 24-79)': () => 'sk-' + 'admin-' + r(B64URL, span(24, 79)),
+  'short sk-ant- (random 24-79)': () => 'sk-' + 'ant-' + r(B64URL, span(24, 79)),
+};
+
+describe('#8 re-review: keys main redacted stay redacted, short subtype bodies included (50 000 each)', () => {
+  for (const [name, gen] of Object.entries(SHORT)) {
+    it(name, () => {
+      for (let chunk = 0; chunk < 50; chunk++) {
+        const keys = Array.from({ length: 1000 }, gen);
+        const out = redactText(keys.map((k) => ' ' + k).join('') + ' ', 'x').text;
+        expect(out.replace(/\[REDACTED:[a-z_0-9]+\]/g, '').trim(), `${name}, chunk ${chunk}`).toBe('');
+      }
+    }, 60_000);
+  }
+  it('a subtype never accepts less than the bare sk- rule would (fallback containment)', () => {
+    const r3 = prng(99);
+    for (let i = 0; i < 20_000; i++) {
+      const body = r3(B64URL, 20 + (i % 60));
+      if (looksLikeSecret('sk-' + body)) expect(looksLikeSecret('sk-' + 'proj-' + body), body).toBe(true);
+    }
+  });
+  it('a bare sk- key with the OpenAI marker is caught whatever its length (sk-None-…)', () => {
+    expect(looksLikeSecret('sk-' + 'None-' + 'abcdefghijklmnopqrst' + 'T3BlbkFJ' + 'abcdefghijklmnopqrstuv')).toBe(true);
+  });
+  it('the re-review repro', () => {
+    expect(looksLikeSecret('sk-' + 'proj-Xq7Lm2Pw4Rt6Yv8Nb1KcT3BlbkFJ3Hd5Jf7Gs9Qa2Ze4Ux6Wo8')).toBe(true);
+  });
+});
+
 describe('#8 review: every generated key of a real format is redacted (shape only, no entropy gate)', () => {
   for (const [name, gen] of Object.entries(FORMATS)) {
     it(`${name}: 100 000 keys`, () => {
@@ -82,6 +118,14 @@ describe('#8 review: prefixes count only at a token boundary', () => {
     `laughs_${r2(A, 30)}`,
     `snpm_${r2(A, 36)}`,
     `XAKIA${r2('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567', 16)}`,
+    // #8 re-review
+    'refs/heads/sk-proj-' + 'fix-the-redaction-of-project-keys-when-the-body-is-shorter-than-the-threshold-ok',
+    'helpdesk-admin-' + 'route-the-escalation-queue-to-the-right-team-for-weekend-coverage-and-holidays-ok',
+    'task-' + r2('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', 48),
+    'laughs_' + r2(D, 36),
+    'xoxo-2024-holidaycardsforteam',
+    'refs/heads/sk-proj-Fix-Redaction-Of-Project-Keys-When-Short',
+    'mygithub_pat_' + 'notes_on_rotating_the_fine_grained_tokens_for_the_release_pipeline_and_staging_x',
     'sandbox:sk-prod-cluster-east-0001',
     'sk-create-sandbox-attempt-0001',
     'xoxb-prod-runner-pool-1',

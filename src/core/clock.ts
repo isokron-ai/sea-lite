@@ -336,7 +336,7 @@ export function assertClockTrusted(guard: ClockGuard | undefined, what: string):
   if (u.unavailable) {
     throw new SeaError(
       'clock_skew',
-      `refusing to ${what}: this process's clock could not be checked against the data dir's (the clock probe cannot be written; see the SEA_LITE_CLOCK_PROBE warning). Fix the data dir, or set SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0 to accept an unmeasured clock`,
+      `refusing to ${what}: this process's clock could not be checked against the data dir's (the clock probe cannot be written; see the SEA_LITE_CLOCK_PROBE warning). Restore write permission on the data dir and its sea-clock.probe (sea-lite doctor names them), or, knowingly, set SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`,
       { reason: 'probe_unavailable' },
     );
   }
