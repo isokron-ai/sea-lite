@@ -90,6 +90,26 @@ uses semantic versioning once past 0.x.
   and for the one-shot probe as well, is `probe_tampered`. Tested with 12
   processes healing 25 plants with the race window widened.
 
+- **Redaction false positives.** `sk-…` and `xox?-…` matched any long
+  enough id, so `sandbox:sk-prod-cluster-east-0001`,
+  `sk-create-sandbox-attempt-0001`, `xoxb-prod-runner-pool-1` and
+  `F-sk-learn-…` were refused and `refs/heads/sk-proj-…` was redacted from
+  free text. Those two families now need a minimum length and a
+  random-looking body (`randomLooking` in `src/audit/redact.ts`).
+- **Quadratic redaction.** The URL-run pattern and kronicle-lite's
+  `env_secret` pattern backtracked quadratically (about 130 ms per 8 KB
+  cell, 0.8 s per 32 KB word), inside the write transaction. Every pattern is
+  now literal-led or bounded, decoded text is scanned under a budget
+  (exceeded: the text is redacted whole), and callers redact before the
+  transaction opens (`prepareFields` / `prepareFinding`; `audit import`
+  prepares every row first). kronicle-lite's write-time detectors are
+  mirrored with bounded quantifiers; a parity test checks that everything
+  they flag is still redacted. Timing tests on 17 adversarial 128 KB shapes.
+- **Redaction misses closed**: a letter or digit glued in front of a key,
+  base64 of `x`+key, base64 in URL paths, MIME-wrapped base64, hex, and
+  nested encodings (up to four levels; printable text nested deeper is
+  redacted).
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to

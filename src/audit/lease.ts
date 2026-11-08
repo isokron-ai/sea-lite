@@ -241,6 +241,12 @@ export function release(ctx: Ctx, input: { name: string; token?: string; abandon
 /** Record a side effect about to happen. Refused while earlier intents are unresolved. */
 export function openIntent(ctx: Ctx, input: { name: string; token: string; op: string; target?: string; idempotency_key?: string }): { intent_id: string } {
   if (input.op.length === 0 || input.op.length > 200) throw new SeaError('invalid_input', 'op: 1-200 characters');
+  // #8: redaction runs before the write transaction, never inside it.
+  const text = {
+    op: redactText(input.op, 'op').text,
+    ...(input.target !== undefined ? { target: redactText(input.target.slice(0, 500), 'target').text } : {}),
+    ...(input.idempotency_key !== undefined ? { idempotency_key: refuseSecret(input.idempotency_key.slice(0, 200), 'idempotency_key') } : {}),
+  };
   return tx(ctx.db, () => {
     const row = fenced(ctx, input.name, input.token);
     const u = unresolved(ctx.db, input.name);
@@ -256,9 +262,7 @@ export function openIntent(ctx: Ctx, input: { name: string; token: string; op: s
       intent_id,
       name: input.name,
       epoch: row.epoch,
-      op: redactText(input.op, 'op').text,
-      ...(input.target !== undefined ? { target: redactText(input.target.slice(0, 500), 'target').text } : {}),
-      ...(input.idempotency_key !== undefined ? { idempotency_key: refuseSecret(input.idempotency_key.slice(0, 200), 'idempotency_key') } : {}),
+      ...text,
       opened_by: ctx.actor,
       opened_at: ctx.now.toISOString(),
     });
@@ -272,6 +276,7 @@ export function closeIntent(
   input: { name: string; token: string; intent_id: string; outcome: 'happened' | 'not_happened'; evidence_ref?: string },
 ): { intent_id: string; state: IntentState } {
   if (input.outcome !== 'happened' && input.outcome !== 'not_happened') throw new SeaError('invalid_input', 'outcome: happened | not_happened');
+  const evidence = input.evidence_ref !== undefined ? { evidence_ref: refuseSecret(input.evidence_ref.slice(0, 128), 'evidence_ref') } : {};
   return tx(ctx.db, () => {
     const row = fenced(ctx, input.name, input.token);
     const it = ctx.db.prepare(`SELECT state, epoch FROM sea_lease_intents WHERE intent_id = ? AND lease_name = ?`).get(input.intent_id, input.name) as
@@ -290,7 +295,7 @@ export function closeIntent(
       outcome: input.outcome,
       was: it.state,
       closed_by: ctx.actor,
-      ...(input.evidence_ref !== undefined ? { evidence_ref: refuseSecret(input.evidence_ref.slice(0, 128), 'evidence_ref') } : {}),
+      ...evidence,
     });
     return { intent_id: input.intent_id, state: input.outcome };
   });
