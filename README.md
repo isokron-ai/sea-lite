@@ -753,6 +753,16 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   the data dir out of their reach, treat the gate results of an audit as
   only as trustworthy as every process on the machine; a gate's
   `sea_history` shows which actor recorded its result.
+- **A same-uid agent can block leases (0.7.0, known limit).** The clock
+  guard fails closed: when the probe in the data dir cannot be written,
+  every claim and lease acquire fails with `clock_skew`
+  (`reason: probe_unavailable`). So an agent running as your user can deny
+  service with `chmod 0444 <data-dir>/sea-clock.probe; chmod 0555
+  <data-dir>` — it cannot skew leases, only stop them. Recover by restoring
+  write permission (`chmod u+w <data-dir> <data-dir>/sea-clock.probe`) or,
+  knowingly, `SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`; `sea-lite doctor` prints
+  both. Closed, like the `--trusted` gap, by running agents in
+  agent-sandbox.
 
 ## Roadmap
 
