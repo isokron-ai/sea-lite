@@ -97,7 +97,11 @@ uses semantic versioning once past 0.x.
   (`clock_skew`, `reason: probe_unavailable`; doctor `clock` fails) unless
   `SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`. Moved-aside plants are capped: the
   newest 8 are kept, older ones removed and counted
-  (`sea-clock.probe.removed-count`, shown by doctor).
+  (`sea-clock.probe.removed-count`, shown by doctor). Known limit: a
+  same-uid agent can keep the probe and data dir unwritable and so block
+  leases (denial of service, not skew); doctor's `clock` failure says how to
+  recover (restore write permission, or `SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`
+  knowingly).
 
 ### Compatibility
 
