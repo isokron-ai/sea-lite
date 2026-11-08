@@ -29,7 +29,7 @@ export const PROBE_FILE = 'sea-clock.probe';
 /** A plant that cannot be unlinked (a directory) is renamed to `<probe>.tampered-<ms>-<hex>` and kept as evidence. */
 export const PROBE_ASIDE_PREFIX = `${PROBE_FILE}.tampered-`;
 /** Heal-and-reopen rounds before falling back to a one-shot probe (concurrent healers, a racing planter). */
-const ATTEMPTS = 5;
+const ATTEMPTS = 10;
 /** Open errors that mean "something other than our file is at the path right now": retried, and tampering if it persists. */
 const CONTESTED = new Set(['ELOOP', 'ENXIO', 'EEXIST', 'EISDIR']);
 
