@@ -150,6 +150,10 @@ refuses lease decisions (`clock_skew` on claim / next / refresh / heartbeat;
 the auto-heartbeat and the lazy sweep skip) when they differ by more than
 `SEA_LITE_MAX_CLOCK_SKEW_SECONDS` (default 30; 0 disables). This catches a
 skewed process, not a skewed file server; keep NTP running everywhere.
+Anything an agent plants at the probe path (a symlink, FIFO, hard link or
+directory) is unlinked or renamed aside and the probe recreated, so a plant
+neither switches the guard off nor blocks leases (0.7.0); repairs are
+warned about and listed by `sea-lite doctor`.
 
 **Idempotency keys are caller-chosen.** They share kronicle-lite's unique
 column under a `sea:` prefix. A caller that reuses a key for a different

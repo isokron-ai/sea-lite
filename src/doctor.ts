@@ -8,14 +8,14 @@
 
 import Database from 'better-sqlite3';
 import { Chain, type Signer } from 'kronicle-lite';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
 import { SEA_SCHEMA_META_KEY, SEA_SCHEMA_VERSION } from './db/schema.js';
 import { ACTORS_FILE_NAME, BEARER_FILE_NAME, MIN_TOKEN_CHARS, parseActorsFile } from './http.js';
 import { verifySea } from './rebuild.js';
-import { fsReference, parseMaxSkew } from './core/clock.js';
+import { fsReference, parseMaxSkew, PROBE_ASIDE_PREFIX } from './core/clock.js';
 import { VERSION } from './version.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
@@ -280,10 +280,24 @@ async function checkCatalog(cwd: string): Promise<DoctorCheck> {
 /** C2-06: the lease clock check needs a writable probe and a clock that agrees with the file system's. */
 function checkClock(dataDir: string, now: Date): DoctorCheck {
   if (!existsSync(dataDir)) return { id: 'clock', status: 'skip', detail: 'no data dir' };
-  let why: string | null = null;
-  const ref = fsReference(dataDir, (m) => (why = m))();
-  if (ref === null) return { id: 'clock', status: 'warn', detail: why ?? 'clock probe failed; lease decisions trust each process clock' };
+  const notes: string[] = [];
+  const ref = fsReference(dataDir, (m) => notes.push(m))();
+  // #8: plants that were moved aside stay as evidence until someone looks at them.
+  let asides: string[] = [];
+  try {
+    // why: names in the data dir are agent-writable; only our own aside names are echoed, at most 10.
+    asides = readdirSync(dataDir)
+      .filter((n) => n.startsWith(PROBE_ASIDE_PREFIX) && /^[0-9]{1,16}-[0-9a-f]{8}$/.test(n.slice(PROBE_ASIDE_PREFIX.length)))
+      .slice(0, 10);
+  } catch {
+    /* unreadable data dir: the probe reading says so */
+  }
+  if (ref === null) return { id: 'clock', status: 'warn', detail: notes.join('; ') || 'clock probe failed; lease decisions trust each process clock' };
   if (typeof ref === 'object') return { id: 'clock', status: 'fail', detail: `clock probe tampered with: ${ref.tampered}; claims and leases will be refused until it is removed` };
+  const tampering =
+    notes.length > 0 || asides.length > 0
+      ? `the clock probe was tampered with and repaired (${[...notes.map((n) => n.replace(/^sea-lite: /, '')), ...asides.map((a) => `${a} was moved aside earlier; inspect and remove it`)].join('; ')})`
+      : null;
   let max: number;
   try {
     max = parseMaxSkew(process.env['SEA_LITE_MAX_CLOCK_SKEW_SECONDS']);
@@ -291,6 +305,7 @@ function checkClock(dataDir: string, now: Date): DoctorCheck {
     return { id: 'clock', status: 'fail', detail: errMsg(e) };
   }
   const skew = Math.round((now.getTime() - ref) / 1000);
+  if (tampering !== null && !(Math.abs(skew) > max && max > 0)) return { id: 'clock', status: 'warn', detail: tampering, data: { skew_seconds: skew, moved_aside: asides } };
   if (max === 0) return { id: 'clock', status: 'warn', detail: `clock check disabled (SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0); skew ${skew}s`, data: { skew_seconds: skew } };
   return Math.abs(skew) > max
     ? { id: 'clock', status: 'fail', detail: `this clock is ${skew}s off the data dir's file-system clock (tolerance ${max}s): claims and leases will be refused`, data: { skew_seconds: skew } }

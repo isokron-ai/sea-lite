@@ -15,15 +15,23 @@
  * towards refusing the holder, never towards admitting someone else).
  */
 
-import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, openSync, unlinkSync, writeSync, type Stats } from 'node:fs';
-import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import * as nodeFs from 'node:fs';
+import { constants, type Stats } from 'node:fs';
+import { basename, join } from 'node:path';
 
 import { SeaError } from './errors.js';
 
 export const DEFAULT_MAX_CLOCK_SKEW_SECONDS = 30;
 /** Re-measure at most this often (process monotonic time). */
 const PROBE_EVERY_MS = 60_000;
-const PROBE_FILE = 'sea-clock.probe';
+export const PROBE_FILE = 'sea-clock.probe';
+/** A plant that cannot be unlinked (a directory) is renamed to `<probe>.tampered-<ms>-<hex>` and kept as evidence. */
+export const PROBE_ASIDE_PREFIX = `${PROBE_FILE}.tampered-`;
+/** Heal-and-reopen rounds before falling back to a one-shot probe (concurrent healers, a racing planter). */
+const ATTEMPTS = 5;
+/** Open errors that mean "something other than our file is at the path right now": retried, and tampering if it persists. */
+const CONTESTED = new Set(['ELOOP', 'ENXIO', 'EEXIST', 'EISDIR']);
 
 export interface ClockGuard {
   /** Measured skew in ms (this process minus the reference) when over the tolerance, else null. */
@@ -45,23 +53,59 @@ const CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
 /** A reference reading: ms since the epoch, null (cannot measure: fail open, warned), or tampered (fail closed). */
 export type Reference = number | null | { tampered: string };
 
+/** The file-system calls the probe makes (injectable so tests can reach the error paths). */
+export interface ProbeFs {
+  lstat(path: string): Stats;
+  open(path: string, flags: number, mode: number): number;
+  fstat(fd: number): Stats;
+  unlink(path: string): void;
+  rename(from: string, to: string): void;
+  ftruncate(fd: number, len: number): void;
+  write(fd: number, data: string): void;
+  close(fd: number): void;
+}
+
+const NODE_FS: ProbeFs = {
+  lstat: (p) => nodeFs.lstatSync(p),
+  open: (p, f, m) => nodeFs.openSync(p, f, m),
+  fstat: (fd) => nodeFs.fstatSync(fd),
+  unlink: (p) => nodeFs.unlinkSync(p),
+  rename: (a, b) => nodeFs.renameSync(a, b),
+  ftruncate: (fd, n) => nodeFs.ftruncateSync(fd, n),
+  write: (fd, s) => void nodeFs.writeSync(fd, s),
+  close: (fd) => nodeFs.closeSync(fd),
+};
+
 function defaultWarn(message: string): void {
   process.emitWarning(message, { code: 'SEA_LITE_CLOCK_PROBE' });
 }
+
+type Attempt = { done: Reference } | { retry: string };
+const RETRY = '\0retry';
 
 /**
  * The file system's notion of "now" in ms, from a probe write in `dir`.
  *
  * #6: anything other than our own regular, singly linked file at the probe
- * path (a symlink, a FIFO, a hard link to someone else's file) is a plant:
- * it is unlinked (which never touches what it points at) and a fresh probe is
- * created exclusively. A plant that cannot be removed (a directory) is
- * reported as tampered and the guard fails closed. A data dir that cannot be
+ * path is a plant. A symlink, FIFO or hard link is unlinked (which never
+ * touches what it points at); #8: a directory is renamed aside to
+ * `sea-clock.probe.tampered-<ms>-<hex>` (kept as evidence, reported by
+ * `sea-lite doctor`) instead of blocking every lease decision. Every repair
+ * goes to `warn`. The probe is then recreated exclusively. A plant that
+ * cannot be moved is measured around with a one-shot probe under an
+ * unpredictable name, so planting at the fixed path never switches the guard
+ * on or off.
+ *
+ * #8: other processes heal the same plant at the same time, so ENOENT from
+ * unlink / rename and EEXIST / ELOOP / ENXIO / EISDIR from open (another
+ * healer, or a planter, got there between our lstat and our call) are
+ * retried. Only a path still contested after every attempt, and for the
+ * one-shot probe too, is tampering (fail closed). A data dir that cannot be
  * written at all (read-only mount) is not an attack: the reading is null, the
  * guard allows lease decisions, and `warn` says so once (default: a process
  * warning on stderr); `sea-lite doctor` reports it too.
  */
-export function fsReference(dir: string, warn: (message: string) => void = defaultWarn): () => Reference {
+export function fsReference(dir: string, warn: (message: string) => void = defaultWarn, fs: ProbeFs = NODE_FS): () => Reference {
   const file = join(dir, PROBE_FILE);
   let warned = false;
   const unavailable = (why: string): null => {
@@ -71,49 +115,112 @@ export function fsReference(dir: string, warn: (message: string) => void = defau
     }
     return null;
   };
-  const write = (fd: number): number => {
-    ftruncateSync(fd, 0);
-    writeSync(fd, `${process.pid}\n`);
-    return fstatSync(fd).mtimeMs;
+  const lstatOrNull = (p: string): Stats | null => {
+    try {
+      return fs.lstat(p);
+    } catch {
+      return null;
+    }
   };
-  return () => {
+  /** Write through `fd` once fstat confirms it is a regular, singly linked file; a retry reason otherwise. */
+  const measure = (fd: number): Attempt => {
+    const st = fs.fstat(fd);
+    // why: closes the lstat→open race (O_NOFOLLOW covers links; this covers a hard link made in between).
+    if (!st.isFile() || st.nlink > 1) return { retry: `${file} changed under the probe (${kind(st)})` };
+    fs.ftruncate(fd, 0);
+    fs.write(fd, `${process.pid}\n`);
+    return { done: fs.fstat(fd).mtimeMs };
+  };
+  /** Remove a plant: null when done (or another healer did it), RETRY when it changed under us, a reason when it cannot be moved. */
+  const clear = (pre: Stats): string | null => {
+    const code = (e: unknown): string => (e as NodeJS.ErrnoException).code ?? String(e);
+    if (pre.isDirectory()) {
+      const aside = join(dir, `${PROBE_ASIDE_PREFIX}${Date.now()}-${randomBytes(4).toString('hex')}`);
+      try {
+        fs.rename(file, aside);
+      } catch (e) {
+        return code(e) === 'ENOENT' ? null : code(e);
+      }
+      const moved = lstatOrNull(aside);
+      if (moved !== null && moved.isFile() && moved.nlink === 1) {
+        // why: another healer put a fresh probe there between our lstat and rename; that is no plant.
+        try {
+          fs.unlink(aside);
+        } catch {
+          /* best effort */
+        }
+        return null;
+      }
+      warn(`sea-lite: clock probe ${file} was a directory; moved aside to ${basename(aside)}`);
+      return null;
+    }
+    try {
+      fs.unlink(file);
+    } catch (e) {
+      // why: EISDIR (EPERM on macOS) means a directory replaced what lstat saw; the next attempt renames it aside.
+      if (code(e) === 'EISDIR' || code(e) === 'EPERM') return RETRY;
+      return code(e) === 'ENOENT' ? null : code(e);
+    }
+    warn(`sea-lite: clock probe ${file} was a ${kind(pre)}; unlinked (what it pointed at is untouched)`);
+    return null;
+  };
+  const attempt = (): Attempt => {
     let fd: number | null = null;
     try {
       const pre = lstatOrNull(file);
       if (pre && (!pre.isFile() || pre.nlink > 1)) {
-        try {
-          unlinkSync(file);
-        } catch (e) {
-          return { tampered: `${file} is not our probe (${kind(pre)}) and cannot be removed: ${(e as NodeJS.ErrnoException).code ?? String(e)}` };
-        }
-        fd = openSync(file, CREATE_FLAGS, 0o600);
+        const stuck = clear(pre);
+        if (stuck === RETRY) return { retry: `${file} changed while it was being removed` };
+        if (stuck !== null) return { done: oneShot(`${file} is a ${kind(pre)} that cannot be moved (${stuck}); measured with a one-shot probe`) };
+        fd = fs.open(file, CREATE_FLAGS, 0o600);
       } else {
-        fd = openSync(file, OPEN_FLAGS, 0o600);
+        fd = fs.open(file, OPEN_FLAGS, 0o600);
       }
-      const st = fstatSync(fd);
-      // why: closes the lstat→open race (O_NOFOLLOW covers links; this covers a hard link made in between).
-      if (!st.isFile() || st.nlink > 1) return { tampered: `${file} changed under the probe (${kind(st)})` };
-      return write(fd);
+      return measure(fd);
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
-      if (code === 'ELOOP' || code === 'ENXIO' || code === 'EEXIST') return { tampered: `${file}: ${code} while opening the probe` };
-      return unavailable(`${file}: ${code ?? String(e)}`);
+      if (code !== undefined && CONTESTED.has(code)) return { retry: `${file}: ${code} while opening the probe` };
+      return { done: unavailable(`${file}: ${code ?? String(e)}`) };
     } finally {
-      if (fd !== null) closeSync(fd);
+      if (fd !== null) fs.close(fd);
     }
+  };
+  /** Measure with a probe under a fresh, unpredictable name: nothing can be planted there in advance. */
+  const oneShot = (why: string): Reference => {
+    warn(`sea-lite: clock probe ${why}`);
+    const tmp = `${file}.${process.pid}-${randomBytes(6).toString('hex')}`;
+    let fd: number | null = null;
+    try {
+      fd = fs.open(tmp, CREATE_FLAGS, 0o600);
+      const r = measure(fd);
+      return 'done' in r ? r.done : { tampered: r.retry };
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== undefined && CONTESTED.has(code)) return { tampered: `${tmp}: ${code} while opening the one-shot probe` };
+      return unavailable(`${tmp}: ${code ?? String(e)}`);
+    } finally {
+      if (fd !== null) fs.close(fd);
+      try {
+        fs.unlink(tmp);
+      } catch {
+        /* never created */
+      }
+    }
+  };
+  return () => {
+    let why = '';
+    for (let i = 0; i < ATTEMPTS; i++) {
+      const r = attempt();
+      if ('done' in r) return r.done;
+      why = r.retry;
+    }
+    const r = oneShot(`${file} still contested after ${ATTEMPTS} attempts (${why}); measured with a one-shot probe`);
+    return typeof r === 'object' && r !== null ? { tampered: `${why}; ${r.tampered}` } : r;
   };
 }
 
 function kind(st: Stats): string {
   return st.isSymbolicLink() ? 'symlink' : st.isFIFO() ? 'fifo' : st.isDirectory() ? 'directory' : st.nlink > 1 ? `hard link ×${st.nlink}` : 'not a regular file';
-}
-
-function lstatOrNull(file: string): Stats | null {
-  try {
-    return lstatSync(file);
-  } catch {
-    return null;
-  }
 }
 
 export interface Untrusted {

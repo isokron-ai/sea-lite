@@ -74,6 +74,22 @@ uses semantic versioning once past 0.x.
   still fails open, with a warning.
 - **Short rows.** Import refuses a row with fewer cells than the header.
 
+### Fixed before release (#8, review of #7)
+
+- **Probe DoS.** `mkdir <data-dir>/sea-clock.probe` made every claim, next,
+  heartbeat and lease acquire fail with `probe_tampered` until someone
+  removed it. A planted directory is now renamed aside to
+  `sea-clock.probe.tampered-<ms>-<hex>` (kept as evidence) and the probe
+  recreated; a symlink / FIFO / hard link is still unlinked. Every repair is
+  a `SEA_LITE_CLOCK_PROBE` warning, and `sea-lite doctor` reports a repair
+  and any moved-aside plant as a `clock` warning. A plant that cannot be
+  moved is measured around with a one-shot probe under an unpredictable name.
+- **Healing race.** Processes healing the same plant at once got `EEXIST`
+  (or `ENOENT`, `EISDIR`) and reported tampering, refusing leases for 60 s.
+  These are now retried; only a path still contested after five attempts,
+  and for the one-shot probe as well, is `probe_tampered`. Tested with 12
+  processes healing 25 plants with the race window widened.
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to
