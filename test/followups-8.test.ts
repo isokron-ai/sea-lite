@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { parseCsv } from '../src/audit/export.js';
 import * as redactMod from '../src/audit/redact.js';
-import { fsReference, type ProbeFs } from '../src/core/clock.js';
+import { assertClockTrusted, clockGuard, fsReference, type ProbeFs } from '../src/core/clock.js';
 import { runDoctor } from '../src/doctor.js';
 import { SeaLite } from '../src/store.js';
 
@@ -428,7 +428,7 @@ describe('#8.4 redaction is linear in the size of a cell', () => {
   });
 });
 
-describe('#8.3 the randomness rule for sk- / xox- bodies, edge by edge', () => {
+describe('#8.3 the randomness rule for bare sk- bodies, edge by edge', () => {
   const secret = (s: string) => redactMod.looksLikeSecret(s);
   it('a 16-char segment that switches class only 4 times is a name (sk-Build2024Release-v12)', () => {
     expect(secret('sk-Build2024Release-v12')).toBe(false);
@@ -442,9 +442,9 @@ describe('#8.3 the randomness rule for sk- / xox- bodies, edge by edge', () => {
   it('a 16-char random segment is a key', () => {
     expect(secret('sk-aB3dE5gH7jK9mN1p-qRs')).toBe(true);
   });
-  it('32+ lowercase hex digits are a key even with few class switches (xoxp hex secret)', () => {
-    expect(secret('xo' + 'xp-1234567890-1234567890-' + '0123456789abcdef'.repeat(2))).toBe(true);
-    expect(secret('xo' + 'xp-1234567890-1234567890-' + '0123456789ABCDEF'.repeat(2))).toBe(false); // uppercase: not the hex form, and 2 switches
+  it('a bare sk- with 32+ lowercase hex digits is a key even with few class switches', () => {
+    expect(secret('sk-' + '0123456789abcdef'.repeat(2))).toBe(true);
+    expect(secret('sk-' + '0123456789ABCDEF'.repeat(2))).toBe(false); // uppercase: not the hex form, and 3 switches
   });
 });
 
@@ -609,5 +609,140 @@ describe('#8.7 import (or any finding write) cannot change submit_plan after a d
     s.auditReview('a', { finding_id: 'F', decision: 'approved', submit_plan: 'file it upstream' });
     expect(row(s)).toMatchObject({ review: 'approved', submit_plan: 'file it upstream' });
     s.close();
+  });
+});
+
+// ── #8 review of the stack: an unwritable probe, and the moved-aside pile ──
+
+describe('#8 follow-up: a probe made unwritable (chmod 0444, same uid) is replaced; unmeasurable fails closed', () => {
+  it('EACCES on the probe is healed: the probe is replaced and the 15-minute skew is still caught', () => {
+    const dir = tmp();
+    writeFileSync(join(dir, PROBE), '1\n', { mode: 0o444 });
+    const real = fakeFs({});
+    // root ignores file modes, so the EACCES the planter caused is injected for the probe path
+    let denied = 0;
+    const fs = fakeFs({
+      open(p, f, m) {
+        if (p.endsWith(PROBE) && nodeFs.existsSync(p) && (nodeFs.statSync(p).mode & 0o200) === 0) {
+          denied++;
+          throw errno('EACCES');
+        }
+        return real.open(p, f, m);
+      },
+    });
+    const warnings: string[] = [];
+    const ref = fsReference(dir, (m) => warnings.push(m), fs);
+    expect(typeof ref()).toBe('number');
+    expect(denied).toBe(1);
+    expect(warnings.join('\n')).toMatch(/not writable \(EACCES\); replaced/);
+    expect(nodeFs.statSync(join(dir, PROBE)).mode & 0o777).toBe(0o600);
+    const guard = clockGuard(() => new Date(Date.now() + 15 * 60_000), ref, 30);
+    expect(guard.untrusted()).toMatchObject({ max_ms: 30_000 });
+  });
+
+  it('a probe that cannot be measured at all refuses lease decisions (not "trust this clock"); the knob set to 0 is the operator\'s ack', () => {
+    const down = () => null;
+    expect(() => assertClockTrusted(clockGuard(() => new Date(), down, 30), 'place a claim')).toThrow(expect.objectContaining({ code: 'clock_skew', details: { reason: 'probe_unavailable' } }));
+    expect(() => assertClockTrusted(clockGuard(() => new Date(), down, 0), 'place a claim')).not.toThrow();
+  });
+
+  it('a skewed store whose probe is denied end to end: claims are refused', () => {
+    const dir = tmp();
+    const s = new SeaLite({ dataDir: dir, actor: 'a', now: () => new Date(Date.now() + 15 * 60_000), clockReference: () => null });
+    const t = s.create({ title: 'x', ...NEW });
+    let code = '';
+    try {
+      s.claim({ ticket_ids: [t.ticket.id] });
+    } catch (e) {
+      code = (e as { code: string }).code;
+    }
+    expect(code).toBe('clock_skew');
+    s.close();
+  });
+
+  it('doctor fails the clock check when it cannot measure', async () => {
+    const dir = tmp();
+    new SeaLite({ dataDir: dir, actor: 'a' }).close();
+    const { checkClockWith } = await import('../src/doctor.js');
+    expect(checkClockWith(dir, new Date(), () => null).status).toBe('fail');
+  });
+});
+
+describe('#8 follow-up: moved-aside plants are capped', () => {
+  it('keeps the newest 8, removes the rest and counts them; doctor reports both', async () => {
+    const dir = tmp();
+    const ref = fsReference(dir, () => undefined);
+    for (let i = 0; i < 20; i++) {
+      rmSync(join(dir, PROBE), { force: true });
+      mkdirSync(join(dir, PROBE));
+      writeFileSync(join(dir, PROBE, `n${i}`), String(i));
+      expect(typeof ref()).toBe('number');
+    }
+    const kept = asides(dir).sort();
+    expect(kept).toHaveLength(8);
+    expect(kept.map((a) => readdirSync(join(dir, a))[0]).sort()).toEqual(Array.from({ length: 8 }, (_, i) => `n${12 + i}`).sort());
+    const { runDoctor: doctor } = await import('../src/doctor.js');
+    const clock = (await doctor({ dataDir: dir })).checks.find((c) => c.id === 'clock');
+    expect(clock?.detail).toMatch(/12 older plants were removed/);
+    expect(clock?.data).toMatchObject({ removed_earlier: 12 });
+  });
+});
+
+// ── #8 review of the stack: export writes all bytes or nothing, and stale temp files ──
+
+describe('#8 follow-up: writePrivateFile never replaces an export with a partial one', () => {
+  const setup = () => {
+    const dir = tmp();
+    const out = join(dir, 'tracker.csv');
+    writeFileSync(out, 'old export\n', { mode: 0o600 });
+    return { dir, out, data: Buffer.alloc(204_800, 0x61) };
+  };
+  it('short writes are continued until every byte is written', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { out, data } = setup();
+    writePrivateFile(out, data, { write: (fd, b, off, len) => nodeFs.writeSync(fd, b, off, Math.min(len, 1000)) });
+    expect(nodeFs.statSync(out).size).toBe(data.length);
+  });
+  it('ENOSPC part-way: an error, the old export intact, no temp file left', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { dir, out, data } = setup();
+    let written = 0;
+    const write = (fd: number, b: Buffer, off: number, len: number) => {
+      if (written >= 65_536) throw errno('ENOSPC');
+      const n = nodeFs.writeSync(fd, b, off, Math.min(len, 65_536 - written));
+      written += n;
+      return n;
+    };
+    expect(() => writePrivateFile(out, data, { write })).toThrow(/ENOSPC/);
+    expect(readFileSync(out, 'utf8')).toBe('old export\n');
+    expect(readdirSync(dir)).toEqual(['tracker.csv']);
+  });
+  it('a write that makes no progress is an error, not a loop', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { out, data } = setup();
+    expect(() => writePrivateFile(out, data, { write: () => 0 })).toThrow(/no progress/);
+    expect(readFileSync(out, 'utf8')).toBe('old export\n');
+  });
+  it('a write that claims more than reached the file is caught by the size check before the rename', async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const { dir, out, data } = setup();
+    const lying = (fd: number, b: Buffer, off: number, len: number) => (nodeFs.writeSync(fd, b, off, Math.ceil(len / 2)), len);
+    expect(() => writePrivateFile(out, data, { write: lying })).toThrow(/102400 of 204800 bytes/);
+    expect(readFileSync(out, 'utf8')).toBe('old export\n');
+    expect(readdirSync(dir)).toEqual(['tracker.csv']);
+  });
+});
+
+describe('#8 follow-up: temp files left by a killed export are removed by the next one', () => {
+  it.skipIf(!POSIX)("a dead pid's temp file is removed; a live pid's and other names are kept", async () => {
+    const { writePrivateFile } = await import('../src/audit/export.js');
+    const dir = tmp();
+    const dead = nodeSpawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
+    const stale = `.tracker.csv.${dead}.0123456789ab.tmp`;
+    const live = `.tracker.csv.${process.pid}.0123456789ab.tmp`;
+    const other = `.notes.csv.${dead}.0123456789ab.tmp`;
+    for (const n of [stale, live, other]) writeFileSync(join(dir, n), 'tracker rows', { mode: 0o600 });
+    writePrivateFile(join(dir, 'tracker.csv'), 'id\n');
+    expect(readdirSync(dir).sort()).toEqual([live, other, 'tracker.csv'].sort());
   });
 });
