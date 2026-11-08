@@ -123,6 +123,11 @@ uses semantic versioning once past 0.x.
   import sends approved / rejected / hold back to `pending`; `auditReview`
   still sets them with the decision.
 
+- **Known limit, documented:** `--role operator` is self-asserted, so any
+  process that can run the CLI can `audit import --trusted --role operator`
+  and record its own gate results. README (Limitations) and
+  docs/THREAT-MODEL.md say so; agent-sandbox is to close it. No code change.
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to

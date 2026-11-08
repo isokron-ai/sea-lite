@@ -734,6 +734,15 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   within 10 minutes of the upgrade).
 - **One file, one trust domain.** stdio, or loopback HTTP with bearer
   tokens; no TLS, no per-ticket permissions, no multi-tenant isolation.
+- **`--trusted --role operator` is a known gap (0.7.0).** A trusted import
+  records a findings.csv's `<gate>_result` columns as results, and only the
+  operator role may ask for it — but the role is self-asserted, so any
+  process that can run `sea-lite` (an agent with a shell included) can pass
+  `audit import … --trusted --role operator` and pass its own gates. Until
+  the runner executes agents inside agent-sandbox, which keeps the CLI and
+  the data dir out of their reach, treat the gate results of an audit as
+  only as trustworthy as every process on the machine; a gate's
+  `sea_history` shows which actor recorded its result.
 
 ## Roadmap
 
