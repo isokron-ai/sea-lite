@@ -180,7 +180,7 @@ describe('clock probe hardening', () => {
     expect(ref()).toBeNull();
     expect(ref()).toBeNull();
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/clock check disabled/);
+    expect(warnings[0]).toMatch(/cannot measure the clock/);
     new SeaLite({ dataDir: join(dir, 'd'), actor: 'a' }).close();
     const rep = await runDoctor({ dataDir: join(dir, 'd') });
     expect(rep.checks.find((c) => c.id === 'clock')).toMatchObject({ status: 'ok' });

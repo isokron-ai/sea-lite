@@ -226,7 +226,7 @@ describe('#6.7 probe-path tampering', () => {
     }
   });
 
-  it('a probe that cannot be replaced (a directory planted there) fails closed: lease decisions are refused', () => {
+  it('a directory planted at the probe path no longer blocks lease decisions (#8: it is moved aside)', () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sea-probe-')));
     dirs.push(dir);
     const s = new SeaLite({ dataDir: dir, actor: 'a' });
@@ -234,15 +234,7 @@ describe('#6.7 probe-path tampering', () => {
     s.close();
     spawnSync(process.execPath, ['-e', `require('fs').mkdirSync(${JSON.stringify(join(dir, 'sea-clock.probe'))}); require('fs').writeFileSync(${JSON.stringify(join(dir, 'sea-clock.probe', 'keep'))}, 'x')`]);
     const s2 = new SeaLite({ dataDir: dir, actor: 'a' });
-    const e = (() => {
-      try {
-        s2.claim({ ticket_ids: [t.ticket.id] });
-      } catch (err) {
-        return err as { code: string; details: Record<string, unknown> };
-      }
-      return null;
-    })();
-    expect(e).toMatchObject({ code: 'clock_skew', details: { reason: 'probe_tampered' } });
+    expect(s2.claim({ ticket_ids: [t.ticket.id] }).claims).toHaveLength(1);
     s2.close();
   });
 });

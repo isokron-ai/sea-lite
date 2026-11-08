@@ -15,7 +15,7 @@ import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './
 import { SEA_SCHEMA_META_KEY, SEA_SCHEMA_VERSION } from './db/schema.js';
 import { ACTORS_FILE_NAME, BEARER_FILE_NAME, MIN_TOKEN_CHARS, parseActorsFile } from './http.js';
 import { verifySea } from './rebuild.js';
-import { fsReference, parseMaxSkew } from './core/clock.js';
+import { fsReference, parseMaxSkew, PROBE_ASIDE_KEEP, PROBE_FILE, probeAsides, probeRemovedCount, type Reference } from './core/clock.js';
 import { VERSION } from './version.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
@@ -280,17 +280,48 @@ async function checkCatalog(cwd: string): Promise<DoctorCheck> {
 /** C2-06: the lease clock check needs a writable probe and a clock that agrees with the file system's. */
 function checkClock(dataDir: string, now: Date): DoctorCheck {
   if (!existsSync(dataDir)) return { id: 'clock', status: 'skip', detail: 'no data dir' };
-  let why: string | null = null;
-  const ref = fsReference(dataDir, (m) => (why = m))();
-  if (ref === null) return { id: 'clock', status: 'warn', detail: why ?? 'clock probe failed; lease decisions trust each process clock' };
-  if (typeof ref === 'object') return { id: 'clock', status: 'fail', detail: `clock probe tampered with: ${ref.tampered}; claims and leases will be refused until it is removed` };
+  const notes: string[] = [];
+  return checkClockWith(dataDir, now, fsReference(dataDir, (m) => notes.push(m)), notes);
+}
+
+/** The clock check against a given reference (exported for tests). */
+export function checkClockWith(dataDir: string, now: Date, reference: () => Reference, notes: string[] = []): DoctorCheck {
+  const ref = reference();
   let max: number;
   try {
     max = parseMaxSkew(process.env['SEA_LITE_MAX_CLOCK_SKEW_SECONDS']);
   } catch (e) {
     return { id: 'clock', status: 'fail', detail: errMsg(e) };
   }
+  // #8: plants that were moved aside stay as evidence (the newest few) until someone looks at them.
+  const asides = probeAsides(dataDir);
+  const removed = probeRemovedCount(dataDir);
+  if (ref === null) {
+    const why = notes.join('; ') || 'clock probe failed';
+    return max === 0
+      ? { id: 'clock', status: 'warn', detail: `${why}; accepted because SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0` }
+      : {
+          id: 'clock',
+          status: 'fail',
+          detail:
+            `${why}; claims and leases are refused until the probe can be written. ` +
+            `Recover: restore write permission (\`chmod u+w ${dataDir} ${join(dataDir, PROBE_FILE)}\`, or remove the probe), ` +
+            `or, knowingly, set SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0 to let leases trust each process's clock unmeasured`,
+        };
+  }
+  if (typeof ref === 'object') return { id: 'clock', status: 'fail', detail: `clock probe tampered with: ${ref.tampered}; claims and leases will be refused until it is removed` };
+  const tampering =
+    notes.length > 0 || asides.length > 0 || removed > 0
+      ? `the clock probe was tampered with and repaired (${[
+          ...notes.map((n) => n.replace(/^sea-lite: /, '')),
+          ...asides.map((a) => `${a} was moved aside earlier; inspect and remove it`),
+          ...(removed > 0 ? [`${removed} older plants were removed (only the newest ${PROBE_ASIDE_KEEP} are kept)`] : []),
+        ].join('; ')})`
+      : null;
   const skew = Math.round((now.getTime() - ref) / 1000);
+  if (tampering !== null && !(Math.abs(skew) > max && max > 0)) {
+    return { id: 'clock', status: 'warn', detail: tampering, data: { skew_seconds: skew, moved_aside: asides, removed_earlier: removed } };
+  }
   if (max === 0) return { id: 'clock', status: 'warn', detail: `clock check disabled (SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0); skew ${skew}s`, data: { skew_seconds: skew } };
   return Math.abs(skew) > max
     ? { id: 'clock', status: 'fail', detail: `this clock is ${skew}s off the data dir's file-system clock (tolerance ${max}s): claims and leases will be refused`, data: { skew_seconds: skew } }
