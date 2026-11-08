@@ -688,9 +688,11 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]`.
   A decision (approved / rejected / hold) goes back to `pending` when the
   title, a finding field other than tracker bookkeeping (`pr_or_issue`,
-  `submitted_date`, `tracker_status`, `submit_plan`, `review_note`), or a
-  gate's result / note / evidence changes; a gate back to `pending` takes
-  the finding out of the queue.
+  `submitted_date`, `tracker_status`), or a gate's result / note / evidence
+  changes; a gate back to `pending` takes the finding out of the queue. The
+  plan and note the reviewer decided with (`submit_plan`, `review_note`) are
+  part of the decision: a finding write or an import that changes them
+  reopens it; the reviewer changes them with `audit review … --plan`.
 - **Export / import**: `sea-lite audit export AUDIT [--format csv|xlsx] [--out F]`
   (mode 0600) writes the PostHog tracker's columns in order (gate columns hold
   the gate notes), then one `<gate>_result` column per gate, `review`,

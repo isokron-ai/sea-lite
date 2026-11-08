@@ -101,8 +101,13 @@ export interface UpsertFindingResult {
   redacted?: string[];
 }
 
-/** Tracker bookkeeping: changing these never reopens a decision. */
-const REVIEW_NEUTRAL: readonly string[] = ['pr_or_issue', 'submitted_date', 'tracker_status', 'submit_plan', 'review_note'];
+/**
+ * Tracker bookkeeping: changing these never reopens a decision. #8: the plan
+ * and note a reviewer approved with (`submit_plan`, `review_note`) are part
+ * of the decision, so a finding write or an import that changes them reopens
+ * it; the reviewer changes them through `auditReview`.
+ */
+const REVIEW_NEUTRAL: readonly string[] = ['pr_or_issue', 'submitted_date', 'tracker_status'];
 
 function gatesResolved(ctx: Ctx, audit_id: string, finding_id: string): boolean {
   for (const g of GATES) {

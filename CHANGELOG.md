@@ -116,6 +116,13 @@ uses semantic versioning once past 0.x.
   removes it (`writePrivateFile`, `src/audit/export.ts`). A file or link
   already at the temp name is never opened (`O_EXCL`); another name is tried.
 
+- **Import could change an approved plan.** `submit_plan` (and
+  `review_note`) counted as tracker bookkeeping, so a findings.csv could
+  replace the plan a reviewer approved without reopening the decision. Both
+  are now part of the decision: changing them through a finding write or an
+  import sends approved / rejected / hold back to `pending`; `auditReview`
+  still sets them with the decision.
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to
