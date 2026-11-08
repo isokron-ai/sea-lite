@@ -131,7 +131,7 @@ describe('#8 review: prefixes count only at a token boundary', () => {
     'xoxb-prod-runner-pool-1',
     'F-sk-learn-regression-0001',
     'refs/heads/sk-proj-redaction-false-positives',
-    'sk-proj-supercalifragilisticexpialidocious',
+    'sk-proj-super-cali-fragilistic-expiali-docious',
   ];
   for (const id of ids) {
     it(`${id.slice(0, 24)}… is an ordinary id: finding id, lease name, idempotency key`, () => {

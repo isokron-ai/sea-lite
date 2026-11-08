@@ -143,6 +143,15 @@ uses semantic versioning once past 0.x.
   short subtype keys per format (7 formats) all redacted; simulated residual
   miss rate for random 20-character subtype bodies about 3 in 100 000
   (24+: under 1 in 300 000).
+- **No true-positive regression against main** (third review). A bare or
+  subtype `sk-` whose body is one contiguous run of 20+ letters and digits
+  (the shape of real keys) is redacted with no entropy or case gate; the
+  randomness check applies only to bodies split into `-` / `_` segments,
+  where the original false positives came from. Differential test against
+  a verbatim copy of main's redactor (`test/fixtures/redact-main.ts`):
+  50 000 generated keys per class (lowercase+digit 20/32/64, uppercase+digit
+  40, lowercase letters 40, mixed 20/24/48, short subtypes), every key main
+  redacts is still redacted.
 - **Redaction misses closed**: a letter or digit glued in front of a key,
   base64 of `x`+key, base64 in URL paths, MIME-wrapped base64, hex, and
   nested encodings (up to four levels; printable text nested deeper is
