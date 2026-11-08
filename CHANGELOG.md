@@ -103,6 +103,60 @@ uses semantic versioning once past 0.x.
   recover (restore write permission, or `SEA_LITE_MAX_CLOCK_SKEW_SECONDS=0`
   knowingly).
 
+- **Redaction false positives.** `sk-…` and `xox?-…` matched any long
+  enough id, so `sandbox:sk-prod-cluster-east-0001`,
+  `sk-create-sandbox-attempt-0001`, `xoxb-prod-runner-pool-1` and
+  `F-sk-learn-…` were refused and `refs/heads/sk-proj-…` was redacted from
+  free text. Those two families now need a minimum length and a
+  random-looking body (`randomLooking` in `src/audit/redact.ts`).
+- **Quadratic redaction.** The URL-run pattern and kronicle-lite's
+  `env_secret` pattern backtracked quadratically (about 130 ms per 8 KB
+  cell, 0.8 s per 32 KB word), inside the write transaction. Every pattern is
+  now literal-led or bounded, decoded text is scanned under a budget
+  (exceeded: the text is redacted whole), and callers redact before the
+  transaction opens (`prepareFields` / `prepareFinding`; `audit import`
+  prepares every row first). kronicle-lite's write-time detectors are
+  mirrored with bounded quantifiers; a parity test checks that everything
+  they flag is still redacted. Timing tests on 17 adversarial 128 KB shapes.
+- **Shape, not entropy, for known formats; prefixes at token boundaries**
+  (review of the #8 stack). The randomness gate let about 1 in 6 000
+  generated Anthropic keys and 1 in 8 000 `xoxb` tokens through. `sk-ant-`,
+  `sk-proj-` / `sk-svcacct-` / `sk-admin-`, legacy 48-character `sk-`,
+  `gh?_`, `github_pat_`, `xox?-` (numeric segments, then the secret) and
+  `AKIA` / `ASIA` are now matched by documented shape and length only; the
+  randomness check is left for a bare `sk-` with none of those shapes. A
+  prefix counts only at a token boundary, so `task-<ULID>`, `disk-…`,
+  `helpdesk-…`, `laughs_…`, `snpm_…` are ordinary ids again; a prefix glued
+  to a letter or digit still counts at the format's full length (GitHub 36,
+  fine-grained / project / Anthropic 80+, legacy `sk-` 48). Property test:
+  100 000 generated keys of each of 13 formats, all redacted.
+- **Re-review of the shape rules.** `sk-proj-` / `sk-svcacct-` /
+  `sk-admin-` / `sk-ant-` bodies under 80 characters were no longer
+  redacted (the 80+ rule fired first). A subtype body now counts at 20+
+  characters when it looks random (3+ lower / upper / digit switches, or 2
+  and few vowels), which accepts everything the bare `sk-` rule would; a
+  bare `sk-` with the OpenAI marker (`T3BlbkFJ`) counts at any length.
+  Glued and 80+ rules now also need a key-like body (switches, a digit and
+  a letter), so `refs/heads/sk-proj-<word slug>`, `helpdesk-admin-<slug>`,
+  `task-<48 letters>`, `laughs_<36 digits>` pass; the Slack prefix is
+  `xox[abprse]-` again (`xoxo-…` passes). Property test: 50 000 generated
+  short subtype keys per format (7 formats) all redacted; simulated residual
+  miss rate for random 20-character subtype bodies about 3 in 100 000
+  (24+: under 1 in 300 000).
+- **No true-positive regression against main** (third review). A bare or
+  subtype `sk-` whose body is one contiguous run of 20+ letters and digits
+  (the shape of real keys) is redacted with no entropy or case gate; the
+  randomness check applies only to bodies split into `-` / `_` segments,
+  where the original false positives came from. Differential test against
+  a verbatim copy of main's redactor (`test/fixtures/redact-main.ts`):
+  50 000 generated keys per class (lowercase+digit 20/32/64, uppercase+digit
+  40, lowercase letters 40, mixed 20/24/48, short subtypes), every key main
+  redacts is still redacted.
+- **Redaction misses closed**: a letter or digit glued in front of a key,
+  base64 of `x`+key, base64 in URL paths, MIME-wrapped base64, hex, and
+  nested encodings (up to four levels; printable text nested deeper is
+  redacted).
+
 ### Compatibility
 
 - **0.6.x on a store with audit data.** The new tables have no foreign key to

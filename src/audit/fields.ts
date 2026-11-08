@@ -121,24 +121,45 @@ export { redactText } from './redact.js';
 
 /** Token-typed fields name things (ids, refs): a credential there is refused, never rewritten. */
 const IDENTITY_TOKENS: readonly FieldName[] = ['audit_id', 'finding_id', 'gate_of', 'catalog_fingerprint', 'evidence_ref'];
+/** Closed-set values cannot carry a credential; they are not scanned. */
+const ENUM_FIELDS: ReadonlySet<string> = new Set(FIELD_NAMES.filter((n) => FIELD_TYPES[n] instanceof z.ZodEnum));
 
-/** Caller holds the transaction. `expect_version` guards against a concurrent writer; `managed` is for the audit layer only. */
-export function setFields(ctx: Ctx, ticket_id: string, patch: Record<string, unknown>, expect_version?: number, opts: { managed?: boolean } = {}): SetFieldsResult {
-  mustGetRow(ctx.db, ticket_id);
-  const parsed = parseFields(patch, opts.managed === true);
+declare const PREPARED: unique symbol;
+/** A patch that is parsed, checked and redacted (`prepareFields`): the only thing `setFields` writes. */
+export interface PreparedFields {
+  readonly [PREPARED]: true;
+  readonly values: Readonly<Record<FieldName, FieldValue | null>>;
+  readonly redacted: readonly FieldName[];
+}
+
+/**
+ * Parse a patch, refuse credential-shaped identity tokens and redact free
+ * text. Pure (no store access): #8 runs it before the write transaction
+ * opens, so a slow scan never holds the write lock.
+ */
+export function prepareFields(patch: Record<string, unknown>, managed = false): PreparedFields {
+  const values = parseFields(patch, managed);
   const redacted: FieldName[] = [];
-  for (const [k, v] of Object.entries(parsed) as [FieldName, FieldValue | null][]) {
-    if (typeof v !== 'string') continue;
+  for (const [k, v] of Object.entries(values) as [FieldName, FieldValue | null][]) {
+    if (typeof v !== 'string' || ENUM_FIELDS.has(k)) continue;
     if (IDENTITY_TOKENS.includes(k)) {
       if (looksLikeSecret(v)) throw new SeaError('invalid_input', `field "${k}" looks like a credential; refusing to chain it`, { field: k });
       continue;
     }
     const r = redactText(v, k);
     if (r.redacted) {
-      parsed[k] = r.text;
+      values[k] = r.text;
       redacted.push(k);
     }
   }
+  return { values, redacted } as unknown as PreparedFields;
+}
+
+/** Caller holds the transaction and prepared the patch outside it. `expect_version` guards against a concurrent writer. */
+export function setFields(ctx: Ctx, ticket_id: string, prepared: PreparedFields, expect_version?: number): SetFieldsResult {
+  mustGetRow(ctx.db, ticket_id);
+  const parsed = prepared.values;
+  const redacted = prepared.redacted;
   const current = readFields(ctx.db, ticket_id);
   const version = fieldsVersion(ctx.db, ticket_id);
   if (expect_version !== undefined && expect_version !== version) {
@@ -152,7 +173,7 @@ export function setFields(ctx: Ctx, ticket_id: string, patch: Record<string, unk
     } else if (current[k] !== v) set[k] = v;
   }
   const changed = [...(Object.keys(set) as FieldName[]), ...unset];
-  const red = redacted.length > 0 ? { redacted } : {};
+  const red = redacted.length > 0 ? { redacted: [...redacted] } : {};
   if (changed.length === 0) return { ticket_id, version, changed, ...red };
   const next = version + 1;
   const r = ctx.chain.append({

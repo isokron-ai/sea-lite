@@ -369,7 +369,8 @@ export class SeaLite {
   /** Set / unset typed fields (audit/fields.ts) on a ticket; null unsets. Returns the new version and changed names. */
   setFields(ticket_id: string, patch: Record<string, unknown>, expect_version?: number): fieldsH.SetFieldsResult {
     const ctx = this.ctx();
-    return tx(ctx.db, () => fieldsH.setFields(ctx, resolveId(ctx.db, ticket_id), patch, expect_version));
+    const prepared = fieldsH.prepareFields(patch); // #8: scanned before the transaction
+    return tx(ctx.db, () => fieldsH.setFields(ctx, resolveId(ctx.db, ticket_id), prepared, expect_version));
   }
   fields(ticket_id: string): { ticket_id: string; version: number; fields: fieldsH.FieldMap } {
     const id = resolveId(this.db, ticket_id);
@@ -453,34 +454,32 @@ export class SeaLite {
       if (first !== undefined) throw new SeaError('invalid_input', `CSV row ${lines[k]}: duplicate id "${id}" (first at row ${first})`, { row: lines[k], first_row: first, id });
       seen.set(id, lines[k]!);
     });
+    // #8: every row is parsed and credential-scanned before the one transaction that writes them all.
+    const prepared = rows.map((r, k) => {
+      const fields: Record<string, unknown> = {};
+      const gates: Partial<Record<fieldsH.Gate, auditH.GateInput>> = {};
+      const gate = (g: fieldsH.Gate) => (gates[g] ??= {});
+      for (const [col, raw] of Object.entries(r)) {
+        const v = raw.trim();
+        if (Object.hasOwn(auditH.IMPORT_COLUMNS, col)) {
+          const f = auditH.IMPORT_COLUMNS[col]!;
+          if (v !== '') fields[f] = f === 'affected_count' && /^\d+$/.test(v) ? Number(v) : raw;
+        } else if (Object.hasOwn(auditH.IMPORT_GATE_COLUMNS, col)) gate(auditH.IMPORT_GATE_COLUMNS[col]!).note = raw === '' ? null : raw;
+        else if (Object.hasOwn(auditH.IMPORT_GATE_RESULT_COLUMNS, col) && v !== '') {
+          const g = gate(auditH.IMPORT_GATE_RESULT_COLUMNS[col]!);
+          const claim = /^claimed:(.*)$/.exec(v);
+          if (claim) g.claimed = claim[1]!;
+          else if (opts.trusted) g.result = v;
+          else if (v !== 'pending') g.claimed = v;
+        }
+      }
+      return rowError(lines[k]!, () => auditH.prepareFinding(audit_id, { finding_id: (r['id'] ?? '').trim(), title: r['title'] ?? '', fields, gates }));
+    });
     const ctx = this.ctx();
     return tx(ctx.db, () => {
       const out = { created: 0, updated: 0, unchanged: 0, queued: 0 };
-      rows.forEach((r, k) => {
-        const fields: Record<string, unknown> = {};
-        const gates: Partial<Record<fieldsH.Gate, auditH.GateInput>> = {};
-        const gate = (g: fieldsH.Gate) => (gates[g] ??= {});
-        for (const [col, raw] of Object.entries(r)) {
-          const v = raw.trim();
-          if (Object.hasOwn(auditH.IMPORT_COLUMNS, col)) {
-            const f = auditH.IMPORT_COLUMNS[col]!;
-            if (v !== '') fields[f] = f === 'affected_count' && /^\d+$/.test(v) ? Number(v) : raw;
-          } else if (Object.hasOwn(auditH.IMPORT_GATE_COLUMNS, col)) gate(auditH.IMPORT_GATE_COLUMNS[col]!).note = raw === '' ? null : raw;
-          else if (Object.hasOwn(auditH.IMPORT_GATE_RESULT_COLUMNS, col) && v !== '') {
-            const g = gate(auditH.IMPORT_GATE_RESULT_COLUMNS[col]!);
-            const claim = /^claimed:(.*)$/.exec(v);
-            if (claim) g.claimed = claim[1]!;
-            else if (opts.trusted) g.result = v;
-            else if (v !== 'pending') g.claimed = v;
-          }
-        }
-        let res: auditH.UpsertFindingResult;
-        try {
-          res = auditH.upsertFinding(ctx, audit_id, { finding_id: (r['id'] ?? '').trim(), title: r['title'] ?? '', fields, gates });
-        } catch (e) {
-          if (e instanceof SeaError) throw new SeaError(e.code, `CSV row ${lines[k]}: ${e.message}`, { ...e.details, row: lines[k] });
-          throw e;
-        }
+      prepared.forEach((p, k) => {
+        const res = rowError(lines[k]!, () => auditH.applyFinding(ctx, audit_id, p));
         if (res.created) out.created++;
         else if (res.changed.length > 0) out.updated++;
         else out.unchanged++;
@@ -488,6 +487,16 @@ export class SeaLite {
       });
       return out;
     });
+  }
+}
+
+/** A SeaError from one CSV row, with the row number in front. */
+function rowError<T>(row: number, f: () => T): T {
+  try {
+    return f();
+  } catch (e) {
+    if (e instanceof SeaError) throw new SeaError(e.code, `CSV row ${row}: ${e.message}`, { ...e.details, row });
+    throw e;
   }
 }
 

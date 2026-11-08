@@ -668,10 +668,19 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   fields, gate results and `review` are managed: only the audit calls set
   them. Nothing credential-shaped reaches the append-only chain: free text
   (titles, notes, evidence, a lease intent's `op` / `target`) is redacted —
-  kronicle-lite's write-time detectors, plus vendor key shapes matched
-  without word boundaries (`_ghp_…_`, `key_phx_…`) and URL-encoded or
-  base64 runs decoded and checked — and identity strings (ids, refs, lease
-  names, idempotency keys) that look like a credential are refused.
+  kronicle-lite's write-time detectors, plus vendor key prefixes (also
+  glued, `tokenghp_…`, `1ghp_…`, when the key has its full length), and URL-encoded, base64 /
+  base64url (also inside URL paths and MIME-wrapped over lines) and hex
+  runs decoded and checked, up to four levels deep (printable text nested
+  deeper is redacted) — and identity strings (ids, refs, lease names,
+  idempotency keys) that look like a credential are refused. Known formats
+  are matched by their documented shape (`xoxb-<digits>-<digits>-<secret>`,
+  `sk-proj-` with 80+ characters, …) at a token boundary, so ids like
+  `sandbox:sk-prod-cluster-east-0001`, `xoxb-prod-runner-pool-1` or
+  `task-<ULID>` pass; an `sk-…` body that is one run of 20+ letters and
+  digits is always a key, one split into `-` / `_` segments only when it
+  looks random.
+  The scan is linear in the text and runs before the write transaction.
 - **Findings and gates**: tickets live in project `audit:<id>`, so they stay
   out of every code project's `sea_next` / `sea_list`. A finding gets gate
   sub-tickets `repro`, `intent`, `docs`, `prior_reports`, `refuter`
