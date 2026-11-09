@@ -55,7 +55,7 @@ sea-lite is a small MCP server where tickets are **fenced**:
 - A claim can be **bound to a git worktree**; removing the worktree
   (`sea-lite release-worktree`, a `WorktreeRemove` hook) releases it.
 - Every change is an event on a **hash chain** — the one
-  [kronicle-lite](https://github.com/rafe-walker/kronicle-lite) keeps. The
+  [kronicle-lite](https://github.com/isokron-ai/kronicle-lite) keeps. The
   same SQLite file holds both. `sea_history` shows a ticket's record and
   whether the chain still verifies; `sea-lite rebuild` replays the tables from
   the chain.
@@ -800,7 +800,7 @@ npm run catalog:check    # tools/list etc. must match .mcp-catalog/sea-lite.json
 ```
 
 The tool catalog is a reviewed artifact: `.mcp-catalog/sea-lite.json` is
-the canonical snapshot (via [mcp-catalog-snap](https://github.com/rafe-walker/mcp-catalog-snap))
+the canonical snapshot (via [mcp-catalog-snap](https://github.com/isokron-ai/mcp-catalog-snap))
 and CI fails on drift. Changed a description or schema on purpose? Run
 `npm run catalog:snapshot`, copy the new `sha256` into
 `CATALOG_FINGERPRINT` in `src/catalog.ts` (what `doctor` checks a

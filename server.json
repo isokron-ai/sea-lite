@@ -3,7 +3,7 @@
   "name": "io.github.rafe-walker/sea-lite",
   "description": "Work queue for parallel coding agents: leased path-scoped claims, typed links, hash-chained history",
   "repository": {
-    "url": "https://github.com/rafe-walker/sea-lite",
+    "url": "https://github.com/isokron-ai/sea-lite",
     "source": "github"
   },
   "version": "0.7.1",

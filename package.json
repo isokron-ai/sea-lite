@@ -56,7 +56,7 @@
   "author": "IsoKron (https://isokron.ai)",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rafe-walker/sea-lite.git"
+    "url": "git+https://github.com/isokron-ai/sea-lite.git"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.1.2",
