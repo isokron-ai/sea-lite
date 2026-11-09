@@ -74,9 +74,11 @@ or one shared) can point at the same file; SQLite's write lock and
 
 ## Install
 
-Requires Node ≥ 20. Data lives in `~/.kronicle-lite/kronicle-lite.db` (or
-`--data-dir`, or `$KRONICLE_LITE_DATA_DIR`), shared with kronicle-lite if
-you run that too. One store serves every repository: tickets are keyed by
+Requires Node ≥ 20. Data lives in `~/.kronicle-lite/kronicle-lite.db`,
+shared with kronicle-lite if you run that too. Elsewhere: `--data-dir DIR`,
+else `$SEA_LITE_DATA_DIR`, else `$KRONICLE_LITE_DATA_DIR` (the flag wins,
+then the variables in that order; the library's `dataDir` option counts as
+the flag). One store serves every repository: tickets are keyed by
 project. The `--actor` label is what humans see on the board; you do
 **not** need a different label per terminal — each server process is its
 own session (see [Identity](#identity-who-holds-a-claim)).

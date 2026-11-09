@@ -53,6 +53,11 @@ The first npm release since 0.6.0: it also ships the fixes listed under
   It is now `invalid_input: cannot read FILE: no such file` (or `it is a
   directory`), exit 2; any other file-system error a command hits prints one
   `CODE: message` line instead of a stack.
+- **`SEA_LITE_DATA_DIR` was ignored.** Every other setting has a
+  `SEA_LITE_*` variable, but this one was not read, so a script that set it
+  wrote to the shared default store. It is now supported by the CLI and the
+  library: `--data-dir` (library `dataDir`) > `$SEA_LITE_DATA_DIR` >
+  `$KRONICLE_LITE_DATA_DIR` > `~/.kronicle-lite` (help, README).
 
 ### Fixed (dogfood findings, 2026-11-08)
 

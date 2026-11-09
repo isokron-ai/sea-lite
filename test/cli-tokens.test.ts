@@ -143,3 +143,43 @@ describe('the token file lock and the claim it records (0.7.0 review)', () => {
     expect(readdirSync(data).filter((f) => f.includes('.tmp') || f.endsWith('.lock'))).toEqual([]);
   }, 180_000);
 });
+
+describe('SEA_LITE_DATA_DIR (0.7.0 review: it was ignored)', () => {
+  const run = (args: string[], extra: Record<string, string>) =>
+    spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', cwd: repo, env: { PATH: process.env['PATH'] ?? '', HOME: base, ...extra } });
+  const titles = (dir: string) =>
+    (JSON.parse(run(['list', '--json', '--all-projects', '--data-dir', dir], {}).stdout) as { tickets: { title: string }[] }).tickets.map((t) => t.title);
+
+  it('precedence: --data-dir > SEA_LITE_DATA_DIR > KRONICLE_LITE_DATA_DIR', () => {
+    const viaSea = join(base, 'sea');
+    const viaKl = join(base, 'kl');
+    const viaFlag = join(base, 'flag');
+    expect(run(['create', 'env', '--json'], { SEA_LITE_DATA_DIR: viaSea, KRONICLE_LITE_DATA_DIR: viaKl }).status).toBe(0);
+    expect(run(['create', 'flag', '--json', '--data-dir', viaFlag], { SEA_LITE_DATA_DIR: viaSea, KRONICLE_LITE_DATA_DIR: viaKl }).status).toBe(0);
+    expect(run(['create', 'kl', '--json'], { SEA_LITE_DATA_DIR: '', KRONICLE_LITE_DATA_DIR: viaKl }).status).toBe(0);
+    expect(titles(viaSea)).toEqual(['env']);
+    expect(titles(viaFlag)).toEqual(['flag']);
+    expect(titles(viaKl)).toEqual(['kl']);
+    expect((JSON.parse(run(['whoami', '--json'], { SEA_LITE_DATA_DIR: viaSea, KRONICLE_LITE_DATA_DIR: viaKl }).stdout) as { data_dir: string }).data_dir).toBe(viaSea);
+  });
+
+  it('the library reads it too when no dataDir is given', async () => {
+    const { SeaLite } = await import('../src/store.js');
+    const saved = { sea: process.env['SEA_LITE_DATA_DIR'], kl: process.env['KRONICLE_LITE_DATA_DIR'] };
+    process.env['SEA_LITE_DATA_DIR'] = join(base, 'lib-sea');
+    process.env['KRONICLE_LITE_DATA_DIR'] = join(base, 'lib-kl');
+    try {
+      const s = new SeaLite({ actor: 'x' });
+      expect(s.kronicle.dataDir).toBe(join(base, 'lib-sea'));
+      s.close();
+    } finally {
+      for (const [k, v] of [
+        ['SEA_LITE_DATA_DIR', saved.sea],
+        ['KRONICLE_LITE_DATA_DIR', saved.kl],
+      ] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+});

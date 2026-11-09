@@ -10,12 +10,12 @@
  */
 
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
-import { defaultDataDir } from 'kronicle-lite';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
+import { resolveDataDir } from './core/data-dir.js';
 import { SeaError } from './core/errors.js';
 import {
   holderLabel,
@@ -71,7 +71,7 @@ function list(v: string | true | undefined): string[] {
 }
 
 function dataDirOf(flags: Args['flags']): string {
-  return str(flags['data-dir']) ?? defaultDataDir();
+  return resolveDataDir(str(flags['data-dir']));
 }
 
 const HELP = `sea-lite ${VERSION} — a work queue for parallel coding agents that can't collide
@@ -126,12 +126,13 @@ Audits (driven by the mcp-audit runner through the library; these are the human 
                      claims unless --trusted (operator role)
   sea-lite lease show NAME [--json] | lease release NAME --force   named leases (e.g. sandbox:ID)
 
-Common flags: --data-dir DIR (default $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite, shared with kronicle-lite),
+Common flags: --data-dir DIR (default $SEA_LITE_DATA_DIR, else $KRONICLE_LITE_DATA_DIR, else ~/.kronicle-lite,
+  shared with kronicle-lite; the flag wins over both variables),
   --actor ID, --session S, --project KEY ('*' = every project).
 Identity: a claim belongs to an actor AND a session. serve takes the session from --session,
   SEA_LITE_SESSION or CLAUDE_CODE_SESSION_ID (else a random instance id) and registers it; other
   commands find the session of the agent they run for (see docs/THREAT-MODEL.md "Identity").
-Env: SEA_LITE_ACTOR, SEA_LITE_SESSION, SEA_LITE_PROJECT, SEA_LITE_ROLE, SEA_LITE_TRACKS, SEA_LITE_PROFILE,
+Env: SEA_LITE_DATA_DIR, SEA_LITE_ACTOR, SEA_LITE_SESSION, SEA_LITE_PROJECT, SEA_LITE_ROLE, SEA_LITE_TRACKS, SEA_LITE_PROFILE,
   SEA_LITE_MAX_CLOCK_SKEW_SECONDS (default 30; 0 disables the lease clock check).
 `;
 
