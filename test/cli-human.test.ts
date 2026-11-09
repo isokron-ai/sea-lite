@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { SeaLite } from '../src/store.js';
 import { keyPath } from './helpers.js';
 
 const CLI = join(process.cwd(), 'dist', 'cli.js');
@@ -232,5 +233,36 @@ describe('README tour (G8): every command works from a fresh install', () => {
       const r = sl(args);
       expect({ line, code: r.code, out: r.out + r.err }).toMatchObject({ line, code: Number(expected) });
     }
+  });
+});
+
+describe('board counts (SL-5, SL-7)', () => {
+  it('`board --all` on a closed queue says 0 open, N closed, and the outcome by status', () => {
+    const s = new SeaLite({ dataDir: data, actor: 'alice', project: 'p1' });
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push(s.create({ title: `finding ${i}`, body: '', kind: 'bug', priority: 'medium', tags: [], status: 'triaged', dry_run: false }).ticket.id);
+    const outcomes = ['done', 'done', 'done', 'abandoned'] as const;
+    ids.forEach((id, i) => {
+      const token = s.claim({ ticket_ids: [id] }).claims[0]!.claim_token;
+      s.finish({ ticket_id: id, claim_token: token, outcome: outcomes[i]!, note: 'n', dry_run: false });
+    });
+    s.close();
+
+    const plain = sl(['board', '--project', 'p1']);
+    expect(plain.code).toBe(0);
+    expect(plain.out).toMatch(/; 0 open ticket\(s\);/);
+    const all = sl(['board', '--project', 'p1', '--all']);
+    expect(all.code).toBe(0);
+    expect(all.out).toMatch(/; 0 open, 4 closed ticket\(s\);/);
+    expect(all.out).not.toMatch(/4 open/);
+    expect(all.out).toMatch(/^by status: dropped 1, resolved 3$/m);
+    const j = JSON.parse(sl(['board', '--project', 'p1', '--all', '--json']).out) as { counts: { open: number; closed: number; by_status: Record<string, number> }; tickets: unknown[] };
+    expect(j.counts).toEqual({ open: 0, closed: 4, by_status: { dropped: 1, resolved: 3 } });
+    expect(j.tickets).toHaveLength(4);
+
+    // a mixed queue: open counts only open tickets, with or without --all
+    expect(sl(['create', 'still open', '--triaged', '--project', 'p1']).code).toBe(0);
+    expect(sl(['board', '--project', 'p1']).out).toMatch(/; 1 open ticket\(s\);/);
+    expect(sl(['board', '--project', 'p1', '--all']).out).toMatch(/; 1 open, 4 closed ticket\(s\);/);
   });
 });
