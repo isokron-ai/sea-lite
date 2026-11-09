@@ -697,7 +697,9 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   nothing changed.
 - **Human review queue**: once every gate has a result (`pass | fail | n/a`)
   the finding is `review: pending`; `sea-lite audit queue AUDIT`, then
-  `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]`.
+  `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]
+  --role operator` (a decision needs the operator role; 0.6 let the
+  default agent role approve).
   A decision (approved / rejected / hold) goes back to `pending` when the
   title, a finding field other than tracker bookkeeping (`pr_or_issue`,
   `submitted_date`, `tracker_status`), or a gate's result / note / evidence
@@ -751,11 +753,14 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   within 10 minutes of the upgrade).
 - **One file, one trust domain.** stdio, or loopback HTTP with bearer
   tokens; no TLS, no per-ticket permissions, no multi-tenant isolation.
-- **`--trusted --role operator` is a known gap (0.7.0).** A trusted import
-  records a findings.csv's `<gate>_result` columns as results, and only the
-  operator role may ask for it — but the role is self-asserted, so any
-  process that can run `sea-lite` (an agent with a shell included) can pass
-  `audit import … --trusted --role operator` and pass its own gates. Until
+- **`--role operator` for audits is a known gap (0.7.0).** A trusted import
+  records a findings.csv's `<gate>_result` columns as results, and a review
+  decision approves, rejects or holds a finding; only the operator role may
+  do either — but the role is self-asserted, so any process that can run
+  `sea-lite` (an agent with a shell included) can pass `audit import …
+  --trusted --role operator` or `audit review … approved --role operator`
+  and pass or approve its own findings. The role check stops an agent doing
+  it by accident with its default role, nothing more. Until
   the runner executes agents inside agent-sandbox, which keeps the CLI and
   the data dir out of their reach, treat the gate results of an audit as
   only as trustworthy as every process on the machine; a gate's

@@ -254,11 +254,11 @@ describe('typed field integrity', () => {
     store.auditOpen({ audit_id: 'a', title: 'A' });
     const all = { repro: { result: 'pass' }, intent: { result: 'pass' }, docs: { result: 'pass' }, prior_reports: { result: 'pass' }, refuter: { result: 'pass' } };
     store.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'bug' }, gates: all });
-    store.auditReview('a', { finding_id: 'F', decision: 'approved' });
+    store.as(store.actor, 'operator').auditReview('a', { finding_id: 'F', decision: 'approved' });
     expect(store.auditGate('a', { finding_id: 'F', gate: 'refuter', result: 'fail' }).review).toBe('pending');
     expect(store.auditReviewQueue('a').items.map((i) => i.finding_id)).toEqual(['F']);
     store.auditGate('a', { finding_id: 'F', gate: 'refuter', result: 'pass' });
-    store.auditReview('a', { finding_id: 'F', decision: 'approved' });
+    store.as(store.actor, 'operator').auditReview('a', { finding_id: 'F', decision: 'approved' });
     expect(store.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'design-gap' } }).review).toBe('pending');
   });
 });

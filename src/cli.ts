@@ -117,7 +117,7 @@ Inspecting:
 
 Audits (driven by the mcp-audit runner through the library; these are the human side):
   sea-lite audit queue  AUDIT [--json]                     findings whose gates are all resolved, awaiting review
-  sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P] [--note N]
+  sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P] [--note N]   (operator role)
   sea-lite audit export AUDIT [--format csv|xlsx] [--out FILE]   the findings tracker (CSV to stdout by default)
   sea-lite audit import AUDIT FILE.csv [--trusted]         upsert a findings.csv by finding id; gate results land as
                      claims unless --trusted (operator role)

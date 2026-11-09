@@ -191,7 +191,7 @@ describe('audit findings, gates and the review queue', () => {
   it('every gate resolved → review pending; a human approves; not before', () => {
     const { store } = audit();
     store.auditFinding('posthog-2', { finding_id: 'G1', title: 'filters overwritten', fields: { verdict: 'bug', severity: 'medium' } });
-    expect(codeOf(() => store.auditReview('posthog-2', { finding_id: 'G1', decision: 'approved' }))).toBe('illegal_transition');
+    expect(codeOf(() => store.as(store.actor, 'operator').auditReview('posthog-2', { finding_id: 'G1', decision: 'approved' }))).toBe('illegal_transition');
     for (const g of ['repro', 'intent', 'docs', 'prior_reports'] as const) expect(store.auditGate('posthog-2', { finding_id: 'G1', gate: g, ...GATES_ALL[g] }).review).toBeUndefined();
     expect(store.auditReviewQueue('posthog-2').items).toEqual([]);
     const last = store.auditGate('posthog-2', { finding_id: 'G1', gate: 'refuter', result: 'pass', evidence_ref: 'kl:77' });
@@ -199,7 +199,7 @@ describe('audit findings, gates and the review queue', () => {
     const q = store.auditReviewQueue('posthog-2');
     expect(q.items).toEqual([{ finding_id: 'G1', title: 'filters overwritten', verdict: 'bug', severity: 'medium' }]);
     expect(bytes(q)).toBeLessThan(150);
-    const d = store.auditReview('posthog-2', { finding_id: 'G1', decision: 'approved', submit_plan: 'PR wave 1' });
+    const d = store.as(store.actor, 'operator').auditReview('posthog-2', { finding_id: 'G1', decision: 'approved', submit_plan: 'PR wave 1' });
     expect(d.changed).toEqual(['review', 'submit_plan']);
     expect(store.auditReviewQueue('posthog-2').items).toEqual([]);
   });
@@ -281,7 +281,7 @@ describe('projection', () => {
     const { w1, w2 } = pair(clock);
     w1.auditOpen({ audit_id: 'a1', title: 'A' });
     w1.auditFinding('a1', { finding_id: 'F1', title: 'f', fields: { verdict: 'bug' }, gates: GATES_ALL });
-    w1.auditReview('a1', { finding_id: 'F1', decision: 'hold', note: 'wait for maintainer' });
+    w1.as(w1.actor, 'operator').auditReview('a1', { finding_id: 'F1', decision: 'hold', note: 'wait for maintainer' });
     w1.auditFinding('a1', { finding_id: 'F1', title: 'f renamed', fields: { verdict: 'design-gap', severity: null } });
     const a = w1.leaseAcquire({ name: 'sandbox:r', lease_seconds: 5 });
     const i = w1.leaseIntent({ name: 'sandbox:r', token: a.token, op: 'w' });
@@ -314,3 +314,29 @@ function unzip(buf: Buffer): Record<string, string> {
   }
   return out;
 }
+
+describe('SL-9: review decisions are the operator\'s', () => {
+  it('the library refuses a decision from the agent role and writes nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sea-sl9-'));
+    const store = new SeaLite({ dataDir: dir, actor: 'runner' });
+    try {
+      store.auditOpen({ audit_id: 'a9', title: 'A9' });
+      store.auditFinding('a9', {
+        finding_id: 'F1',
+        title: 'f',
+        gates: { repro: { result: 'pass' }, intent: { result: 'pass' }, docs: { result: 'pass' }, prior_reports: { result: 'pass' }, refuter: { result: 'pass' } },
+      });
+      const before = store.chain.head().seq;
+      expect(store.role).toBe('agent');
+      for (const decision of ['approved', 'rejected', 'hold'] as const) {
+        expect(codeOf(() => store.auditReview('a9', { finding_id: 'F1', decision }))).toBe('forbidden');
+      }
+      expect(store.chain.head().seq).toBe(before);
+      expect(store.auditReviewQueue('a9').items.map((i) => i.finding_id)).toEqual(['F1']);
+      expect(store.as('human', 'operator').auditReview('a9', { finding_id: 'F1', decision: 'approved' }).changed).toContain('review');
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

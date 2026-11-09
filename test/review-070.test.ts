@@ -146,7 +146,7 @@ describe('#6.5 a decision is reopened by any change of substance', () => {
     const { store } = fresh({ actor: 'mcp-audit' });
     store.auditOpen({ audit_id: 'a', title: 'A' });
     store.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'bug', severity: 'high', summary: 's' }, gates: ALL });
-    store.auditReview('a', { finding_id: 'F', decision });
+    store.as(store.actor, 'operator').auditReview('a', { finding_id: 'F', decision });
     return store;
   };
   const review = (s: SeaLite) => parseCsv(s.auditExport('a', 'csv') as string).rows[0]!['review'];

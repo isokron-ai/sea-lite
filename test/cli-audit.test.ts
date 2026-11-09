@@ -43,7 +43,7 @@ describe('sea-lite audit / lease', () => {
     expect(JSON.parse(sl(['audit', 'import', 'ph2', csv, '--trusted', '--role', 'operator', '--json']).out)).toEqual({ created: 0, updated: 0, unchanged: 2, queued: 0 });
     const q = JSON.parse(sl(['audit', 'queue', 'ph2', '--json']).out) as { items: { finding_id: string }[] };
     expect(q.items.map((i) => i.finding_id)).toEqual(['X1']);
-    expect(sl(['audit', 'review', 'ph2', 'X1', 'approved', '--plan', 'PR wave 1'])).toMatchObject({ code: 0, out: expect.stringMatching(/^X1: approved/) });
+    expect(sl(['audit', 'review', 'ph2', 'X1', 'approved', '--plan', 'PR wave 1', '--role', 'operator'])).toMatchObject({ code: 0, out: expect.stringMatching(/^X1: approved/) });
     expect(sl(['audit', 'queue', 'ph2']).out).toBe('review queue empty\n');
     const out = sl(['audit', 'export', 'ph2']).out;
     expect(out.split('\r\n')[1]).toMatch(/^X1,,"dispatcher drops ""limit""",bug,/);
@@ -52,6 +52,27 @@ describe('sea-lite audit / lease', () => {
     const x = join(base, 't.xlsx');
     expect(sl(['audit', 'export', 'ph2', '--format', 'xlsx', '--out', x]).code).toBe(0);
     expect(readFileSync(x).subarray(0, 2).toString()).toBe('PK');
+  });
+
+  it('SL-9: a review decision needs the operator role (the default agent role cannot approve its own findings)', () => {
+    const s = new SeaLite({ dataDir: data, actor: 'mcp-audit' });
+    s.auditOpen({ audit_id: 'ph2', title: 'PostHog 2' });
+    s.close();
+    const csv = join(base, 'findings.csv');
+    writeFileSync(csv, 'id,title,repro_result,intent_result,docs_result,prior_reports_result,refuter_result\nG2,a finding,pass,pass,pass,pass,pass\n');
+    expect(sl(['audit', 'import', 'ph2', csv, '--trusted', '--role', 'operator']).code).toBe(0);
+    for (const decision of ['approved', 'rejected', 'hold']) {
+      const r = sl(['audit', 'review', 'ph2', 'G2', decision]);
+      expect(r.code, decision).toBe(2);
+      expect(r.err, decision).toMatch(/^forbidden: a review decision needs the operator role; "\S+" acts as agent/);
+      expect(sl(['audit', 'review', 'ph2', 'G2', decision, '--role', 'agent']).code, decision).toBe(2);
+    }
+    // nothing was decided: still in the queue, review still pending
+    expect((JSON.parse(sl(['audit', 'queue', 'ph2', '--json']).out) as { items: { finding_id: string }[] }).items.map((i) => i.finding_id)).toEqual(['G2']);
+    expect(sl(['audit', 'export', 'ph2']).out.split('\r\n')[1]).toMatch(/,pending,/);
+    // the operator role (flag or env) can
+    expect(sl(['audit', 'review', 'ph2', 'G2', 'hold'], { SEA_LITE_ROLE: 'operator' })).toMatchObject({ code: 0, out: expect.stringMatching(/^G2: hold/) });
+    expect(sl(['audit', 'review', 'ph2', 'G2', 'approved', '--role', 'operator'])).toMatchObject({ code: 0, out: expect.stringMatching(/^G2: approved/) });
   });
 
   it('lease show, and force release only as operator', () => {

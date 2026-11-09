@@ -28,6 +28,14 @@ uses semantic versioning once past 0.x.
   are plain decimal (`--lease 0x10` was 16). `next --help` printed nothing
   useful and claimed a ticket; it now prints the help. `--trusted` is a
   flag (it swallowed the file name after it).
+- **`audit review` worked with the default agent role (SL-9, security).**
+  An agent with a shell could approve its own findings with
+  `sea-lite audit review AUDIT ID approved`, without even the self-asserted
+  role that `import --trusted` asks for. A review decision (approved,
+  rejected or hold), from the CLI or the library (`auditReview`), now needs
+  the operator role (`--role operator` / `SEA_LITE_ROLE=operator`), else
+  `forbidden` and nothing is written. The role stays self-asserted (README,
+  Limitations).
 - **Raw zod issue arrays as CLI errors (SL-6).** `next --lease 0` and
   `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
   small: expected number to be >=1`.
