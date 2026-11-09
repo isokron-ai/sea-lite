@@ -161,13 +161,15 @@ describe('lazy expiry', () => {
     expect(store.claim({ ticket_ids: [id], actor_id: 'bob' }).claims[0]!.ticket_id).toBe(id);
   });
 
-  it('sea_list sweeps every expired lease it sees', () => {
+  it('sea_list shows every expired lease as free without sweeping it (0.7.1: a read; the next write sweeps)', () => {
     const { store, clock } = fresh();
     claimedTicket(store, 'alice', 'one');
     claimedTicket(store, 'alice', 'two');
     clock.advance(901);
+    const seq = store.chain.head().seq;
     const l = store.list({ include_terminal: false, claimed: 'any', limit: 50, view: 'compact' });
-    expect(l.swept_expired).toBe(2);
+    expect(l.swept_expired).toBe(0);
     expect(l.tickets.every((t) => t.claim === null)).toBe(true);
+    expect(store.chain.head().seq).toBe(seq);
   });
 });

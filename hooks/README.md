@@ -124,8 +124,10 @@ sea-lite scope-check [--paths a,b | PATH...] [--json] [--actor ID] [--session S]
 On exit 2 with `--json`, stdout is
 `{ "schema": "sea-lite.scope-check/1", "ok": false, "error": "<code>", "message": "…", "details": { … } }`.
 
-One SQLite read (plus lazy expiry sweeps); node startup dominates
-(~150–300 ms). cc-anchor's guard caches verdicts per session and path.
+One SQLite read from a snapshot (0.7.1: no write lock, so it does not wait
+for another process's writer; an expired lease is not a conflict and is
+swept by the next write); node startup dominates. cc-anchor's guard caches
+verdicts per session and path.
 
 ## Worktree removal: release the claims bound to it
 

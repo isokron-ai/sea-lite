@@ -232,6 +232,43 @@ export function tx<T>(db: Db, fn: () => T): T {
   return out;
 }
 
+/**
+ * Read paths (scope-check, list): one consistent WAL snapshot, no write lock.
+ * A reader never queues behind another process's writer (a hook calling
+ * scope-check must answer well inside its timeout while a long write runs),
+ * so these paths do not sweep expired leases; they treat them as free
+ * (withoutLapsedClaim, `claim_expires_at > now`) and the next write sweeps.
+ */
+export function readTx<T>(db: Db, fn: () => T): T {
+  try {
+    return db.transaction(fn).deferred();
+  } catch (e) {
+    if (isBusy(e)) throw new SeaError('wait_timeout', 'the store is busy (a snapshot could not be read within the busy timeout); nothing was written, retry', { sqlite: (e as { code: string }).code });
+    throw e;
+  }
+}
+
+/**
+ * The row as a read path reports it: a lapsed lease that sweepExpired would
+ * clear is shown as no claim, without writing. A skewed clock decides
+ * nothing (C2-06), exactly as in sweepExpired.
+ */
+export function withoutLapsedClaim(ctx: Ctx, row: TicketRow): TicketRow {
+  if (row.claim_token_hash === null || !isExpired(row.claim_expires_at, ctx.now)) return row;
+  if (ctx.clock?.untrusted()) return row;
+  return {
+    ...row,
+    claim_token_hash: null,
+    claim_actor: null,
+    claim_expires_at: null,
+    claim_write_count: 0,
+    claim_scope: null,
+    claim_worktree: null,
+    claim_session: null,
+    claim_lease_seconds: null,
+  };
+}
+
 /** SQLITE_BUSY / SQLITE_BUSY_SNAPSHOT / SQLITE_LOCKED from better-sqlite3. */
 export function isBusy(e: unknown): boolean {
   const code = (e as { code?: unknown } | null)?.code;

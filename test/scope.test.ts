@@ -356,14 +356,14 @@ describe('sea_scope_check (hot path)', () => {
     expect(types.filter((x) => x === EVENT.ticket_claimed)).toHaveLength(1);
   });
 
-  it('sweeps expired leases so a dead holder never blocks an edit', () => {
+  it('treats expired leases as free so a dead holder never blocks an edit (0.7.1: read only; the next write sweeps)', () => {
     const { store, clock } = fresh();
     const a = triaged(store, 'A');
     store.claim({ ticket_ids: [a], scope: { paths: ['src'] }, lease_seconds: 10, actor_id: 'alice' });
     expect(store.scopeCheck({ paths: ['src/a.ts'], actor_id: 'bob' }).ok).toBe(false);
     clock.advance(11);
     const r = store.scopeCheck({ paths: ['src/a.ts'], actor_id: 'bob' });
-    expect(r).toMatchObject({ ok: true, swept_expired: 1 });
+    expect(r).toMatchObject({ ok: true, conflicts: [], swept_expired: 0 });
   });
 
   it('is fast: a thousand checks against fifty live scopes (generous bound; ~0.1 s on an idle laptop)', () => {

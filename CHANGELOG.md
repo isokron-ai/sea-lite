@@ -4,6 +4,47 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.7.1] — Unreleased
+
+Hook latency: `scope-check` (cc-anchor's PreToolUse Edit guard), `board`
+and `heartbeat` each start a fresh process per call.
+
+### Changed
+
+- **scope-check and list read from a snapshot, without the write lock.**
+  Both ran in `BEGIN IMMEDIATE` to sweep expired leases first, so a busy
+  writer in another process pushed a single hook call past cc-anchor's 4 s
+  `scope_timeout` (5.6 s behind a 6 s held lock). They now read in one
+  deferred transaction (a WAL reader never waits for a writer) and treat an
+  expired lease as free instead of sweeping it: scope-check already counted
+  only `claim_expires_at > now`; list shows a lapsed claim as no claim and
+  the `claimed` filter (`yes` / `no` / `mine`) agrees. The next write
+  (claim, next, get, ...) sweeps and chains `sea_ticket.claim_expired` as
+  before. `swept_expired` stays in both outputs and is always 0. With a
+  skewed clock (C2-06) list keeps showing the claim, as the sweep kept it.
+- **The CLI loads the MCP SDK, the HTTP transport and doctor only for
+  `serve`, `doctor` and `add-token`** (tsup `splitting: true`, dynamic
+  imports). `dist/cli.js` is now a small wrapper (src/bin.ts) that turns on
+  Node's module compile cache (Node >= 22.1; a no-op elsewhere or with
+  `NODE_DISABLE_COMPILE_CACHE`) and then loads the CLI; the bin path is
+  unchanged.
+- **kronicle-lite's slim entry when installed.** sea-lite imports
+  `kronicle-lite/core` (store, chain, crypto; no MCP SDK) when the installed
+  kronicle-lite has it and falls back to the main entry otherwise
+  (kronicle-lite 0.9.0); any other import failure is reported, not hidden.
+- **kronicle-lite `^0.9.0`** (was `^0.8.0`, locked at 0.8.0): 0.8.0's open
+  ran its schema setup in `BEGIN IMMEDIATE` on every start; 0.9.0 opens a
+  current store with plain reads.
+
+Tests: `test/read-path.test.ts` (open + scope-check and open + list answer
+in < 300 ms while another connection holds the write lock; the CLI answers a
+conflict at once while another process holds it for 6 s; expired claims are
+not conflicts, are listed as free and chain nothing until the next write;
+a loader hook proves scope-check / board / heartbeat / --version never
+import `@modelcontextprotocol/*` from sea-lite's code while serve does; the
+kronicle-lite entry fallback). Two tests that asserted the read-path sweep
+now assert the read-only behaviour.
+
 ## [0.7.0] — Unreleased
 
 The first npm release since 0.6.0: it also ships the fixes listed under

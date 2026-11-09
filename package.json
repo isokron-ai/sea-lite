@@ -1,6 +1,6 @@
 {
   "name": "sea-lite",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "MCP work queue for parallel coding agents: claim fencing, path-scoped claims, typed links, atomic batches, hash-chained history (composes with kronicle-lite).",
   "license": "Apache-2.0",
   "type": "module",
@@ -62,7 +62,7 @@
     "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/server": "^2.4.0",
     "better-sqlite3": "^12.6.0",
-    "kronicle-lite": "^0.8.0",
+    "kronicle-lite": "^0.9.0",
     "picomatch": "^4.0.7",
     "zod": "^4.2.0"
   },

@@ -752,7 +752,8 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   [enforcement table](#enforcement-what-actually-stops-an-edit); the
   pre-commit guard is the backstop.
 - **Lazy expiry.** A lapsed lease is noticed by the next read or write that
-  touches the ticket (or by `sea_list` / `sea_next`, which sweep). Leases
+  touches the ticket (or by `sea_next`, which sweeps; `sea_list` and
+  `scope-check` read without the write lock and show it as free). Leases
   renew on activity; a holder that goes quiet for the whole lease (one
   build longer than 15 min with no tool call) loses it — claim with a
   longer `lease_seconds` (≤ 3600) for that.

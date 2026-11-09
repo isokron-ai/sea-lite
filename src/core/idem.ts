@@ -20,7 +20,9 @@
  * different request after an upgrade.
  */
 
-import { canonicalize, sha256Hex, type ChainEvent } from 'kronicle-lite';
+import type { ChainEvent } from 'kronicle-lite';
+
+import { canonicalize, sha256Hex } from './kl.js';
 
 import { SeaError } from './errors.js';
 import type { Ctx } from './repo.js';

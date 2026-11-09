@@ -184,8 +184,11 @@ the token, which is the useful behaviour for a retry.
 - Lazy expiry: any handler that loads a ticket row first runs `sweepExpired`.
   If the lease has lapsed it clears the claim and appends
   `sea_ticket.claim_expired` once (the cleared row cannot trigger it again).
-  `sea_list` and `sea_next` sweep every lapsed lease in the table so the
-  queue view is honest.
+  `sea_next` sweeps every lapsed lease in the table so the queue view is
+  honest. `sea_list` and `scope-check` (0.7.1) are reads: one snapshot, no
+  write lock, so a hook never waits for another process's writer; they treat
+  a lapsed lease as free (list shows no claim, scope-check counts only
+  `claim_expires_at > now`) and leave the sweep to the next write.
 - Claiming a set: ids are resolved, de-duplicated and sorted; rows are
   checked in that order; any conflict throws and the transaction rolls back,
   so either every ticket in the set is claimed or none is.

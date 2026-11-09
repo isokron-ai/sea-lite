@@ -1881,7 +1881,7 @@
   "protocolVersion": "2025-11-25",
   "server": {
     "name": "sea-lite",
-    "version": "0.7.0"
+    "version": "0.7.1"
   },
   "sha256": "c942f89598073bebf7e41ea0b64730b570e4092c26c3c796ec3278f12764ef31"
 }

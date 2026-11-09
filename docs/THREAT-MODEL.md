@@ -145,7 +145,8 @@ Leases are a crash detector, not a timeout on work; release explicitly.
 
 **Lazy expiry has a window.** Between the moment a lease lapses and the next
 read or write that touches the ticket, the row still shows the old holder.
-Readers go through `sweepExpired`, so what sea-lite *returns* is consistent;
+Readers go through `sweepExpired` or (list, scope-check) treat a lapsed
+lease as free without writing, so what sea-lite *returns* is consistent;
 what a raw `SELECT` returns may not be.
 
 **Leases assume one wall clock.** Every process judges expiry with its own
