@@ -4,7 +4,8 @@
  *
  * Exit codes (every command): 0 ok; 1 a conflict (scope_conflict,
  * already_claimed, a fence error, a refused commit) or a failed check
- * (verify, doctor); 2 bad input or any other error. `scope-check` and
+ * (verify, doctor); 2 bad input (including an unknown or misspelt option:
+ * see cli-args.ts) or any other error. `scope-check` and
  * `precommit` are hook contracts: see hooks/README.md.
  */
 
@@ -50,73 +51,17 @@ import { createServer, PROFILES, type Profile } from './server.js';
 import type { WaitInfo } from './core/wait.js';
 import { DEFAULT_ACTOR, parseRole, parseTracks, SeaLite } from './store.js';
 import { writePrivateFile } from './audit/export.js';
+import { COMMANDS, formatZodError, strictArgs, strictInt, unknownCommand, type Args } from './cli-args.js';
 
 export { VERSION } from './version.js';
 import { VERSION } from './version.js';
-
-interface Args {
-  cmd: string;
-  positional: string[];
-  flags: Record<string, string | true>;
-}
-
-/** Flags that never take a value, so `--triaged "title"` does not swallow the title. */
-const BOOLEAN_FLAGS = new Set([
-  'json',
-  'all',
-  'all-projects',
-  'triaged',
-  'hook',
-  'http',
-  'force',
-  'install',
-  'help',
-  'mine',
-  'core',
-  'allow-insecure-token-file',
-]);
-
-function parseArgs(argv: string[]): Args {
-  const [cmd = 'help', ...rest] = argv;
-  const positional: string[] = [];
-  const flags: Record<string, string | true> = {};
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i]!;
-    // `--` ends the options: everything after it is a positional (a path may start with `-`).
-    if (a === '--') {
-      positional.push(...rest.slice(i + 1));
-      break;
-    }
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq > 2) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
-        continue;
-      }
-      const key = a.slice(2);
-      const next = rest[i + 1];
-      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
-        flags[key] = next;
-        i++;
-      } else {
-        flags[key] = true;
-      }
-    } else {
-      positional.push(a);
-    }
-  }
-  return { cmd, positional, flags };
-}
 
 function str(v: string | true | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
 function num(v: string | true | undefined, flag: string): number | undefined {
-  if (typeof v !== 'string') return undefined;
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < 0) throw new SeaError('invalid_input', `--${flag} must be a non-negative integer, got "${v}"`);
-  return n;
+  return strictInt(v, flag);
 }
 
 /** Comma-separated flag values. */
@@ -414,13 +359,23 @@ function out(flags: Args['flags'], json: unknown, text: () => string): void {
 // ───────────────────────────── commands ─────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
-  const { cmd, positional, flags } = parseArgs(argv);
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  const first = argv[0] ?? 'help';
+  if (first === 'help' || first === '--help' || first === '-h') {
     process.stdout.write(HELP);
     return 0;
   }
-  if (cmd === '--version' || cmd === 'version') {
+  if (first === '--version' || first === 'version') {
     process.stdout.write(VERSION + '\n');
+    return 0;
+  }
+  if (!COMMANDS.includes(first)) {
+    process.stderr.write(`${unknownCommand(first)}\n\n${HELP}`);
+    return 2;
+  }
+  // SL-1: strict. An option the command does not take is an error ("did you mean"), never a no-op.
+  const { cmd, sub, positional, flags } = strictArgs(argv);
+  if (flags['help'] === true) {
+    process.stdout.write(HELP);
     return 0;
   }
 
@@ -695,9 +650,9 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'audit':
-      return auditCmd(positional, flags);
+      return auditCmd(sub!, positional, flags);
     case 'lease': {
-      const [sub, name] = positional;
+      const [name] = positional;
       if ((sub !== 'show' && sub !== 'release') || name === undefined) throw new SeaError('invalid_input', 'usage: sea-lite lease show NAME | lease release NAME --force (operator)');
       const { store } = openAs(flags, null);
       if (sub === 'show') {
@@ -1144,9 +1099,9 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
 }
 
 /** `sea-lite audit …`: the human side of an audit (review queue, export) and the runner's CSV import. */
-function auditCmd(positional: string[], flags: Args['flags']): number {
-  const [sub, audit, ...rest] = positional;
-  if (sub === undefined || audit === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit queue|review|export|import AUDIT_ID …');
+function auditCmd(sub: string, positional: string[], flags: Args['flags']): number {
+  const [audit, ...rest] = positional;
+  if (audit === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit queue|review|export|import AUDIT_ID …');
   const { store } = openAs(flags, null);
   switch (sub) {
     case 'queue': {
@@ -1209,7 +1164,8 @@ main(process.argv.slice(2)).then(
       process.stderr.write(`${err.code}: ${err.message}\n`);
       process.exitCode = CONFLICT_CODES.has(err.code) ? 1 : 2;
     } else if (err instanceof Error && err.name === 'ZodError') {
-      process.stderr.write(`invalid_input: ${err.message}\n`);
+      // SL-6: one readable line per issue, not the raw issue array.
+      process.stderr.write(`invalid_input: ${formatZodError(err as unknown as Parameters<typeof formatZodError>[0])}\n`);
       process.exitCode = 2;
     } else {
       process.stderr.write(`${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
