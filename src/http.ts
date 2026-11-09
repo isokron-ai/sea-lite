@@ -21,12 +21,13 @@
 import { createMcpHandler, type McpRequestContext } from '@modelcontextprotocol/server';
 import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from 'node:http';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 
 import { SeaError } from './core/errors.js';
+import { updateLocked, writeFileFenced } from './core/file-lock.js';
 import { CorruptFileError, ensureDir, readOrCreateOnce } from './core/once-file.js';
 import { ROLES, type Role } from './model/enums.js';
 import { createServer, type Profile } from './server.js';
@@ -157,20 +158,25 @@ export function readActorsFile(file: string): ActorToken[] {
 /**
  * Mint a token for `actor`, append its sha256 to the actors file (created
  * 0600; rewritten atomically) and return the plaintext — shown once.
+ *
+ * 0.7.0 review: the read-modify-write runs under `<file>.lock` (the same
+ * owner-verified, fenced lock as cli-claims.json, core/file-lock.ts).
+ * Unlocked, 16 concurrent `add-token` runs all reported success and kept
+ * 9–12 entries, and the temp file was named by pid only.
  */
 export function addActorToken(file: string, actor: string, role?: Role): { token: string; file: string; created: boolean } {
   ensureDir(dirname(file)); // P2-12: a fresh machine has no data dir yet
-  const created = !existsSync(file);
-  const doc: ActorsFile = created ? { actors: [] } : ActorsFile.parse(JSON.parse(readFileSync(file, 'utf8')));
-  parseActorsFile(JSON.stringify(doc), file); // the existing file must already be valid
-  if (doc.actors.some((e) => e.actor === actor)) throw new Error(`${file}: actor "${actor}" already has a token; remove the entry to rotate it`);
-  const token = newToken();
-  doc.actors.push({ actor, token_sha256: tokenSha256(token), ...(role !== undefined ? { role } : {}) });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(doc, null, 2) + '\n', { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, file);
-  return { token, file, created };
+  const lock = `${file}.lock`;
+  return updateLocked(lock, () => {
+    const created = !existsSync(file);
+    const doc: ActorsFile = created ? { actors: [] } : ActorsFile.parse(JSON.parse(readFileSync(file, 'utf8')));
+    parseActorsFile(JSON.stringify(doc), file); // the existing file must already be valid
+    if (doc.actors.some((e) => e.actor === actor)) throw new Error(`${file}: actor "${actor}" already has a token; remove the entry to rotate it`);
+    const token = newToken();
+    doc.actors.push({ actor, token_sha256: tokenSha256(token), ...(role !== undefined ? { role } : {}) });
+    writeFileFenced(file, JSON.stringify(doc, null, 2) + '\n', lock);
+    return { token, file, created };
+  });
 }
 
 // ───────────────────────────── identity ─────────────────────────────

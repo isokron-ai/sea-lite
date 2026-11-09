@@ -9,6 +9,40 @@ uses semantic versioning once past 0.x.
 The first npm release since 0.6.0: it also ships the fixes listed under
 0.6.1 below (never published to npm) and the ones planned as 0.6.2.
 
+### Fixed (review of the 0.7.0 stack, 2026-11-08)
+
+- **A paused CLI holder could erase a newer claim's token (#15 review).**
+  The `cli-claims.json` lock was taken over by file age alone: a holder
+  paused for over 30 s (SIGSTOP, a debugger, a suspended laptop) lost the
+  lock, then wrote what it had read before the pause over the newer
+  holder's file, so that claim's token was gone and its `release` exited 2.
+  The lock file now names its owner (pid, host, nonce); a waiter takes it
+  over only when the owner is gone (same host: its pid is not alive — at
+  once, however young the lock), never while the owner is alive, unless it
+  has held it for 5 min (a reused pid or a hung process); a lock with no
+  owner to check (sea-lite ≤ 0.6, another host) goes by age as before.
+  Every write is fenced: right before the rename the holder re-reads the
+  lock, and one that lost it writes nothing (`lock_lost`) and redoes its
+  read-modify-write under a fresh lock. Release removes only its own lock,
+  and a takeover checks it removed the lock it judged
+  (`src/core/file-lock.ts`). Left, and documented there: a holder on
+  another host sharing the file system, or one whose pid was reused, paused
+  exactly between the re-read and the rename.
+- **`claim` could fail yet leave the ticket held with no token (#15
+  review).** The claim was written before its token was saved; when the save
+  failed (a lock dated in the future, an unwritable `cli-claims.json`) the
+  command exited 1 or 2 and the ticket stayed held for the whole lease with
+  no token anywhere. `claim` and `next` now release what they claimed (with
+  its token) when the token cannot be saved and report `rolled back …;
+  nothing is held`, so the claim and its token persist together or not at
+  all. A lock dated more than 2 s in the future is stale-suspect: taken over
+  after 5 s unchanged, instead of a 30 s wait and `wait_timeout`.
+- **Concurrent `add-token` lost tokens while reporting success.** 16
+  concurrent runs kept 9–12 entries (an unlocked read-modify-write, a temp
+  file named by pid only). The actors file is now updated under
+  `<file>.lock` with the same owner-verified, fenced lock; 16 concurrent runs
+  keep 16.
+
 ### Fixed (dogfood findings, 2026-11-08)
 
 - **Concurrent CLI releases could fail on Windows** (CI, windows-latest:

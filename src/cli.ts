@@ -250,6 +250,42 @@ function rememberTokens(dataDir: string, who: ResolvedIdentity, got: { ticket_id
   });
 }
 
+/**
+ * Save the tokens of claims this command just took, or give the claims back.
+ * 0.7.0 review: when the token file could not be written (its lock held
+ * past the wait, a lock dated in the future, an unwritable file) `claim`
+ * exited 1 yet the ticket stayed held for the whole lease with no token
+ * anywhere, so nobody could release it. Now the claim and its saved token
+ * persist together or not at all: on failure each claim is released with
+ * its token, then the error is reported (with `rolled_back`). A re-claim
+ * that rotated the caller's own token is released too: the old token is
+ * already void.
+ */
+function rememberOrRollBack(store: SeaLite, dataDir: string, who: ResolvedIdentity, got: { ticket_id: string; claim_token: string; expires_at: string }[]): void {
+  try {
+    rememberTokens(dataDir, who, got);
+  } catch (e) {
+    const rolledBack: string[] = [];
+    const stillHeld: string[] = [];
+    for (const g of got) {
+      try {
+        store.release(S.ReleaseInput.parse({ ticket_id: g.ticket_id, claim_token: g.claim_token, reason: 'the CLI could not save the claim token' }));
+        rolledBack.push(g.ticket_id);
+      } catch {
+        stillHeld.push(g.ticket_id);
+      }
+    }
+    const what =
+      stillHeld.length === 0
+        ? `the claim was rolled back (released ${rolledBack.map((id) => id.slice(0, 8)).join(', ')}); nothing is held`
+        : `could not roll back ${stillHeld.map((id) => id.slice(0, 8)).join(', ')}: it stays held until its lease lapses`;
+    const details = { rolled_back: rolledBack, still_held: stillHeld };
+    if (e instanceof SeaError) throw new SeaError(e.code, `${e.message}; ${what}`, { ...e.details, ...details });
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new SeaError('invalid_input', `could not save the CLI claim token (${reason}); ${what}`, { reason: 'token_not_saved', cause: reason, ...details });
+  }
+}
+
 // ───────────────────────────── formatting ─────────────────────────────
 
 function fmtLeft(expiresAt: string, now = Date.now()): string {
@@ -375,7 +411,7 @@ async function main(argv: string[]): Promise<number> {
         const r = await store.claimWait(
           S.ClaimInput.parse({ ticket_ids: positional, ...(lease !== undefined ? { lease_seconds: lease } : {}), ...(scope ? { scope } : {}), ...(wait !== undefined ? { wait_seconds: wait } : {}) }),
         );
-        rememberTokens(dataDir, identity, r.claims);
+        rememberOrRollBack(store, dataDir, identity, r.claims);
         out(flags, { ...r, holder: holderLabel(identity.actor, identity.session) }, () =>
           r.claims
             .map(
@@ -397,7 +433,7 @@ async function main(argv: string[]): Promise<number> {
           ...(str(flags['tag']) !== undefined ? { tag: str(flags['tag']) } : {}),
         }),
       );
-      if (r.ticket && r.claim_token && r.expires_at) rememberTokens(dataDir, identity, [{ ticket_id: r.ticket.id, claim_token: r.claim_token, expires_at: r.expires_at }]);
+      if (r.ticket && r.claim_token && r.expires_at) rememberOrRollBack(store, dataDir, identity, [{ ticket_id: r.ticket.id, claim_token: r.claim_token, expires_at: r.expires_at }]);
       out(flags, r, () =>
         r.ticket
           ? `claimed ${r.ticket.id.slice(0, 8)}  ${r.ticket.title}  as ${holderLabel(identity.actor, identity.session)} until ${r.expires_at!.slice(11, 19)}Z` +
