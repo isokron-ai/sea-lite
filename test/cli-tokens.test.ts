@@ -28,10 +28,15 @@ afterEach(() => rmSync(base, { recursive: true, force: true, maxRetries: 10, ret
 const env = (i: number) => ({ PATH: process.env['PATH'] ?? '', HOME: base, SEA_LITE_ACTOR: `a${i}`, SEA_LITE_SESSION: `s${i}` });
 const sl = (i: number, args: string[]) => spawnSync(process.execPath, [CLI, ...args, '--data-dir', data], { encoding: 'utf8', cwd: repo, env: env(i) });
 const slAsync = (i: number, args: string[]) =>
-  new Promise<number | null>((resolve) => {
-    const p = spawn(process.execPath, [CLI, ...args, '--data-dir', data], { cwd: repo, env: env(i), stdio: 'ignore' });
-    p.on('exit', (code) => resolve(code));
+  new Promise<{ code: number | null; err: string }>((resolve) => {
+    const p = spawn(process.execPath, [CLI, ...args, '--data-dir', data], { cwd: repo, env: env(i), stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    p.stderr.on('data', (d: Buffer) => (err += d.toString()));
+    p.on('exit', (code) => resolve({ code, err }));
   });
+/** Every process exited 0; else name the failures and their stderr (CI on Windows showed only "expected false to be true"). */
+const allOk = (rs: { code: number | null; err: string }[]) =>
+  expect(rs.map((r, i) => ({ i, ...r })).filter((r) => r.code !== 0)).toEqual([]);
 const tokens = () => (JSON.parse(readFileSync(join(data, 'cli-claims.json'), 'utf8')) as { claims: Record<string, unknown> }).claims;
 
 describe('cli-claims.json under concurrency (C2-02)', () => {
@@ -39,11 +44,11 @@ describe('cli-claims.json under concurrency (C2-02)', () => {
     const N = 16;
     const ids = Array.from({ length: N }, (_, i) => (JSON.parse(sl(i, ['create', `t${i}`, '--triaged', '--json']).stdout) as { ticket: { id: string } }).ticket.id);
     const codes = await Promise.all(ids.map((id, i) => slAsync(i, ['claim', id, '--paths', `src/f${i}.ts`, '--lease', '600'])));
-    expect(codes.every((c) => c === 0)).toBe(true);
+    allOk(codes);
     expect(Object.keys(tokens()).sort()).toEqual([...ids].sort());
     // Concurrent releases forget only their own tokens.
     const rel = await Promise.all(ids.map((id, i) => slAsync(i, ['release', id])));
-    expect(rel.every((c) => c === 0)).toBe(true);
+    allOk(rel);
     expect(tokens()).toEqual({});
     expect(readFileSync(join(data, 'cli-claims.json'), 'utf8')).not.toMatch(/token/);
   }, 180_000);
