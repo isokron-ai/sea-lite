@@ -69,6 +69,9 @@ The first npm release since 0.6.0: it also ships the fixes listed under
   + get, off the claim path); the refusals also assert that the wait loop
   never slept (`waitCounters`, core/wait.ts). Both injected delays fail them;
   without them the suite passes with half the cores busy.
+- **Docs.** THREAT-MODEL said the clock check exists "since 0.6.2", and
+  MODEL.md dated the `unverifiable_key` refusal 0.6.2: 0.6.2 never shipped,
+  both first ship in 0.7.0.
 
 ### Fixed (dogfood findings, 2026-11-08)
 
@@ -160,6 +163,14 @@ The first npm release since 0.6.0: it also ships the fixes listed under
 - **Raw zod issue arrays as CLI errors (SL-6).** `next --lease 0` and
   `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
   small: expected number to be >=1`.
+- **The version was stated two ways (SL-11).** `package.json` and the
+  lockfile said 0.6.1 (never tagged or published; npm `latest` is 0.6.0), so
+  `--version` and the help banner did too, while the CHANGELOG called this
+  release the "0.7.0 candidate". Now 0.7.0 in `package.json` and the
+  lockfile, `server.json` (both fields), `CATALOG_VERSION` and the catalog
+  snapshot, and this heading (`[0.7.0] — Unreleased`; the unpublished 0.6.1
+  and planned 0.6.2 sections are marked as shipping in 0.7.0).
+  `test/version.test.ts` pins every one of them to `package.json`.
 
 ### Added (audit orchestration)
 

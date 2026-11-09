@@ -151,7 +151,7 @@ request, minus the key, `dry_run`, `verbose`, `confirm`, claim tokens and the
 caller; ticket ids resolved; `sea_apply` after template expansion). A reuse
 whose hash differs is `invalid_input` (`reason: "request_mismatch"`),
 never a replay. A key bound to an event from before request hashes (< 0.6.0)
-is `invalid_input` (`reason: "unverifiable_key"`), not a replay (0.6.2).
+is `invalid_input` (`reason: "unverifiable_key"`), not a replay (0.7.0).
 
 Claims are not keyed: a repeated `sea_claim` by the current holder rotates
 the token, which is the useful behaviour for a retry.

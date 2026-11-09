@@ -151,7 +151,7 @@ what a raw `SELECT` returns may not be.
 **Leases assume one wall clock.** Every process judges expiry with its own
 clock against instants other processes wrote. On one host that is one
 clock; across a network share, a VM bind mount (Docker Desktop after host
-sleep) or a faked clock it may not be. Since 0.6.2 each process compares its
+sleep) or a faked clock it may not be. Since 0.7.0 each process compares its
 clock with the file-system time stamped on a probe file in the data dir and
 refuses lease decisions (`clock_skew` on claim / next / refresh / heartbeat;
 the auto-heartbeat and the lazy sweep skip) when they differ by more than
