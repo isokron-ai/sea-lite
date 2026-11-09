@@ -58,6 +58,17 @@ The first npm release since 0.6.0: it also ships the fixes listed under
   wrote to the shared default store. It is now supported by the CLI and the
   library: `--data-dir` (library `dataDir`) > `$SEA_LITE_DATA_DIR` >
   `$KRONICLE_LITE_DATA_DIR` > `~/.kronicle-lite` (help, README).
+- **The relaxed timing bounds no longer caught a slowdown (#20 review).** A
+  300 ms sleep injected in `claim()` passed the whole suite (91 s → 195 s),
+  and so did 1.5 s added to the no-wait refusal (bound `< 2 s`). New
+  calibrated tests (`test/wait.test.ts`): the best of 5 runs (a stall must
+  hit every run; an injected delay is in every run) of an uncontended claim,
+  sync and through `claimWait`, and of each refusal that must not wait
+  (`scope_conflict`, `already_claimed`, `not_found`, an empty queue) must
+  stay under max(100 ms, 20 × a baseline measured in the same test on create
+  + get, off the claim path); the refusals also assert that the wait loop
+  never slept (`waitCounters`, core/wait.ts). Both injected delays fail them;
+  without them the suite passes with half the cores busy.
 
 ### Fixed (dogfood findings, 2026-11-08)
 

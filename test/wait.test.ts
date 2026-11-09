@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { SeaError } from '../src/core/errors.js';
+import { waitCounters } from '../src/core/wait.js';
 import { SeaLite } from '../src/store.js';
 import { claimedTicket, codeOf } from './helpers.js';
 import { assertStrictOutput, connectInMemory, parse, type ToolResult } from './mcp-helpers.js';
@@ -40,6 +41,37 @@ async function rejected(p: Promise<unknown>): Promise<SeaError> {
   }
   throw new Error('expected a rejection');
 }
+
+/**
+ * Calibrated timing (0.7.0 review of #20). #20 relaxed the absolute bounds
+ * until a 300 ms sleep injected in claim() and a 1.5 s delay in the refusal
+ * path both passed. These bounds are meaningful and still load-proof:
+ *
+ * - best of n: a scheduler stall must hit every run to fail a test, while an
+ *   injected delay is in every run;
+ * - relative: the bound is a multiple of a baseline measured in the same
+ *   test, on an operation off the claim path (create + get), so a loaded
+ *   machine raises the bound with the cost; a floor covers timer noise;
+ * - behavioural where possible: "refused at once" also asserts that the wait
+ *   loop never slept (waitCounters), whatever the clock says.
+ */
+async function bestMs(n: number, f: () => unknown): Promise<number> {
+  let best = Infinity;
+  for (let i = 0; i < n; i++) {
+    const t0 = performance.now();
+    await f();
+    best = Math.min(best, performance.now() - t0);
+  }
+  return best;
+}
+const baselineMs = (s: SeaLite) =>
+  bestMs(5, () => {
+    s.get({ id: create(s, 'baseline') });
+  });
+/** ~1–3 ms per claim on an idle laptop, under 10 ms with half the cores busy; an injected 300 ms (or 1.5 s) is far above. */
+const FLOOR_MS = 100;
+const FACTOR = 20;
+const boundOf = (base: number) => Math.max(FLOOR_MS, FACTOR * base);
 
 describe('claimWait / nextWait (in-process)', () => {
   it('waits for an overlapping scope to be released, then claims; reports who held it and that it was released', async () => {
@@ -111,7 +143,7 @@ describe('claimWait / nextWait (in-process)', () => {
     expect(codeOf(() => b.claim({ ticket_ids: [t2], scope: { paths: ['src/x'] } }))).toBe('scope_conflict');
     const now = Date.now();
     expect((await rejected(b.claimWait({ ticket_ids: [t2], scope: { paths: ['src/x'] } }))).code).toBe('scope_conflict');
-    expect(Date.now() - now).toBeLessThan(2_000); // no wait: refused at once (no 250 ms poll, no 1 s wait)
+    expect(Date.now() - now).toBeLessThan(2_000); // sanity only; the calibrated "refused at once" test below is the real bound
   });
 
   it('refusals that waiting cannot fix fail at once (unknown ticket, bad input)', async () => {
@@ -180,6 +212,55 @@ describe('claimWait / nextWait (in-process)', () => {
     const e = await rejected(b.nextWait({ include_unassigned: true, scope: { paths: ['CHANGELOG.md'] }, wait_seconds: 1 }));
     expect(e.code).toBe('wait_timeout');
     expect(e.details).toMatchObject({ blocked_by: { kind: 'scope_conflict', holder: 'alice' } });
+  });
+});
+
+describe('claim cost and immediate refusals (calibrated, 0.7.0 review)', () => {
+  it('an uncontended claim (sync and through claimWait) costs about what a create does', async () => {
+    const s = store();
+    const ids = Array.from({ length: 11 }, (_, i) => create(s, `c${i}`));
+    s.claim({ ticket_ids: [ids[10]!] }); // warm up (statements, JIT)
+    const base = await baselineMs(s);
+    let i = 0;
+    const sync = await bestMs(5, () => s.claim({ ticket_ids: [ids[i++]!] }));
+    const viaWait = await bestMs(5, () => s.claimWait({ ticket_ids: [ids[i++]!], wait_seconds: 5 }));
+    expect(sync, `claim ${sync.toFixed(1)} ms, baseline ${base.toFixed(1)} ms`).toBeLessThan(boundOf(base));
+    expect(viaWait, `claimWait ${viaWait.toFixed(1)} ms, baseline ${base.toFixed(1)} ms`).toBeLessThan(boundOf(base));
+  });
+
+  it('a refusal without wait_seconds is immediate: the wait loop never sleeps, and it costs about what a create does', async () => {
+    const a = store();
+    const b = a.as('bob', 'agent', { session: 's-bob' });
+    const t1 = create(a, 'one');
+    const t2 = create(a, 'two');
+    a.claim({ ticket_ids: [t1], scope: { paths: ['src'] } });
+    expect(codeOf(() => b.claim({ ticket_ids: [t2], scope: { paths: ['src/x'] } }))).toBe('scope_conflict'); // warm up
+    const base = await baselineMs(a);
+    const sleeps = waitCounters.sleeps;
+    const sync = await bestMs(5, () => expect(codeOf(() => b.claim({ ticket_ids: [t2], scope: { paths: ['src/x'] } }))).toBe('scope_conflict'));
+    const scoped = await bestMs(5, async () => expect((await rejected(b.claimWait({ ticket_ids: [t2], scope: { paths: ['src/x'] } }))).code).toBe('scope_conflict'));
+    const held = await bestMs(5, async () => expect((await rejected(b.claimWait({ ticket_ids: [t1] }))).code).toBe('already_claimed'));
+    expect(waitCounters.sleeps, 'no wait loop iteration').toBe(sleeps);
+    for (const [what, ms] of [
+      ['claim', sync],
+      ['claimWait scope_conflict', scoped],
+      ['claimWait already_claimed', held],
+    ] as const) {
+      expect(ms, `${what} ${ms.toFixed(1)} ms, baseline ${base.toFixed(1)} ms`).toBeLessThan(boundOf(base));
+    }
+  });
+
+  it('refusals waiting cannot fix (unknown ticket, empty queue) skip the wait even with wait_seconds', async () => {
+    const b = store('bob');
+    create(b, 'warm');
+    const base = await baselineMs(b);
+    const fresh = store('carol'); // an empty queue
+    const sleeps = waitCounters.sleeps;
+    const unknown = await bestMs(5, async () => expect((await rejected(b.claimWait({ ticket_ids: ['deadbeefdead'], wait_seconds: 10 }))).code).toBe('not_found'));
+    const empty = await bestMs(5, async () => expect((await fresh.nextWait({ include_unassigned: true, wait_seconds: 10 })).ticket).toBeNull());
+    expect(waitCounters.sleeps, 'no wait loop iteration').toBe(sleeps);
+    expect(unknown, `not_found ${unknown.toFixed(1)} ms, baseline ${base.toFixed(1)} ms`).toBeLessThan(boundOf(base));
+    expect(empty, `empty queue ${empty.toFixed(1)} ms, baseline ${base.toFixed(1)} ms`).toBeLessThan(boundOf(base));
   });
 });
 
