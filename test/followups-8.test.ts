@@ -404,27 +404,38 @@ describe('#8.4 redaction is linear in the size of a cell', () => {
   };
   const time = (f: () => void) => {
     let best = Infinity;
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       const t0 = performance.now();
       f();
       best = Math.min(best, performance.now() - t0);
     }
     return best;
   };
+  /**
+   * Growth, not wall clock: 8× the input should cost ~8× the time (linear),
+   * not ~64× (quadratic). Relative to the same run, so a loaded machine slows
+   * both sides alike; best of 5, a floor for tiny timings, and one re-measure
+   * before failing (a real quadratic fails both; a scheduler stall does not).
+   */
+  const ratio = (small: string, big: string) => {
+    const ts = time(() => redactMod.redactText(small, 'x'));
+    const tb = time(() => redactMod.redactText(big, 'x'));
+    return { r: tb / Math.max(ts, 2), msg: `${ts.toFixed(2)} ms → ${tb.toFixed(2)} ms` };
+  };
+  const expectLinear = (small: string, big: string) => {
+    let m = ratio(small, big);
+    if (m.r >= 24) m = ratio(small, big);
+    expect(m.r, m.msg).toBeLessThan(24);
+  };
   for (const [what, make] of Object.entries(shapes)) {
     it(what, () => {
-      const small = make(8_192);
-      const big = make(65_536);
-      const ts = time(() => redactMod.redactText(small, 'x'));
-      const tb = time(() => redactMod.redactText(big, 'x'));
-      // 8× the input: linear is ~8× the time, quadratic ~64×. Allow noise, and a floor for tiny timings. (8 KB → 64 KB keeps the suite's CPU load low.)
-      expect(tb, `${ts.toFixed(2)} ms → ${tb.toFixed(2)} ms`).toBeLessThan(Math.max(ts, 2) * 24);
-      expect(tb).toBeLessThan(2_000);
+      // (8 KB → 64 KB keeps the suite's CPU load low.)
+      expectLinear(make(8_192), make(65_536));
     });
   }
-  it('an 8 KB cell takes well under the 130 ms the review measured', () => {
-    const cell = r3(ALNUM + '-_', 8192); // one 8 KB word: the old URL-run regex was quadratic in it
-    expect(time(() => redactMod.redactText(cell, 'x'))).toBeLessThan(25);
+  it('an 8 KB cell is linear too (the review measured 130 ms for it with a quadratic URL-run regex)', () => {
+    // one long word: the old URL-run regex was quadratic in it
+    expectLinear(r3(ALNUM + '-_', 1024), r3(ALNUM + '-_', 8192));
   });
 });
 
