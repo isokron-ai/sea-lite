@@ -4,7 +4,10 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased]
+## [0.7.0] — Unreleased
+
+The first npm release since 0.6.0: it also ships the fixes listed under
+0.6.1 below (never published to npm) and the ones planned as 0.6.2.
 
 ### Fixed (dogfood findings, 2026-11-08)
 
@@ -88,7 +91,7 @@ uses semantic versioning once past 0.x.
   `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
   small: expected number to be >=1`.
 
-### Added (0.7.0 candidate: audit orchestration)
+### Added (audit orchestration)
 
 - **Audit tracker for the mcp-audit runner** (library + CLI; no new MCP
   tools, so `tools/list` is unchanged): named exclusive leases with a
@@ -288,7 +291,7 @@ uses semantic versioning once past 0.x.
 - `swept_expired` counts only leases actually swept (a skewed process sweeps
   none).
 
-### Fixed (0.6.2)
+### Fixed (planned as 0.6.2; ships in 0.7.0)
 
 - **Lease clock skew (C2-06).** Expiry compared wall-clock instants written
   by different processes, so a process 15 min ahead took over every live
@@ -314,6 +317,9 @@ uses semantic versioning once past 0.x.
   ("nothing was written, retry"; CLI exit 1) instead of a raw stack trace.
 
 ## [0.6.1] — 2026-11-01
+
+Never tagged or published to npm (npm `latest` stayed 0.6.0); these fixes
+first ship in 0.7.0.
 
 Fixes from hardening round 2 (hooks, protocol and chaos tracks) and the live
 full-stack runs, plus kronicle-lite ^0.8.0.

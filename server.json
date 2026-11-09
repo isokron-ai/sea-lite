@@ -6,13 +6,13 @@
     "url": "https://github.com/rafe-walker/sea-lite",
     "source": "github"
   },
-  "version": "0.6.1",
+  "version": "0.7.0",
   "websiteUrl": "https://isokron.ai",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "sea-lite",
-      "version": "0.6.1",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       },

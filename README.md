@@ -703,8 +703,7 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
 - **Human review queue**: once every gate has a result (`pass | fail | n/a`)
   the finding is `review: pending`; `sea-lite audit queue AUDIT`, then
   `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]
-  --role operator` (a decision needs the operator role; 0.6 let the
-  default agent role approve).
+  --role operator` (a decision needs the operator role).
   A decision (approved / rejected / hold) goes back to `pending` when the
   title, a finding field other than tracker bookkeeping (`pr_or_issue`,
   `submitted_date`, `tracker_status`), or a gate's result / note / evidence
