@@ -24,6 +24,7 @@ import * as hist from './handlers/history.js';
 import * as links from './handlers/links.js';
 import * as statsH from './handlers/stats.js';
 import * as tickets from './handlers/tickets.js';
+import { envDataDir } from './core/data-dir.js';
 import { waitForClaim, type Blocker, type WaitInfo } from './core/wait.js';
 import { ROLES, TRACKS, type Role, type Track } from './model/enums.js';
 import { DEFAULT_LIFECYCLE, type LifecycleConfig } from './model/lifecycle.js';
@@ -31,7 +32,7 @@ import type * as S from './model/schemas.js';
 import { rebuild, verifySea, type RebuildResult, type SeaVerifyResult } from './rebuild.js';
 
 export interface SeaLiteOptions {
-  /** Directory of the shared kronicle-lite store (default ~/.kronicle-lite). */
+  /** Directory of the shared kronicle-lite store (default $SEA_LITE_DATA_DIR, else $KRONICLE_LITE_DATA_DIR, else ~/.kronicle-lite). */
   dataDir?: string;
   /** In-memory store with an ephemeral identity (tests). */
   memory?: boolean;
@@ -149,7 +150,9 @@ export class SeaLite {
       this.kronicle = opts.kronicle;
       this.ownsKronicle = false;
     } else {
-      const klOpts: KronicleLiteOptions = opts.memory ? { memory: true } : opts.dataDir !== undefined ? { dataDir: opts.dataDir } : {};
+      // dataDir > $SEA_LITE_DATA_DIR > kronicle-lite's default (core/data-dir.ts).
+      const dataDir = opts.dataDir ?? envDataDir();
+      const klOpts: KronicleLiteOptions = opts.memory ? { memory: true } : dataDir !== undefined ? { dataDir } : {};
       try {
         this.kronicle = new KronicleLite(klOpts);
       } catch (e) {

@@ -10,12 +10,12 @@
  */
 
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
-import { defaultDataDir } from 'kronicle-lite';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
+import { resolveDataDir } from './core/data-dir.js';
 import { SeaError } from './core/errors.js';
 import {
   holderLabel,
@@ -71,7 +71,7 @@ function list(v: string | true | undefined): string[] {
 }
 
 function dataDirOf(flags: Args['flags']): string {
-  return str(flags['data-dir']) ?? defaultDataDir();
+  return resolveDataDir(str(flags['data-dir']));
 }
 
 const HELP = `sea-lite ${VERSION} — a work queue for parallel coding agents that can't collide
@@ -126,12 +126,13 @@ Audits (driven by the mcp-audit runner through the library; these are the human 
                      claims unless --trusted (operator role)
   sea-lite lease show NAME [--json] | lease release NAME --force   named leases (e.g. sandbox:ID)
 
-Common flags: --data-dir DIR (default $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite, shared with kronicle-lite),
+Common flags: --data-dir DIR (default $SEA_LITE_DATA_DIR, else $KRONICLE_LITE_DATA_DIR, else ~/.kronicle-lite,
+  shared with kronicle-lite; the flag wins over both variables),
   --actor ID, --session S, --project KEY ('*' = every project).
 Identity: a claim belongs to an actor AND a session. serve takes the session from --session,
   SEA_LITE_SESSION or CLAUDE_CODE_SESSION_ID (else a random instance id) and registers it; other
   commands find the session of the agent they run for (see docs/THREAT-MODEL.md "Identity").
-Env: SEA_LITE_ACTOR, SEA_LITE_SESSION, SEA_LITE_PROJECT, SEA_LITE_ROLE, SEA_LITE_TRACKS, SEA_LITE_PROFILE,
+Env: SEA_LITE_DATA_DIR, SEA_LITE_ACTOR, SEA_LITE_SESSION, SEA_LITE_PROJECT, SEA_LITE_ROLE, SEA_LITE_TRACKS, SEA_LITE_PROFILE,
   SEA_LITE_MAX_CLOCK_SKEW_SECONDS (default 30; 0 disables the lease clock check).
 `;
 
@@ -248,6 +249,42 @@ function rememberTokens(dataDir: string, who: ResolvedIdentity, got: { ticket_id
   updateCliClaims(dataDir, (claims) => {
     for (const g of got) claims[g.ticket_id] = { token: g.claim_token, actor: who.actor, session: who.session, expires_at: g.expires_at };
   });
+}
+
+/**
+ * Save the tokens of claims this command just took, or give the claims back.
+ * 0.7.0 review: when the token file could not be written (its lock held
+ * past the wait, a lock dated in the future, an unwritable file) `claim`
+ * exited 1 yet the ticket stayed held for the whole lease with no token
+ * anywhere, so nobody could release it. Now the claim and its saved token
+ * persist together or not at all: on failure each claim is released with
+ * its token, then the error is reported (with `rolled_back`). A re-claim
+ * that rotated the caller's own token is released too: the old token is
+ * already void.
+ */
+function rememberOrRollBack(store: SeaLite, dataDir: string, who: ResolvedIdentity, got: { ticket_id: string; claim_token: string; expires_at: string }[]): void {
+  try {
+    rememberTokens(dataDir, who, got);
+  } catch (e) {
+    const rolledBack: string[] = [];
+    const stillHeld: string[] = [];
+    for (const g of got) {
+      try {
+        store.release(S.ReleaseInput.parse({ ticket_id: g.ticket_id, claim_token: g.claim_token, reason: 'the CLI could not save the claim token' }));
+        rolledBack.push(g.ticket_id);
+      } catch {
+        stillHeld.push(g.ticket_id);
+      }
+    }
+    const what =
+      stillHeld.length === 0
+        ? `the claim was rolled back (released ${rolledBack.map((id) => id.slice(0, 8)).join(', ')}); nothing is held`
+        : `could not roll back ${stillHeld.map((id) => id.slice(0, 8)).join(', ')}: it stays held until its lease lapses`;
+    const details = { rolled_back: rolledBack, still_held: stillHeld };
+    if (e instanceof SeaError) throw new SeaError(e.code, `${e.message}; ${what}`, { ...e.details, ...details });
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new SeaError('invalid_input', `could not save the CLI claim token (${reason}); ${what}`, { reason: 'token_not_saved', cause: reason, ...details });
+  }
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
@@ -375,7 +412,7 @@ async function main(argv: string[]): Promise<number> {
         const r = await store.claimWait(
           S.ClaimInput.parse({ ticket_ids: positional, ...(lease !== undefined ? { lease_seconds: lease } : {}), ...(scope ? { scope } : {}), ...(wait !== undefined ? { wait_seconds: wait } : {}) }),
         );
-        rememberTokens(dataDir, identity, r.claims);
+        rememberOrRollBack(store, dataDir, identity, r.claims);
         out(flags, { ...r, holder: holderLabel(identity.actor, identity.session) }, () =>
           r.claims
             .map(
@@ -397,7 +434,7 @@ async function main(argv: string[]): Promise<number> {
           ...(str(flags['tag']) !== undefined ? { tag: str(flags['tag']) } : {}),
         }),
       );
-      if (r.ticket && r.claim_token && r.expires_at) rememberTokens(dataDir, identity, [{ ticket_id: r.ticket.id, claim_token: r.claim_token, expires_at: r.expires_at }]);
+      if (r.ticket && r.claim_token && r.expires_at) rememberOrRollBack(store, dataDir, identity, [{ ticket_id: r.ticket.id, claim_token: r.claim_token, expires_at: r.expires_at }]);
       out(flags, r, () =>
         r.ticket
           ? `claimed ${r.ticket.id.slice(0, 8)}  ${r.ticket.title}  as ${holderLabel(identity.actor, identity.session)} until ${r.expires_at!.slice(11, 19)}Z` +
@@ -1112,7 +1149,15 @@ function auditCmd(sub: string, positional: string[], flags: Args['flags']): numb
     case 'import': {
       const file = rest[0];
       if (file === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit import AUDIT_ID FILE.csv (- = stdin)');
-      const r = store.auditImport(audit, readFileSync(file === '-' ? 0 : file, 'utf8'), { trusted: flags['trusted'] === true });
+      let text: string;
+      try {
+        text = readFileSync(file === '-' ? 0 : file, 'utf8');
+      } catch (e) {
+        // 0.7.0 review: a missing file was a raw stack trace.
+        const c = (e as NodeJS.ErrnoException).code ?? 'error';
+        throw new SeaError('invalid_input', `cannot read ${file === '-' ? 'stdin' : file}: ${c === 'ENOENT' ? 'no such file' : c === 'EISDIR' ? 'it is a directory' : c}`, { file, code: c });
+      }
+      const r = store.auditImport(audit, text, { trusted: flags['trusted'] === true });
       out(flags, r, () => `created ${r.created}, updated ${r.updated}, unchanged ${r.unchanged}; ${r.queued} entered the review queue\n`);
       return 0;
     }
@@ -1137,6 +1182,10 @@ main(process.argv.slice(2)).then(
     } else if (err instanceof Error && err.name === 'ZodError') {
       // SL-6: one readable line per issue, not the raw issue array.
       process.stderr.write(`invalid_input: ${formatZodError(err as unknown as Parameters<typeof formatZodError>[0])}\n`);
+      process.exitCode = 2;
+    } else if (err instanceof Error && typeof (err as NodeJS.ErrnoException).code === 'string' && (err as NodeJS.ErrnoException).syscall !== undefined) {
+      // A file-system error (ENOENT, EACCES, …) is the environment, not a bug: one line, no stack.
+      process.stderr.write(`${(err as NodeJS.ErrnoException).code}: ${err.message}\n`);
       process.exitCode = 2;
     } else {
       process.stderr.write(`${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

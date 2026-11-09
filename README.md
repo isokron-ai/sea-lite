@@ -74,9 +74,11 @@ or one shared) can point at the same file; SQLite's write lock and
 
 ## Install
 
-Requires Node ≥ 20. Data lives in `~/.kronicle-lite/kronicle-lite.db` (or
-`--data-dir`, or `$KRONICLE_LITE_DATA_DIR`), shared with kronicle-lite if
-you run that too. One store serves every repository: tickets are keyed by
+Requires Node ≥ 20. Data lives in `~/.kronicle-lite/kronicle-lite.db`,
+shared with kronicle-lite if you run that too. Elsewhere: `--data-dir DIR`,
+else `$SEA_LITE_DATA_DIR`, else `$KRONICLE_LITE_DATA_DIR` (the flag wins,
+then the variables in that order; the library's `dataDir` option counts as
+the flag). One store serves every repository: tickets are keyed by
 project. The `--actor` label is what humans see on the board; you do
 **not** need a different label per terminal — each server process is its
 own session (see [Identity](#identity-who-holds-a-claim)).
@@ -703,8 +705,7 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
 - **Human review queue**: once every gate has a result (`pass | fail | n/a`)
   the finding is `review: pending`; `sea-lite audit queue AUDIT`, then
   `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]
-  --role operator` (a decision needs the operator role; 0.6 let the
-  default agent role approve).
+  --role operator` (a decision needs the operator role).
   A decision (approved / rejected / hold) goes back to `pending` when the
   title, a finding field other than tracker bookkeeping (`pr_or_issue`,
   `submitted_date`, `tracker_status`), or a gate's result / note / evidence
@@ -766,7 +767,9 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   do either — but the role is self-asserted, so any process that can run
   `sea-lite` (an agent with a shell included) can pass `audit import …
   --trusted --role operator` or `audit review … approved --role operator`
-  and pass or approve its own findings. The role check stops an agent doing
+  and pass or approve its own findings. Changing the gates of an open audit
+  (`audit open AUDIT --gates …` with other gates) needs the same
+  self-asserted role. The role check stops an agent doing
   it by accident with its default role, nothing more. Until
   the runner executes agents inside agent-sandbox, which keeps the CLI and
   the data dir out of their reach, treat the gate results of an audit as

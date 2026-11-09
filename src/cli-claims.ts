@@ -15,13 +15,17 @@
  * other than "no file yet" is an error, not an empty map, and the rename and
  * the lock create retry those transient Windows codes (an antivirus or
  * indexer can hold the file too).
+ *
+ * Owner-verified lock (0.7.0 review): the lock names its owner, a live
+ * owner is never taken over by age, and every write is fenced by the lock
+ * (core/file-lock.ts), so a holder paused past the stale age cannot write
+ * its stale copy over a newer holder's tokens.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
 
-import { SeaError } from './core/errors.js';
+import { updateLocked, withFileLock, writeFileFenced, type LockOptions } from './core/file-lock.js';
 
 export interface CliClaim {
   token: string;
@@ -31,17 +35,9 @@ export interface CliClaim {
 }
 
 export const CLI_CLAIMS_FILE = 'cli-claims.json';
-/** A lock older than this is a crashed holder's: taken over. Every holder is one short read-modify-write. */
-const LOCK_STALE_MS = 30_000;
-const LOCK_WAIT_MS = 30_000;
-/** How long a rename keeps retrying a transient sharing violation. */
-const RENAME_RETRY_MS = 5_000;
 
-/** Codes Windows returns while another process has the file open or it is delete-pending. */
-const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
-
-function sleep(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+export function cliClaimsLock(dataDir: string): string {
+  return join(dataDir, `${CLI_CLAIMS_FILE}.lock`);
 }
 
 function code(e: unknown): string | undefined {
@@ -64,72 +60,37 @@ export function readCliClaims(dataDir: string): Record<string, CliClaim> {
   }
 }
 
-/** Temp file + rename; the rename retries transient sharing violations. Caller holds the lock. */
+/**
+ * Temp file + rename; the rename retries transient sharing violations and is
+ * fenced: when this process holds the lock (withCliClaimsLock) but another
+ * process has taken it over, nothing is written (`lock_lost`).
+ */
 export function writeCliClaims(dataDir: string, claims: Record<string, CliClaim>): void {
-  const file = join(dataDir, CLI_CLAIMS_FILE);
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ v: 1, claims }, null, 2) + '\n', { mode: 0o600 });
-  fs.chmodSync(tmp, 0o600);
-  const deadline = Date.now() + RENAME_RETRY_MS;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      fs.renameSync(tmp, file);
-      return;
-    } catch (e) {
-      if (!TRANSIENT.has(code(e) ?? '') || Date.now() > deadline) {
-        try {
-          fs.unlinkSync(tmp);
-        } catch {
-          // best effort
-        }
-        throw e;
-      }
-      sleep(Math.min(5 * 2 ** attempt, 100));
-    }
-  }
+  writeFileFenced(join(dataDir, CLI_CLAIMS_FILE), JSON.stringify({ v: 1, claims }, null, 2) + '\n', cliClaimsLock(dataDir));
 }
 
 /** Run `f` holding the exclusive lock. */
-export function withCliClaimsLock<T>(dataDir: string, f: () => T): T {
+export function withCliClaimsLock<T>(dataDir: string, f: () => T, opts: LockOptions = {}): T {
   fs.mkdirSync(dataDir, { recursive: true });
-  const lock = join(dataDir, `${CLI_CLAIMS_FILE}.lock`);
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  let fd: number | null = null;
-  while (fd === null) {
-    try {
-      fd = fs.openSync(lock, 'wx', 0o600);
-    } catch (e) {
-      const c = code(e) ?? '';
-      // EEXIST: held. EPERM / EACCES / EBUSY: Windows, the previous holder's lock file is still delete-pending.
-      if (c !== 'EEXIST' && !TRANSIENT.has(c)) throw e;
-      try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.unlinkSync(lock);
-      } catch {
-        // gone already: retry at once
-      }
-      if (Date.now() > deadline) throw new SeaError('wait_timeout', `${lock} is held by another sea-lite process; remove it if no sea-lite command is running`, { lock });
-      sleep(5 + Math.floor(Math.random() * 20));
-    }
-  }
-  try {
-    return f();
-  } finally {
-    fs.closeSync(fd);
-    try {
-      fs.unlinkSync(lock);
-    } catch {
-      // taken over as stale: nothing to remove
-    }
-  }
+  return withFileLock(cliClaimsLock(dataDir), f, opts);
 }
 
-/** Read-modify-write under the lock, so concurrent CLI claims and releases never drop each other's tokens. */
-export function updateCliClaims(dataDir: string, change: (claims: Record<string, CliClaim>) => void): void {
-  withCliClaimsLock(dataDir, () => {
-    const claims = readCliClaims(dataDir);
-    change(claims);
-    writeCliClaims(dataDir, claims);
-  });
+/**
+ * Read-modify-write under the lock, so concurrent CLI claims and releases
+ * never drop each other's tokens. `change` may run more than once (on a
+ * fresh read each time) if the lock is taken over before the write lands.
+ */
+export function updateCliClaims(dataDir: string, change: (claims: Record<string, CliClaim>) => void, opts: LockOptions = {}): void {
+  fs.mkdirSync(dataDir, { recursive: true });
+  updateLocked(
+    cliClaimsLock(dataDir),
+    () => {
+      const claims = readCliClaims(dataDir);
+      change(claims);
+      writeCliClaims(dataDir, claims);
+    },
+    opts,
+  );
 }
 
 /** A consistent read: under the lock, never while another process is replacing the file. */

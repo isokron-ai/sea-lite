@@ -114,9 +114,10 @@ until it releases them.
 role. Force release is gated on it so an *agent* configured as an agent cannot
 reach for it by accident, and so the record says `claim_force_released` with a
 `released_by`. It is an audit distinction, not an access control. The same
-holds for `audit import --trusted` and `audit review` (0.7.0): both need the
-operator role, so an agent cannot record its own gate results or approve its
-own findings by accident with its default role, but any process
+holds for `audit import --trusted`, `audit review` and changing the gates of
+an open audit (`audit open --gates`, 0.7.0): all need the operator role, so an
+agent cannot record its own gate results, approve its own findings or cut the
+gates new findings must pass by accident with its default role, but any process
 that can run the CLI can claim the role. Closing that needs the agents to
 run where they cannot reach the CLI or the data dir (agent-sandbox); until
 then it is a documented limit (README, Limitations).
@@ -150,7 +151,7 @@ what a raw `SELECT` returns may not be.
 **Leases assume one wall clock.** Every process judges expiry with its own
 clock against instants other processes wrote. On one host that is one
 clock; across a network share, a VM bind mount (Docker Desktop after host
-sleep) or a faked clock it may not be. Since 0.6.2 each process compares its
+sleep) or a faked clock it may not be. Since 0.7.0 each process compares its
 clock with the file-system time stamped on a probe file in the data dir and
 refuses lease decisions (`clock_skew` on claim / next / refresh / heartbeat;
 the auto-heartbeat and the lazy sweep skip) when they differ by more than

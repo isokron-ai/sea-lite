@@ -4,7 +4,74 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased]
+## [0.7.0] — Unreleased
+
+The first npm release since 0.6.0: it also ships the fixes listed under
+0.6.1 below (never published to npm) and the ones planned as 0.6.2.
+
+### Fixed (review of the 0.7.0 stack, 2026-11-08)
+
+- **A paused CLI holder could erase a newer claim's token (#15 review).**
+  The `cli-claims.json` lock was taken over by file age alone: a holder
+  paused for over 30 s (SIGSTOP, a debugger, a suspended laptop) lost the
+  lock, then wrote what it had read before the pause over the newer
+  holder's file, so that claim's token was gone and its `release` exited 2.
+  The lock file now names its owner (pid, host, nonce); a waiter takes it
+  over only when the owner is gone (same host: its pid is not alive — at
+  once, however young the lock), never while the owner is alive, unless it
+  has held it for 5 min (a reused pid or a hung process); a lock with no
+  owner to check (sea-lite ≤ 0.6, another host) goes by age as before.
+  Every write is fenced: right before the rename the holder re-reads the
+  lock, and one that lost it writes nothing (`lock_lost`) and redoes its
+  read-modify-write under a fresh lock. Release removes only its own lock,
+  and a takeover checks it removed the lock it judged
+  (`src/core/file-lock.ts`). Left, and documented there: a holder on
+  another host sharing the file system, or one whose pid was reused, paused
+  exactly between the re-read and the rename.
+- **`claim` could fail yet leave the ticket held with no token (#15
+  review).** The claim was written before its token was saved; when the save
+  failed (a lock dated in the future, an unwritable `cli-claims.json`) the
+  command exited 1 or 2 and the ticket stayed held for the whole lease with
+  no token anywhere. `claim` and `next` now release what they claimed (with
+  its token) when the token cannot be saved and report `rolled back …;
+  nothing is held`, so the claim and its token persist together or not at
+  all. A lock dated more than 2 s in the future is stale-suspect: taken over
+  after 5 s unchanged, instead of a 30 s wait and `wait_timeout`.
+- **Concurrent `add-token` lost tokens while reporting success.** 16
+  concurrent runs kept 9–12 entries (an unlocked read-modify-write, a temp
+  file named by pid only). The actors file is now updated under
+  `<file>.lock` with the same owner-verified, fenced lock; 16 concurrent runs
+  keep 16.
+- **Any agent could cut an audit's gates (#16 review).** Re-running
+  `sea-lite audit open AUDIT --gates refuter` (or `auditOpen({ gates })`)
+  changed the gates new findings must pass with the default agent role.
+  Changing the gates of an open audit now needs the operator role, else
+  `forbidden` and nothing changes; re-opening with the same gates (any order)
+  or none still works for anyone. The role is self-asserted, as for `audit
+  review` and `--trusted` (README, Limitations; THREAT-MODEL).
+- **`audit import` of a missing file printed a stack trace (#19 review).**
+  It is now `invalid_input: cannot read FILE: no such file` (or `it is a
+  directory`), exit 2; any other file-system error a command hits prints one
+  `CODE: message` line instead of a stack.
+- **`SEA_LITE_DATA_DIR` was ignored.** Every other setting has a
+  `SEA_LITE_*` variable, but this one was not read, so a script that set it
+  wrote to the shared default store. It is now supported by the CLI and the
+  library: `--data-dir` (library `dataDir`) > `$SEA_LITE_DATA_DIR` >
+  `$KRONICLE_LITE_DATA_DIR` > `~/.kronicle-lite` (help, README).
+- **The relaxed timing bounds no longer caught a slowdown (#20 review).** A
+  300 ms sleep injected in `claim()` passed the whole suite (91 s → 195 s),
+  and so did 1.5 s added to the no-wait refusal (bound `< 2 s`). New
+  calibrated tests (`test/wait.test.ts`): the best of 5 runs (a stall must
+  hit every run; an injected delay is in every run) of an uncontended claim,
+  sync and through `claimWait`, and of each refusal that must not wait
+  (`scope_conflict`, `already_claimed`, `not_found`, an empty queue) must
+  stay under max(100 ms, 20 × a baseline measured in the same test on create
+  + get, off the claim path); the refusals also assert that the wait loop
+  never slept (`waitCounters`, core/wait.ts). Both injected delays fail them;
+  without them the suite passes with half the cores busy.
+- **Docs.** THREAT-MODEL said the clock check exists "since 0.6.2", and
+  MODEL.md dated the `unverifiable_key` refusal 0.6.2: 0.6.2 never shipped,
+  both first ship in 0.7.0.
 
 ### Fixed (dogfood findings, 2026-11-08)
 
@@ -96,8 +163,16 @@ uses semantic versioning once past 0.x.
 - **Raw zod issue arrays as CLI errors (SL-6).** `next --lease 0` and
   `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
   small: expected number to be >=1`.
+- **The version was stated two ways (SL-11).** `package.json` and the
+  lockfile said 0.6.1 (never tagged or published; npm `latest` is 0.6.0), so
+  `--version` and the help banner did too, while the CHANGELOG called this
+  release the "0.7.0 candidate". Now 0.7.0 in `package.json` and the
+  lockfile, `server.json` (both fields), `CATALOG_VERSION` and the catalog
+  snapshot, and this heading (`[0.7.0] — Unreleased`; the unpublished 0.6.1
+  and planned 0.6.2 sections are marked as shipping in 0.7.0).
+  `test/version.test.ts` pins every one of them to `package.json`.
 
-### Added (0.7.0 candidate: audit orchestration)
+### Added (audit orchestration)
 
 - **Audit tracker for the mcp-audit runner** (library + CLI; no new MCP
   tools, so `tools/list` is unchanged): named exclusive leases with a
@@ -297,7 +372,7 @@ uses semantic versioning once past 0.x.
 - `swept_expired` counts only leases actually swept (a skewed process sweeps
   none).
 
-### Fixed (0.6.2)
+### Fixed (planned as 0.6.2; ships in 0.7.0)
 
 - **Lease clock skew (C2-06).** Expiry compared wall-clock instants written
   by different processes, so a process 15 min ahead took over every live
@@ -323,6 +398,9 @@ uses semantic versioning once past 0.x.
   ("nothing was written, retry"; CLI exit 1) instead of a raw stack trace.
 
 ## [0.6.1] — 2026-11-01
+
+Never tagged or published to npm (npm `latest` stayed 0.6.0); these fixes
+first ship in 0.7.0.
 
 Fixes from hardening round 2 (hooks, protocol and chaos tracks) and the live
 full-stack runs, plus kronicle-lite ^0.8.0.

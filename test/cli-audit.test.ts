@@ -87,6 +87,40 @@ describe('sea-lite audit / lease', () => {
     expect(sl(['audit', 'export', 'ph3']).out.split('\r\n')[1]).toMatch(/,n\/a,n\/a,n\/a,n\/a,pass,pending,/);
   });
 
+  it('changing the gates of an open audit needs the operator role (0.7.0 review: any agent could cut them)', () => {
+    expect(sl(['audit', 'open', 'g1', '--title', 'Gated', '--gates', 'repro,refuter']).code).toBe(0);
+    // re-opening with the same gates (any order) or none is fine for anyone
+    expect(sl(['audit', 'open', 'g1', '--gates', 'refuter,repro']).code).toBe(0);
+    expect(sl(['audit', 'open', 'g1']).code).toBe(0);
+    // lowering (or raising) them is not
+    for (const gates of ['refuter', 'repro,refuter,docs']) {
+      const r = sl(['audit', 'open', 'g1', '--gates', gates]);
+      expect(r.code, gates).toBe(2);
+      expect(r.err, gates).toMatch(/^forbidden: changing the gates of open audit g1 \(repro,refuter → [a-z_,]+\) needs the operator role; "\S+" acts as agent/);
+    }
+    const lib = new SeaLite({ dataDir: data, actor: 'runner' });
+    expect(() => lib.auditOpen({ audit_id: 'g1', title: 'Gated', gates: ['refuter'] })).toThrow(/needs the operator role/);
+    lib.close();
+    // nothing changed: a finding that passed only the refuter still waits for repro
+    const csv = join(base, 'g.csv');
+    writeFileSync(csv, 'id,title,refuter_result\nF1,one,pass\n');
+    expect(sl(['audit', 'import', 'g1', csv, '--trusted', '--role', 'operator']).out).toMatch(/0 entered the review queue/);
+    // the operator can
+    expect(sl(['audit', 'open', 'g1', '--gates', 'refuter', '--role', 'operator']).code).toBe(0);
+    writeFileSync(csv, 'id,title,refuter_result\nF2,two,pass\n');
+    expect(sl(['audit', 'import', 'g1', csv, '--trusted', '--role', 'operator']).out).toMatch(/1 entered the review queue/);
+  });
+
+  it('importing a file that is not there is a clean error (exit 2), not a stack trace', () => {
+    expect(sl(['audit', 'open', 'm1']).code).toBe(0);
+    const r = sl(['audit', 'import', 'm1', join(base, 'missing.csv')]);
+    expect(r.code).toBe(2);
+    expect(r.err).toBe(`invalid_input: cannot read ${join(base, 'missing.csv')}: no such file\n`);
+    const d = sl(['audit', 'import', 'm1', base]);
+    expect(d.code).toBe(2);
+    expect(d.err).toMatch(/^invalid_input: cannot read .*: it is a directory\n$/);
+  });
+
   it('lease show, and force release only as operator', () => {
     const s = new SeaLite({ dataDir: data, actor: 'w1' });
     s.leaseAcquire({ name: 'sandbox:ph2' });

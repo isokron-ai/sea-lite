@@ -68,7 +68,7 @@ export interface OpenAuditResult {
  * finding's other gates start as `n/a` ("not a gate of this audit"), so an
  * audit with one refuter gate does not need three `n/a` columns per row
  * before anything reaches the review queue. Default: all five. Re-opening
- * with other gates changes new findings only.
+ * with other gates changes new findings only, and needs the operator role.
  */
 export function openAudit(ctx0: Ctx, input: { audit_id: string; title: string; catalog_fingerprint?: string; gates?: readonly string[] }): OpenAuditResult {
   const ctx = inAudit(ctx0, input.audit_id);
@@ -92,6 +92,22 @@ export function openAudit(ctx0: Ctx, input: { audit_id: string; title: string; c
       .prepare(`SELECT a.ticket_id AS id FROM sea_fields a JOIN sea_tickets t ON t.id = a.ticket_id WHERE a.name = 'audit_id' AND a.value = ? AND t.kind = 'epic'`)
       .get(input.audit_id) as { id: string } | undefined;
     if (existing) {
+      // 0.7.0 review: any agent could re-run `audit open X --gates refuter` and
+      // cut the gates new findings must pass. Changing the gates of an open
+      // audit needs the operator role (self-asserted, like review decisions and
+      // trusted imports); re-opening with the same gates, or none, stays open to all.
+      if (gates !== null) {
+        const current = auditGates(ctx, existing.id);
+        const same = current.length === gates.length && current.every((g) => gates.includes(g));
+        if (!same && ctx.role !== 'operator') {
+          throw new SeaError(
+            'forbidden',
+            `changing the gates of open audit ${input.audit_id} (${current.join(',')} → ${gates.join(',')}) needs the operator role; "${ctx.actor}" acts as ${ctx.role} ` +
+              "(CLI: --role operator or SEA_LITE_ROLE=operator; library: role: 'operator')",
+            { audit_id: input.audit_id, role: ctx.role, gates: current, requested: gates },
+          );
+        }
+      }
       if (fp) setFields(ctx, existing.id, fp);
       return { ticket_id: existing.id, created: false };
     }

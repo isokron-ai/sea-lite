@@ -47,6 +47,13 @@ export interface WaitInfo {
   freed: 'released' | 'finished' | 'lease_expired' | 'changed';
 }
 
+/**
+ * How often this process slept in a wait loop. Tests assert on it ("refused
+ * at once" = no sleep at all) instead of on wall clock alone, which a loaded
+ * machine stretches.
+ */
+export const waitCounters = { sleeps: 0 };
+
 type Wake = () => void;
 const listeners = new WeakMap<Db, Set<Wake>>();
 
@@ -139,6 +146,7 @@ export async function waitForClaim<T>(db: Db, attempt: () => Attempt<T>, opts: W
 }
 
 function sleep(db: Db, ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  waitCounters.sleeps++;
   return new Promise((resolve) => {
     let done = false;
     const finish = (poked: boolean) => {
