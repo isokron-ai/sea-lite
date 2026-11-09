@@ -126,7 +126,7 @@ describe('#6.6 an imported gate result is a claim unless the import is trusted',
     const { store } = fresh({ actor: 'mcp-audit' });
     store.auditOpen({ audit_id: 'a', title: 'A' });
     expect(codeOf(() => store.auditImport('a', csv, { trusted: true }))).toBe('forbidden');
-    const op = new SeaLite({ kronicle: store.kronicle, actor: 'joshua', role: 'operator' });
+    const op = new SeaLite({ kronicle: store.kronicle, actor: 'operator-1', role: 'operator' });
     expect(op.auditImport('a', csv, { trusted: true })).toMatchObject({ created: 1, queued: 1 });
   });
 
