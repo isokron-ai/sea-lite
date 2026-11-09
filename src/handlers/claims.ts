@@ -13,7 +13,7 @@ import { assertClockTrusted } from '../core/clock.js';
 import { clampLease, DEFAULT_LEASE_SECONDS, expiryFrom, hasLiveClaim, MAX_LEASE_SECONDS, validateFence } from '../core/fence.js';
 import { holderLabel } from '../core/identity.js';
 import type { Blocker, WaitInfo } from '../core/wait.js';
-import { addNote, assertWritable, mustGetRow, ownsClaim, projectFilter, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
+import { addNote, assertWritable, mustGetRow, ownsClaim, projectFilter, readTx, resolveId, sweepAllExpired, sweepExpired, tx, type Ctx } from '../core/repo.js';
 import {
   findOverlaps,
   normalizeScope,
@@ -61,8 +61,9 @@ export interface ScopeConflict {
 /**
  * Every live, scoped claim in the current project held by someone other than
  * the caller (another actor, or the same actor in another session; see
- * ownsClaim) and not on `excludeIds`, that overlaps `paths`. Callers sweep
- * expired leases first so a lapsed scope never blocks anyone.
+ * ownsClaim) and not on `excludeIds`, that overlaps `paths`. Only leases that
+ * have not expired count (`claim_expires_at > now`), swept or not, so a lapsed
+ * scope never blocks anyone.
  */
 export function findScopeConflicts(ctx: Ctx, paths: readonly string[], excludeIds: ReadonlySet<string> = new Set()): ScopeConflict[] {
   const pf = projectFilter(ctx);
@@ -157,6 +158,7 @@ export interface ScopeCheckResult {
   /** The request, normalized. */
   paths: string[];
   conflicts: ScopeConflict[];
+  /** Always 0 since 0.7.1: scope-check reads and never sweeps (expired leases are not conflicts; the next write sweeps them). */
   swept_expired: number;
   head: ChainHead;
 }
@@ -164,15 +166,15 @@ export interface ScopeCheckResult {
 /**
  * The hot path for an edit hook: would these paths collide with someone
  * else's live scope? No claim is taken or needed; the caller's own scopes
- * are never conflicts. One short transaction (expired leases are swept so
- * the answer is honest).
+ * are never conflicts. A read from one snapshot, with no write lock, so it
+ * answers at once while another process writes; an expired lease is not a
+ * conflict, and is swept by the next write (claim, next, get, ...).
  */
 export function scopeCheck(ctx: Ctx, input: ScopeCheckInput): ScopeCheckResult {
   const paths = normalizeScope(input.paths, ctx.root);
-  return tx(ctx.db, () => {
-    const swept = sweepAllExpired(ctx);
+  return readTx(ctx.db, () => {
     const conflicts = findScopeConflicts(ctx, paths);
-    return { ok: conflicts.length === 0, paths, conflicts, swept_expired: swept, head: ctx.chain.head() };
+    return { ok: conflicts.length === 0, paths, conflicts, swept_expired: 0, head: ctx.chain.head() };
   });
 }
 

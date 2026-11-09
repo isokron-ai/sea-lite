@@ -7,7 +7,9 @@
  */
 
 import Database from 'better-sqlite3';
-import { Chain, type Signer } from 'kronicle-lite';
+import type { Signer } from 'kronicle-lite';
+
+import { Chain } from './core/kl.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 

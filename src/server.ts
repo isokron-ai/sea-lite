@@ -25,7 +25,7 @@ import {
   type InputRequiredResult,
   type ServerContext,
 } from '@modelcontextprotocol/server';
-import { ChainConflictError } from 'kronicle-lite';
+import { ChainConflictError } from './core/kl.js';
 import { z } from 'zod';
 
 import { SeaError } from './core/errors.js';

@@ -34,8 +34,8 @@ import { createServer, type Profile } from './server.js';
 import type { SeaLite } from './store.js';
 import { VERSION } from './version.js';
 
-/** kronicle-lite's `serve --http` defaults to 7417; sea-lite takes the next port so both can run on one box. */
-export const DEFAULT_HTTP_PORT = 7418;
+import { DEFAULT_HTTP_PORT } from './http-defaults.js';
+export { DEFAULT_HTTP_PORT };
 export const DEFAULT_HTTP_PATH = '/mcp';
 /** Same file name as kronicle-lite: one data dir, one trust domain, one shared secret. */
 export const BEARER_FILE_NAME = 'http-bearer.token';

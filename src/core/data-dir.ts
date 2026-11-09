@@ -9,7 +9,7 @@
  * to the shared default store.
  */
 
-import { defaultDataDir } from 'kronicle-lite';
+import { defaultDataDir } from './kl.js';
 
 export const DATA_DIR_ENV = 'SEA_LITE_DATA_DIR';
 

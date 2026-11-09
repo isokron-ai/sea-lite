@@ -6,7 +6,9 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kronicle-lite';
+import type { Chain, Db, KronicleLiteOptions } from 'kronicle-lite';
+
+import { KronicleLite } from './core/kl.js';
 
 import { clockGuard, fsReference, parseMaxSkew, type ClockGuard, type Reference } from './core/clock.js';
 import { reopenAfterWrite } from './audit/review-state.js';

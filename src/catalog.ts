@@ -13,7 +13,7 @@
  */
 
 import { createMcpHandler } from '@modelcontextprotocol/server';
-import { canonicalize, sha256Hex } from 'kronicle-lite';
+import { canonicalize, sha256Hex } from './core/kl.js';
 
 import { createServer } from './server.js';
 import { SeaLite } from './store.js';

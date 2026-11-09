@@ -21,12 +21,13 @@ import {
   notesFor,
   ownsClaim,
   projectFilter,
+  readTx,
   resolveId,
   RESPONSE_BUDGET_DEFAULT,
-  sweepAllExpired,
   sweepExpired,
   tx,
   uuid,
+  withoutLapsedClaim,
   type Ctx,
 } from '../core/repo.js';
 import {
@@ -939,6 +940,7 @@ export interface ListResult {
   next_cursor: string | null;
   /** 0.6.1: present (true) when the byte budget, not `limit`, ended the page; next_cursor continues it. */
   budget_truncated?: true;
+  /** Always 0 since 0.7.1: list reads and never sweeps (a lapsed lease is shown as no claim; the next write sweeps it). */
   swept_expired: number;
   head: ChainHead;
 }
@@ -979,8 +981,11 @@ export function statusCounts(ctx: Ctx, project?: string): StatusCounts {
 }
 
 export function list(ctx: Ctx, input: ListInput): ListResult {
-  return tx(ctx.db, () => {
-    const swept = sweepAllExpired(ctx);
+  // 0.7.1: a read (one snapshot, no write lock); a lapsed lease shows as no claim and the next write sweeps it.
+  return readTx(ctx.db, () => {
+    const lapsedFree = !ctx.clock?.untrusted();
+    const live = lapsedFree ? `(t.claim_token_hash IS NOT NULL AND coalesce(t.claim_expires_at > ?, 0))` : `(t.claim_token_hash IS NOT NULL)`;
+    const liveParams = lapsedFree ? [ctx.now.toISOString()] : [];
     const where: string[] = [];
     const params: unknown[] = [];
     if (input.status && input.status.length > 0) {
@@ -1008,11 +1013,15 @@ export function list(ctx: Ctx, input: ListInput): ListResult {
       where.push(`EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)`);
       params.push(input.tag);
     }
-    if (input.claimed === 'yes') where.push(`t.claim_token_hash IS NOT NULL`);
-    else if (input.claimed === 'no') where.push(`t.claim_token_hash IS NULL`);
-    else if (input.claimed === 'mine') {
-      where.push(`t.claim_actor = ?`, `t.claim_session IS ?`);
-      params.push(ctx.actor, ctx.session);
+    if (input.claimed === 'yes') {
+      where.push(live);
+      params.push(...liveParams);
+    } else if (input.claimed === 'no') {
+      where.push(`NOT ${live}`);
+      params.push(...liveParams);
+    } else if (input.claimed === 'mine') {
+      where.push(live, `t.claim_actor = ?`, `t.claim_session IS ?`);
+      params.push(...liveParams, ctx.actor, ctx.session);
     }
     const pf = projectFilter(ctx, 't', input.project);
     if (pf.sql) {
@@ -1054,7 +1063,7 @@ export function list(ctx: Ctx, input: ListInput): ListResult {
         more = true;
         break;
       }
-      const r = byId.get(id) as TicketRow;
+      const r = withoutLapsedClaim(ctx, byId.get(id) as TicketRow);
       const t = input.view === 'full' ? rowToTicket(r) : toCompact(rowToTicket(r));
       const size = jsonBytes(t) + 1;
       if (tickets.length > 0 && used + size > budget) {
@@ -1069,7 +1078,7 @@ export function list(ctx: Ctx, input: ListInput): ListResult {
       count: tickets.length,
       next_cursor: more ? encodeCursor(offset + tickets.length) : null,
       ...(budgetCut ? { budget_truncated: true as const } : {}),
-      swept_expired: swept,
+      swept_expired: 0,
       head: ctx.chain.head(),
     };
   });

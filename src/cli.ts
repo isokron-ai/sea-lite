@@ -1,6 +1,5 @@
-#!/usr/bin/env node
 /**
- * sea-lite CLI. `sea-lite help` lists every command; README.md has the tour.
+ * sea-lite CLI (run through src/bin.ts, built as dist/cli.js). `sea-lite help` lists every command; README.md has the tour.
  *
  * Exit codes (every command): 0 ok; 1 a conflict (scope_conflict,
  * already_claimed, a fence error, a refused commit) or a failed check
@@ -9,7 +8,6 @@
  * `precommit` are hook contracts: see hooks/README.md.
  */
 
-import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
@@ -33,21 +31,13 @@ import { MAX_STDIO_LINE_BYTES, StdioLineGuard } from './stdio-guard.js';
 import type { TicketCompact, Ticket } from './core/types.js';
 import { ALL_STATES, type TicketStatus } from './model/enums.js';
 import * as S from './model/schemas.js';
-import {
-  ACTORS_FILE_NAME,
-  addActorToken,
-  DEFAULT_HTTP_PORT,
-  checkTokenFileMode,
-  loadOrCreateBearer,
-  readActorsFile,
-  readBearerFile,
-  serveHttp,
-  type ActorToken,
-} from './http.js';
-import { renderDoctor, runDoctor } from './doctor.js';
+// The MCP SDK, the HTTP transport and doctor load only in the commands that use them
+// (serve, doctor, add-token): every hook call (scope-check, board, heartbeat) skips them.
+import { DEFAULT_HTTP_PORT } from './http-defaults.js';
+import type { ActorToken } from './http.js';
 import type { NextResult, ScopeConflict } from './handlers/claims.js';
 import type { ActorStats, StatsResult } from './handlers/stats.js';
-import { createServer, PROFILES, type Profile } from './server.js';
+import type { Profile } from './server.js';
 import type { WaitInfo } from './core/wait.js';
 import { DEFAULT_ACTOR, parseRole, parseTracks, SeaLite } from './store.js';
 import { writePrivateFile } from './audit/export.js';
@@ -615,6 +605,7 @@ async function main(argv: string[]): Promise<number> {
     case 'doctor': {
       const cwd = str(flags['cwd']);
       const actorsFile = str(flags['actors-file']);
+      const { renderDoctor, runDoctor } = await import('./doctor.js');
       const r = await runDoctor({
         dataDir: dataDirOf(flags),
         ...(cwd !== undefined ? { cwd } : {}),
@@ -635,6 +626,7 @@ async function main(argv: string[]): Promise<number> {
       const actor = str(flags['actor']);
       if (actor === undefined) throw new SeaError('invalid_input', 'add-token needs --actor ID');
       const role = str(flags['role']);
+      const { ACTORS_FILE_NAME, addActorToken } = await import('./http.js');
       const file = str(flags['actors-file']) ?? join(dataDirOf(flags), ACTORS_FILE_NAME);
       const r = addActorToken(file, actor, role !== undefined ? parseRole(role) : undefined);
       process.stderr.write(`token for "${actor}" added to ${r.file}${r.created ? ' (created, mode 0600)' : ''}; only its sha256 is stored, so copy it now:\n`);
@@ -666,16 +658,17 @@ async function main(argv: string[]): Promise<number> {
 // ───────────────────────────── serve ─────────────────────────────
 
 /** `--core`, `--profile core|full`, or SEA_LITE_PROFILE; default full. */
-function profileOf(flags: Args['flags']): Profile {
+function profileOf(flags: Args['flags'], profiles: readonly Profile[]): Profile {
   if (flags['core'] === true) return 'core';
   const p = str(flags['profile']) ?? (process.env['SEA_LITE_PROFILE'] || undefined) ?? 'full';
-  if (!(PROFILES as readonly string[]).includes(p)) throw new SeaError('invalid_input', `--profile must be ${PROFILES.join(' or ')}, got "${p}"`);
+  if (!(profiles as readonly string[]).includes(p)) throw new SeaError('invalid_input', `--profile must be ${profiles.join(' or ')}, got "${p}"`);
   return p as Profile;
 }
 
 async function serveCmd(flags: Args['flags']): Promise<number> {
+  const { createServer, PROFILES } = await import('./server.js');
   const dataDir = dataDirOf(flags);
-  const profile = profileOf(flags);
+  const profile = profileOf(flags, PROFILES);
   const role = str(flags['role']);
   const tracks = str(flags['tracks']);
   const actor = str(flags['actor']) ?? (process.env['SEA_LITE_ACTOR'] || undefined) ?? DEFAULT_ACTOR;
@@ -721,6 +714,7 @@ async function serveCmd(flags: Args['flags']): Promise<number> {
     (msg) => process.stderr.write(msg + '\n'),
   );
   process.stdin.pipe(guard);
+  const { serveStdio, StdioServerTransport } = await import('@modelcontextprotocol/server/stdio');
   const transport = new StdioServerTransport(guard, process.stdout, { maxBufferSize: MAX_STDIO_LINE_BYTES + 1024 * 1024 });
   const handle = serveStdio(() => createServer(store, { version: VERSION, profile }), {
     transport,
@@ -1038,6 +1032,7 @@ function formatStats(r: StatsResult): string {
 }
 
 async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<number> {
+  const { ACTORS_FILE_NAME, checkTokenFileMode, loadOrCreateBearer, readActorsFile, readBearerFile, serveHttp } = await import('./http.js');
   const dataDir = store.kronicle.dataDir ?? dataDirOf(flags);
   let bearer: string;
   let bearerNote: string;
@@ -1078,7 +1073,7 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
     actorsFile,
     version: VERSION,
     ...(legacyFlag !== undefined ? { legacy: legacyFlag } : {}),
-    profile: profileOf(flags),
+    profile: profileOf(flags, (await import('./server.js')).PROFILES),
     ...(str(flags['host']) !== undefined ? { host: str(flags['host'])! } : {}),
     ...(port !== undefined ? { port } : {}),
     ...(allowedOrigins.length > 0 ? { allowedOrigins } : {}),
