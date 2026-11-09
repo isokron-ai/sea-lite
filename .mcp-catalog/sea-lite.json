@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-02T01:47:25.876Z",
+  "capturedAt": "2026-11-09T02:08:51.363Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -1125,7 +1125,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Atomically pick and claim the next ticket: unclaimed, triaged or in_progress, assigned to you or nobody, not priority parked, all predecessors (blocks / depends_on) terminal; highest priority, in_progress before triaged, then oldest. Returns ticket + claim_token, or ticket: null (nothing_eligible). This project only. `scope.paths` locks the files you will edit. `wait_seconds` (≤ 300) waits while the scope is held, or while nothing is free but others hold work that may free up.",
+        "description": "Atomically pick and claim the next ticket: unclaimed, triaged or in_progress, assigned to you or nobody, not priority parked, all predecessors (blocks / depends_on) terminal, not an epic (kind epic or parent_of an open child); highest priority, in_progress before triaged, then oldest. A ticket you handed off (sea_release with a note) goes to another agent first. Returns ticket + claim_token, or ticket: null with reason nothing_eligible | held | held_by_stale_claim (held[]: holder, claim age, silence, expiry) | handed_off. This project only. `scope.paths` locks the files you will edit. `wait_seconds` (≤ 300) waits while the scope is held, or while nothing is free but others hold work that may free up.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -1218,9 +1218,23 @@
                 "null"
               ]
             },
+            "handed_off": {
+              "items": {
+                "description": "{ticket_id,title,released_at,yours_again_at}",
+                "type": "object"
+              },
+              "type": "array"
+            },
             "head": {
               "description": "Chain head after the call. {seq,hash}",
               "type": "object"
+            },
+            "held": {
+              "items": {
+                "description": "{ticket_id,title,holder,holder_session,holder_label,claimed_at,claim_age_seconds,silent_seconds,expires_at,expires_in_seconds,stale}",
+                "type": "object"
+              },
+              "type": "array"
             },
             "reason": {
               "type": [
@@ -1321,7 +1335,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Give a ticket back to the queue (claim_token; leave a `note` saying where you stopped). Operator role: force: true releases any holder, recorded with your reason.",
+        "description": "Give a ticket back to the queue (claim_token; leave a `note` saying where you stopped). A release with a note is a hand-off: sea_next gives it to another agent before you (to you only if no other agent is around). Operator role: force: true releases any holder, recorded with your reason.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -1869,5 +1883,5 @@
     "name": "sea-lite",
     "version": "0.6.1"
   },
-  "sha256": "49eaa556e5cd2dc2a667c01737eb257142a498027ea73ff85910e0a0314485db"
+  "sha256": "c942f89598073bebf7e41ea0b64730b570e4092c26c3c796ec3278f12764ef31"
 }

@@ -327,7 +327,7 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       core:
         'Create ≤50 tickets + ≤100 links, all or nothing. Tickets have a batch-local `ref`; links join refs or existing ids. ' +
         '`templates` repeat a ticket per value, e.g. {for_each: 20, ref: "s{i}", ticket: {title: "Step {i}"}, links: [{from_ref: "{ref}", ' +
-        'to_ref: "{prev}", link_type: "depends_on"}]}. An invalid plan writes nothing. Returns {created: {ref: id}, links}.',
+        'to_ref: "{prev}", link_type: "depends_on"}]}. Invalid plan: nothing written. Returns {created: {ref: id}, links}.',
       coreOmit: ['claims', 'verbose'],
       input: ApplyInput,
       output: ApplyOutput,
@@ -455,8 +455,9 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
     {
       title: 'Release a claim',
       description:
-        'Give a ticket back to the queue (claim_token; leave a `note` saying where you stopped). Operator role: force: true ' +
-        'releases any holder, recorded with your reason.',
+        'Give a ticket back to the queue (claim_token; leave a `note` saying where you stopped). A release with a note is a ' +
+        'hand-off: sea_next gives it to another agent before you (to you only if no other agent is around). Operator role: ' +
+        'force: true releases any holder, recorded with your reason.',
       core: 'Give a ticket back unfinished (claim_token); `note` says where you stopped.',
       coreOmit: ['force', 'reason'],
       input: ReleaseInput,
@@ -472,11 +473,13 @@ export function createServer(store: SeaLite, opts: ServerOptions = {}): McpServe
       title: 'Claim the next ticket',
       description:
         'Atomically pick and claim the next ticket: unclaimed, triaged or in_progress, assigned to you or nobody, not priority ' +
-        'parked, all predecessors (blocks / depends_on) terminal; highest priority, in_progress before triaged, then oldest. ' +
-        'Returns ticket + claim_token, or ticket: null (nothing_eligible). This project only. `scope.paths` locks the files you will edit. ' +
+        'parked, all predecessors (blocks / depends_on) terminal, not an epic (kind epic or parent_of an open child); highest priority, ' +
+        'in_progress before triaged, then oldest. A ticket you handed off (sea_release with a note) goes to another agent first. ' +
+        'Returns ticket + claim_token, or ticket: null with reason nothing_eligible | held | held_by_stale_claim (held[]: holder, ' +
+        'claim age, silence, expiry) | handed_off. This project only. `scope.paths` locks the files you will edit. ' +
         '`wait_seconds` (≤ 300) waits while the scope is held, or while nothing is free but others hold work that may free up.',
       core:
-        'Claim the next eligible ticket (priority, then age; predecessors done): ticket + claim_token, or ticket: null. ' +
+        'Claim the next eligible ticket: ticket + claim_token, or null + reason. ' +
         '`scope.paths` locks files you will edit.',
       coreOmit: ['kind', 'tag', 'include_unassigned', 'scope.worktree', 'lease_seconds'],
       input: NextInput,

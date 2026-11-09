@@ -55,9 +55,15 @@ claims it (and your paths) in one step.
   shown once. Every write needs it. Do not paste it into notes, commit
   messages or shared files.
 - Got `{ ticket: null, reason: "nothing_eligible" }`: the queue has nothing
-  you may take right now (everything is claimed, blocked by open
-  predecessors, assigned to someone else, or still `idea`). Say so; do not
-  invent work. If you know of work, `sea_create` it with `status: triaged`;
+  you may take right now (blocked by open predecessors, assigned to someone
+  else, an epic, or still `idea`). Say so; do not invent work.
+- Got `reason: "held"` or `"held_by_stale_claim"`: eligible work exists but
+  someone else holds it; `held[]` names the holder, the claim age and when
+  it frees. A stale holder (silent for over half its lease) has probably
+  crashed: wait with `wait_seconds`, or tell the operator, who can
+  force-release it. Do not quit as if the queue were empty.
+- Got `reason: "handed_off"`: the only work left is a ticket you handed off;
+  another agent is around to take it. Stop, or claim it by id if you must. If you know of work, `sea_create` it with `status: triaged`;
   several tickets at once go in one `sea_apply` (use `templates` for
   repeated steps instead of writing each ticket out).
 
@@ -101,7 +107,9 @@ The same works for `sea_next` when your scope is held.
   to=<blocker> link_type=depends_on`), set `blocked` with a `reason`, then
   `sea_release` with a `note`. `sea_next` will not hand the ticket out again
   until the blocker is terminal.
-- Stopping early: `sea_release { note: "where I stopped and why" }`.
+- Stopping early: `sea_release { note: "where I stopped and why" }`. A
+  release with a note is a hand-off: `sea_next` gives it to another agent
+  before you.
 
 Never leave a ticket `in_progress` and claimed when you stop. If you are
 being shut down, release first.

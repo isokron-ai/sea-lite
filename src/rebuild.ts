@@ -111,6 +111,15 @@ export function applySeaEvent(db: Db, ev: ChainEvent): boolean {
     case EVENT.ticket_claim_force_released:
     case EVENT.ticket_claim_expired: {
       clearClaim(db, s(p['ticket_id'])!, ev.seq);
+      if (ev.event_type === EVENT.ticket_claim_released && p['handoff'] === true) {
+        db.prepare(`INSERT OR REPLACE INTO sea_handoffs (ticket_id, actor, session, released_at, released_seq) VALUES (?, ?, ?, ?, ?)`).run(
+          s(p['ticket_id']),
+          s(p['claim_actor']) ?? ev.actor_id,
+          s(p['claim_session']),
+          ev.occurred_at,
+          ev.seq,
+        );
+      }
       return true;
     }
     case EVENT.ticket_note_added: {
@@ -213,6 +222,8 @@ export function verifySea(db: Db, chain: Chain): SeaVerifyResult {
   const chainResult = chain.verify();
   const missing: SeaVerifyResult['rows_missing_chain_seq'] = [];
   const check = (table: string, idCol: string, seqCol: string) => {
+    // A table a newer build adds (sea_handoffs, 0.7.0) may not exist yet in a store this process has not opened for writing.
+    if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table) === undefined) return;
     const rows = db
       .prepare(`SELECT t.${idCol} AS id, t.${seqCol} AS seq FROM ${table} t LEFT JOIN events e ON e.seq = t.${seqCol} WHERE t.${seqCol} IS NOT NULL AND e.seq IS NULL`)
       .all() as { id: string; seq: number }[];
@@ -228,5 +239,6 @@ export function verifySea(db: Db, chain: Chain): SeaVerifyResult {
   check('sea_leases', 'name', 'last_seq');
   check('sea_lease_intents', 'intent_id', 'opened_seq');
   check('sea_lease_intents', 'intent_id', 'closed_seq');
+  check('sea_handoffs', 'ticket_id', 'released_seq');
   return { chain: chainResult, rows_missing_chain_seq: missing, ok: chainResult.ok && missing.length === 0 };
 }

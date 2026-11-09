@@ -45,7 +45,7 @@ import {
   type ActorToken,
 } from './http.js';
 import { renderDoctor, runDoctor } from './doctor.js';
-import type { ScopeConflict } from './handlers/claims.js';
+import type { NextResult, ScopeConflict } from './handlers/claims.js';
 import type { ActorStats, StatsResult } from './handlers/stats.js';
 import { createServer, PROFILES, type Profile } from './server.js';
 import type { WaitInfo } from './core/wait.js';
@@ -265,6 +265,29 @@ function waitedLine(w: WaitInfo | undefined): string {
   return w === undefined ? '' : `waited ${w.seconds}s for "${w.blocked_by.holder_label}" (ticket ${w.blocked_by.ticket_id.slice(0, 8)}): ${w.freed.replace('_', ' ')}\n`;
 }
 
+/** SL-4 / SL-2: why `next` came back empty, naming the holder and the claim age. */
+function nothingLine(r: NextResult): string {
+  if (r.reason === 'held' || r.reason === 'held_by_stale_claim') {
+    const held = r.held ?? [];
+    let s = `nothing free: ${held.length} eligible ticket(s) held by others${r.reason === 'held_by_stale_claim' ? ' (a holder looks gone)' : ''}\n`;
+    for (const h of held) {
+      s +=
+        `  ${h.ticket_id.slice(0, 8)} "${trunc(h.title, 50)}" held by ${h.holder_label}` +
+        `${h.claim_age_seconds !== null ? `, claimed ${fmtDuration(h.claim_age_seconds)} ago` : ''}, silent ${fmtDuration(h.silent_seconds)}` +
+        `${h.stale ? ' (stale: no renewal for over half its lease)' : ''}; frees at ${h.expires_at.slice(11, 19)}Z (in ${fmtDuration(h.expires_in_seconds)})\n`;
+    }
+    return s + 'wait for it (--wait S), take other work, or an operator can force-release a stale claim (release ID --force --role operator)\n';
+  }
+  if (r.reason === 'handed_off') {
+    const h = r.handed_off ?? [];
+    return (
+      `nothing free for you: you handed off ${h.map((x) => `${x.ticket_id.slice(0, 8)} "${trunc(x.title, 50)}"`).join(', ')}; another agent is around to take it ` +
+      `(yours again at ${h[0]?.yours_again_at.slice(11, 19) ?? '?'}Z, or claim it by id)\n`
+    );
+  }
+  return `nothing eligible (${r.considered} considered)\n`;
+}
+
 function fmtConflict(c: ScopeConflict): string {
   return (
     `conflict: "${c.holder_label}" holds ${c.held.join(', ')} on ticket ${c.ticket_id.slice(0, 8)} ("${c.title}") until ${c.claim_expires_at}` +
@@ -378,7 +401,7 @@ async function main(argv: string[]): Promise<number> {
           ? `claimed ${r.ticket.id.slice(0, 8)}  ${r.ticket.title}  as ${holderLabel(identity.actor, identity.session)} until ${r.expires_at!.slice(11, 19)}Z` +
             ` (${fmtLeft(r.expires_at!)})${r.ticket.claim?.scope ? `; locks ${r.ticket.claim.scope.paths.join(', ')}` : ''}\n` +
             waitedLine(r.waited)
-          : `nothing eligible (${r.considered} considered)\n`,
+          : nothingLine(r),
       );
       return 0;
     }

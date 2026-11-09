@@ -87,6 +87,16 @@ instance id, random per instance), `token_hash`,
 `state` (`open | happened | not_happened | may_have_happened`),
 `opened_by`, `opened_at`, `opened_seq`, `closed_seq`, `evidence_ref`.
 
+### `sea_handoffs` (0.7.0)
+
+The last hand-off of each ticket (a holder's `sea_release` with a `note`):
+`ticket_id`, `actor`, `session`, `released_at`, `released_seq`. Projected
+from `sea_ticket.claim_released` events with `handoff: true`. `sea_next`
+treats it as current only while nothing else touched the ticket
+(`last_seq <= released_seq + 1`: the release and its note are consecutive
+events) and for `HANDOFF_HOLD_SECONDS` (the default lease); in that window
+the ticket goes to another agent first. A 0.6 build ignores the table.
+
 ## Events
 
 Every sea-lite mutation appends exactly the events below to the kronicle-lite
@@ -99,7 +109,7 @@ chain, inside the same `BEGIN IMMEDIATE` transaction as the row change. The
 | `sea_ticket.updated` | `ticket_id changes{…} tags row_version updated_at` | apply `changes` (title/body/kind/priority/assignee), set `tags`, `row_version`, `updated_at`, `last_seq`, `claim_write_count+1` |
 | `sea_ticket.status_set` | `ticket_id from to reason duplicate_of duplicates_link_id row_version updated_at claim_auto_released claim_token_hash` | set status (+ `duplicate_of`), bump; clear claim when `claim_auto_released` |
 | `sea_ticket.claimed` | `ticket_id claim_token_hash claim_actor expires_at lease_seconds rotated scope` (+ `worktree` when bound; + `claim_session` when the holder has one; `set` / `via` / `on_create`) | set claim fields, `claim_scope` (`scope.paths`, or NULL), `claim_worktree`, `claim_session`, `claim_lease_seconds` (from `lease_seconds`), `claim_write_count=0`, `last_seq` |
-| `sea_ticket.claim_released` | `ticket_id claim_token_hash claim_actor scope reason write_count` (+ `worktree via` from `release-worktree`, where `actor_id` is the caller and `claim_actor` the holder) | clear claim (and scope), `last_seq` |
+| `sea_ticket.claim_released` | `ticket_id claim_token_hash claim_actor scope reason write_count` (+ `worktree via` from `release-worktree`, where `actor_id` is the caller and `claim_actor` the holder; + `handoff: true` and `claim_session` on a release with a note, 0.7.0) | clear claim (and scope), `last_seq`; a hand-off row in `sea_handoffs` |
 | `sea_ticket.claim_force_released` | `ticket_id claim_token_hash previous_holder scope released_by reason write_count` | clear claim (and scope), `last_seq` |
 | `sea_ticket.claim_expired` | `ticket_id claim_token_hash claim_actor scope expired_at noticed_at noticed_by` | clear claim (and scope), `last_seq` |
 | `sea_ticket.note_added` | `ticket_id note_id body created_at` | insert note, `last_seq` |
