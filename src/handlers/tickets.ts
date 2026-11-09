@@ -957,6 +957,27 @@ function decodeCursor(c: string | undefined): number {
   }
 }
 
+/** Ticket counts by status in the caller's project ('*' = every project), whatever the page size (SL-5, SL-7). */
+export interface StatusCounts {
+  open: number;
+  closed: number;
+  by_status: Partial<Record<TicketStatus, number>>;
+}
+
+export function statusCounts(ctx: Ctx, project?: string): StatusCounts {
+  const pf = projectFilter(ctx, 't', project);
+  const rows = ctx.db
+    .prepare(`SELECT t.status AS status, COUNT(*) AS n FROM sea_tickets t${pf.sql ? ` WHERE ${pf.sql}` : ''} GROUP BY t.status ORDER BY t.status`)
+    .all(...pf.params) as { status: TicketStatus; n: number }[];
+  const out: StatusCounts = { open: 0, closed: 0, by_status: {} };
+  for (const r of rows) {
+    out.by_status[r.status] = r.n;
+    if (isTerminalStatus(r.status)) out.closed += r.n;
+    else out.open += r.n;
+  }
+  return out;
+}
+
 export function list(ctx: Ctx, input: ListInput): ListResult {
   return tx(ctx.db, () => {
     const swept = sweepAllExpired(ctx);

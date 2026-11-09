@@ -82,6 +82,7 @@ The queue, by hand (no LLM needed):
                      --wait S: if held, wait up to S seconds (≤ 300) for it to free up
   sea-lite release [ID.. | --all] [--note N] [--json]      give claims back (the CLI keeps your tokens)
   sea-lite board   [--all-projects] [--all] [--json]       tickets, holders, locked paths, time left; live sessions
+                     --all: closed tickets too, and the count by status
   sea-lite heartbeat [--json] [--hook]                     renew your live claims (--hook: PostToolUse, rate-limited)
   sea-lite whoami  [--json]                                the identity and project this shell acts as
 
@@ -749,7 +750,10 @@ async function serveCmd(flags: Args['flags']): Promise<number> {
 function boardCmd(flags: Args['flags']): number {
   const project = projectOf(flags);
   const { store, dataDir } = openAs(flags, project);
-  const r = store.list(S.ListInput.parse({ include_terminal: flags['all'] === true, limit: 200, view: 'compact', ...(project === null ? { project: '*' } : {}) }));
+  const all = flags['all'] === true;
+  const r = store.list(S.ListInput.parse({ include_terminal: all, limit: 200, view: 'compact', ...(project === null ? { project: '*' } : {}) }));
+  // SL-5: the header counts by status, not the rows shown (`--all` lists closed tickets too; 0.6 called them all "open").
+  const counts = store.statusCounts(project === null ? '*' : undefined);
   const now = Date.now();
   const tickets = (r.tickets as TicketCompact[]).map((t) => ({
     id: t.id,
@@ -774,12 +778,15 @@ function boardCmd(flags: Args['flags']): number {
   const json = {
     project,
     now: new Date(now).toISOString(),
+    counts,
     tickets,
     sessions: sessions.map((e) => ({ label: holderLabel(e.actor, e.session), actor: e.actor, session: e.session, pid: e.pid, project: e.project, started_at: e.started_at })),
     head: r.head,
   };
   out(flags, json, () => {
-    let s = `sea-lite board — project ${project ?? '* (all)'}; ${tickets.length} open ticket(s); ${new Date(now).toISOString().slice(11, 19)}Z\n`;
+    const shown = tickets.length < (all ? counts.open + counts.closed : counts.open) ? ` (showing ${tickets.length})` : '';
+    const tally = all ? `${counts.open} open, ${counts.closed} closed ticket(s)` : `${counts.open} open ticket(s)`;
+    let s = `sea-lite board — project ${project ?? '* (all)'}; ${tally}${shown}; ${new Date(now).toISOString().slice(11, 19)}Z\n`;
     if (tickets.length > 0) {
       const rows = [['ID', 'STATUS', 'PRI', 'TITLE', 'HOLDER', 'LOCKS', 'LEASE']];
       for (const t of tickets) {
@@ -796,6 +803,10 @@ function boardCmd(flags: Args['flags']): number {
       s += table(rows);
     } else {
       s += '(no open tickets — `sea-lite create "title" --triaged` adds one)\n';
+    }
+    // SL-7: the end-of-queue summary (what an audit closes with), without `list --json | jq`.
+    if (all && counts.open + counts.closed > 0) {
+      s += `by status: ${Object.entries(counts.by_status).map(([k, n]) => `${k} ${n}`).join(', ')}\n`;
     }
     if (sessions.length > 0) {
       s += `live sea-lite servers: ${sessions.map((e) => `${holderLabel(e.actor, e.session)} (pid ${e.pid})`).join(', ')}\n`;

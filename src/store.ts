@@ -259,6 +259,10 @@ export class SeaLite {
   list(input: S.ListInput): tickets.ListResult {
     return tickets.list(this.ctx(input.actor_id), input);
   }
+  /** Ticket counts by status in this store's project (`'*'`: every project). */
+  statusCounts(project?: string): tickets.StatusCounts {
+    return tickets.statusCounts(this.ctx(), project);
+  }
   update(input: S.UpdateInput): tickets.UpdateResult {
     return tickets.update(this.ctx(input.actor_id), input);
   }

@@ -27,6 +27,13 @@ uses semantic versioning once past 0.x.
   the operator role (`--role operator` / `SEA_LITE_ROLE=operator`), else
   `forbidden` and nothing is written. The role stays self-asserted (README,
   Limitations).
+- **`board --all` called closed tickets open (SL-5).** After an audit, it
+  said "42 open ticket(s)" with all 42 resolved, duplicate or dropped. The
+  header now counts by status from the store (not the rows shown, which stop
+  at 200): `N open ticket(s)`, or with `--all` `N open, M closed ticket(s)`
+  and a `by status: resolved 40, duplicate 1, dropped 1` line — the
+  end-of-queue summary that needed `list --json | jq` (SL-7). `board --json`
+  has `counts: { open, closed, by_status }`; library `statusCounts()`.
 - **Raw zod issue arrays as CLI errors (SL-6).** `next --lease 0` and
   `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
   small: expected number to be >=1`.
