@@ -39,7 +39,7 @@ describe('#8.4 redaction happens outside the write transaction', () => {
     s.auditGate('au', { finding_id: 'F1', gate: 'repro', result: 'pass', note: 'checked' });
     s.setFields(f.ticket_id, { summary: 'changed' });
     for (const g of ['intent', 'docs', 'prior_reports', 'refuter'] as const) s.auditGate('au', { finding_id: 'F1', gate: g, result: 'pass' });
-    s.auditReview('au', { finding_id: 'F1', decision: 'approved', submit_plan: 'file it', note: 'ok' });
+    s.as(s.actor, 'operator').auditReview('au', { finding_id: 'F1', decision: 'approved', submit_plan: 'file it', note: 'ok' });
     s.auditImport('au', 'id,title,gate1_repro\nF2,two,a note\n', { trusted: true });
     const l = s.leaseAcquire({ name: 'sandbox:x' });
     const i = s.leaseIntent({ name: 'sandbox:x', token: l.token, op: 'POST /x', target: 'thing', idempotency_key: 'k1' });

@@ -243,13 +243,22 @@ export function reviewQueue(ctx: Ctx, audit_id: string): { items: ReviewItem[] }
   };
 }
 
-/** A human's decision on a queued finding. */
+/** A human's decision on a queued finding. Operator role only (SL-9). */
 export function review(
   ctx0: Ctx,
   audit_id: string,
   input: { finding_id: string; decision: 'approved' | 'rejected' | 'hold'; submit_plan?: string; note?: string; expect_version?: number },
 ): { ticket_id: string; version: number; changed: string[] } {
   const ctx = inAudit(ctx0, audit_id);
+  // SL-9: a review decision is the human's, like a trusted import. Before
+  // 0.7.0 the default agent role could approve its own findings.
+  if (ctx.role !== 'operator') {
+    throw new SeaError(
+      'forbidden',
+      `a review decision needs the operator role; "${ctx.actor}" acts as ${ctx.role} (CLI: --role operator or SEA_LITE_ROLE=operator; library: role: 'operator')`,
+      { role: ctx.role, finding_id: input.finding_id },
+    );
+  }
   if (!['approved', 'rejected', 'hold'].includes(input.decision)) throw new SeaError('invalid_input', 'decision: approved | rejected | hold');
   const patch = prepareFields(
     { review: input.decision, ...(input.submit_plan !== undefined ? { submit_plan: input.submit_plan } : {}), ...(input.note !== undefined ? { review_note: input.note } : {}) },

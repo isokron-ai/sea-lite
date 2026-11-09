@@ -581,7 +581,7 @@ describe('#8.7 import (or any finding write) cannot change submit_plan after a d
     const s = new SeaLite({ memory: true, actor: 'mcp-audit' });
     s.auditOpen({ audit_id: 'a', title: 'A' });
     s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'bug', severity: 'high' }, gates: ALL });
-    s.auditReview('a', { finding_id: 'F', decision, submit_plan: 'file a private report', note: 'ok by me' });
+    s.as(s.actor, 'operator').auditReview('a', { finding_id: 'F', decision, submit_plan: 'file a private report', note: 'ok by me' });
     return s;
   };
   const row = (s: SeaLite) => parseCsv(s.auditExport('a', 'csv') as string).rows[0]!;
@@ -606,7 +606,7 @@ describe('#8.7 import (or any finding write) cannot change submit_plan after a d
     const csv = s.auditExport('a', 'csv') as string;
     expect(s.auditImport('a', csv)).toMatchObject({ queued: 0 }); // (gate results come back as claims: not substance)
     expect(row(s).review).toBe('approved');
-    s.auditReview('a', { finding_id: 'F', decision: 'approved', submit_plan: 'file it upstream' });
+    s.as(s.actor, 'operator').auditReview('a', { finding_id: 'F', decision: 'approved', submit_plan: 'file it upstream' });
     expect(row(s)).toMatchObject({ review: 'approved', submit_plan: 'file it upstream' });
     s.close();
   });
@@ -811,7 +811,7 @@ describe('#8 follow-up: every path that changes what the reviewer decided on reo
     const s = new SeaLite({ memory: true, actor: 'mcp-audit' });
     s.auditOpen({ audit_id: 'a', title: 'A' });
     const f = s.auditFinding('a', { finding_id: 'F', title: 'f', fields: { verdict: 'bug', severity: 'high' }, gates: ALL });
-    s.auditReview('a', { finding_id: 'F', decision: 'approved', submit_plan: 'plan' });
+    s.as(s.actor, 'operator').auditReview('a', { finding_id: 'F', decision: 'approved', submit_plan: 'plan' });
     const gid = (s.db.prepare(`SELECT ticket_id FROM sea_fields WHERE name = 'gate' AND value = 'repro'`).get() as { ticket_id: string }).ticket_id;
     return { s, fid: f.ticket_id, gid };
   };
@@ -867,7 +867,7 @@ describe('#8 follow-up over MCP: a server for another project cannot claim or re
     const s = new SeaLite({ memory: true, actor: 'mcp-audit' });
     s.auditOpen({ audit_id: 'a', title: 'A' });
     const f = s.auditFinding('a', { finding_id: 'F', title: 'f', gates: ALL });
-    s.auditReview('a', { finding_id: 'F', decision: 'approved' });
+    s.as(s.actor, 'operator').auditReview('a', { finding_id: 'F', decision: 'approved' });
     const other = s.as('agent', 'agent', { project: 'some-repo' });
     const { client, close } = await connectInMemory(other);
     const r = (await client.callTool({ name: 'sea_claim', arguments: { ticket_ids: [f.ticket_id] } })) as { isError?: boolean };
