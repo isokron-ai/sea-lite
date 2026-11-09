@@ -32,9 +32,10 @@ and `heartbeat` each start a fresh process per call.
   `kronicle-lite/core` (store, chain, crypto; no MCP SDK) when the installed
   kronicle-lite has it and falls back to the main entry otherwise
   (kronicle-lite 0.9.0); any other import failure is reported, not hidden.
-- **kronicle-lite `^0.9.0`** (was `^0.8.0`, locked at 0.8.0): 0.8.0's open
-  ran its schema setup in `BEGIN IMMEDIATE` on every start; 0.9.0 opens a
-  current store with plain reads.
+- **kronicle-lite `^0.10.0`** (was `^0.8.0`, locked at 0.8.0): 0.8.0's open
+  ran its schema setup in `BEGIN IMMEDIATE` on every start; 0.9.0 and later
+  open a current store with plain reads, and 0.10.0 ships `kronicle-lite/core`,
+  so the slim entry is always used.
 
 Tests: `test/read-path.test.ts` (open + scope-check and open + list answer
 in < 300 ms while another connection holds the write lock; the CLI answers a
