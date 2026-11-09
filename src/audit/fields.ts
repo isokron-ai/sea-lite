@@ -32,6 +32,8 @@ export const REVIEW_STATES = ['pending', 'approved', 'rejected', 'hold'] as cons
 export const FIELD_TYPES = {
   // identity
   audit_id: token,
+  /** SL-12: the gates an audit uses (comma-separated, on the audit's epic); the others start `n/a`. Absent: all five. */
+  audit_gates: z.string().regex(new RegExp(`^(${GATES.join('|')})(,(${GATES.join('|')}))*$`), `comma-separated gates: ${GATES.join(', ')}`),
   finding_id: token,
   gate_of: token,
   gate: z.enum(GATES),
@@ -72,7 +74,7 @@ export type FieldMap = Partial<Record<FieldName, FieldValue>>;
 export const FIELD_NAMES = Object.keys(FIELD_TYPES) as FieldName[];
 
 /** Set only by the audit layer (identity, gate results, the review decision), never by a caller's patch. */
-export const MANAGED_FIELDS: readonly FieldName[] = ['audit_id', 'finding_id', 'gate_of', 'gate', 'result', 'claimed_result', 'review'];
+export const MANAGED_FIELDS: readonly FieldName[] = ['audit_id', 'audit_gates', 'finding_id', 'gate_of', 'gate', 'result', 'claimed_result', 'review'];
 
 /** Validate a patch: known names, typed values; null unsets. */
 export function parseFields(patch: Record<string, unknown>, managed = false): Record<FieldName, FieldValue | null> {
@@ -153,6 +155,13 @@ export function prepareFields(patch: Record<string, unknown>, managed = false): 
     }
   }
   return { values, redacted } as unknown as PreparedFields;
+}
+
+/** A prepared patch without one field (already validated and redacted: nothing to re-scan). */
+export function omitField(prepared: PreparedFields, name: FieldName): PreparedFields {
+  const values = { ...prepared.values } as Record<FieldName, FieldValue | null>;
+  delete values[name];
+  return { values, redacted: prepared.redacted.filter((r) => r !== name) } as unknown as PreparedFields;
 }
 
 /** Caller holds the transaction and prepared the patch outside it. `expect_version` guards against a concurrent writer. */

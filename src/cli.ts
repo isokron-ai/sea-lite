@@ -117,6 +117,8 @@ Inspecting:
   sea-lite verify | rebuild | doctor [--json]
 
 Audits (driven by the mcp-audit runner through the library; these are the human side):
+  sea-lite audit open   AUDIT [--title T] [--gates g,g] [--json]   open (or re-open) an audit; --gates: the gates it uses
+                     (repro,intent,docs,prior_reports,refuter; default all), the others start n/a
   sea-lite audit queue  AUDIT [--json]                     findings whose gates are all resolved, awaiting review
   sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P] [--note N]   (operator role)
   sea-lite audit export AUDIT [--format csv|xlsx] [--out FILE]   the findings tracker (CSV to stdout by default)
@@ -1064,9 +1066,15 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
 /** `sea-lite audit …`: the human side of an audit (review queue, export) and the runner's CSV import. */
 function auditCmd(sub: string, positional: string[], flags: Args['flags']): number {
   const [audit, ...rest] = positional;
-  if (audit === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit queue|review|export|import AUDIT_ID …');
+  if (audit === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit open|queue|review|export|import AUDIT_ID …');
   const { store } = openAs(flags, null);
   switch (sub) {
+    case 'open': {
+      const gates = list(flags['gates']);
+      const r = store.auditOpen({ audit_id: audit, title: str(flags['title']) ?? audit, ...(flags['gates'] !== undefined ? { gates } : {}) });
+      out(flags, r, () => `${r.created ? 'opened' : 'already open:'} audit ${audit} (epic ${r.ticket_id.slice(0, 8)})${gates.length > 0 ? `; gates ${gates.join(', ')}` : ''}\n`);
+      return 0;
+    }
     case 'queue': {
       const r = store.auditReviewQueue(audit);
       out(flags, r, () =>
