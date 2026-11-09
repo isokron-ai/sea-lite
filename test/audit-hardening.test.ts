@@ -170,7 +170,7 @@ describe('clock probe hardening', () => {
     if (r.status !== 0) return;
     const t0 = Date.now();
     expect(typeof fsReference(dir, () => undefined)()).toBe('number');
-    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(Date.now() - t0).toBeLessThan(15_000); // a blocking open would hang until the test timeout
   });
 
   it('an unwritable probe warns once instead of failing open silently, and doctor reports it', async () => {

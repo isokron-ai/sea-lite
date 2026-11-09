@@ -84,6 +84,15 @@ uses semantic versioning once past 0.x.
   managed field `audit_gates` on the epic); a new finding's other gates
   start `n/a` with a note, so the queue logic and the export columns are
   unchanged. Default: all five, as before.
+- **Tests failed under load.** Absolute wall-clock bounds (redaction
+  `< 2 s` / `< 25 ms`, the scope_check hot path `< 1 s`, wait latencies
+  `< 100 ms` / `< 150 ms`, `≥ 3` progress ticks in 1 s) are now relative
+  (redaction growth 8 KB → 64 KB must stay under 24×, best of 5, re-measured
+  once) or generous bounds that still separate the behaviours (well under
+  the `wait_seconds` they race); the notifier test relies on the attempt
+  count. `testTimeout` 20 s → 60 s. Under 3× CPU oversubscription main's
+  timing tests failed and these pass; a quadratic redactor or a broken
+  notifier still fails them.
 - **Raw zod issue arrays as CLI errors (SL-6).** `next --lease 0` and
   `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
   small: expected number to be >=1`.

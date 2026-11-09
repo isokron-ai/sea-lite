@@ -366,7 +366,7 @@ describe('sea_scope_check (hot path)', () => {
     expect(r).toMatchObject({ ok: true, swept_expired: 1 });
   });
 
-  it('is fast: a thousand checks against fifty live scopes stay well under a second', () => {
+  it('is fast: a thousand checks against fifty live scopes (generous bound; ~0.1 s on an idle laptop)', () => {
     const { store } = fresh();
     for (let i = 0; i < 50; i++) {
       const id = triaged(store, `T${i}`);
@@ -380,7 +380,8 @@ describe('sea_scope_check (hot path)', () => {
     }
     const ms = performance.now() - t0;
     expect(conflicts).toBe(Math.floor(1000 / 60) * 50 + Math.min(1000 % 60, 50));
-    expect(ms).toBeLessThan(1000);
+    // A per-check rebuild or chain scan would take minutes; 10 ms a check is far from both, even on a loaded CI runner.
+    expect(ms).toBeLessThan(10_000);
   });
 });
 
