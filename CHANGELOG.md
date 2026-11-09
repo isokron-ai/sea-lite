@@ -42,6 +42,17 @@ The first npm release since 0.6.0: it also ships the fixes listed under
   file named by pid only). The actors file is now updated under
   `<file>.lock` with the same owner-verified, fenced lock; 16 concurrent runs
   keep 16.
+- **Any agent could cut an audit's gates (#16 review).** Re-running
+  `sea-lite audit open AUDIT --gates refuter` (or `auditOpen({ gates })`)
+  changed the gates new findings must pass with the default agent role.
+  Changing the gates of an open audit now needs the operator role, else
+  `forbidden` and nothing changes; re-opening with the same gates (any order)
+  or none still works for anyone. The role is self-asserted, as for `audit
+  review` and `--trusted` (README, Limitations; THREAT-MODEL).
+- **`audit import` of a missing file printed a stack trace (#19 review).**
+  It is now `invalid_input: cannot read FILE: no such file` (or `it is a
+  directory`), exit 2; any other file-system error a command hits prints one
+  `CODE: message` line instead of a stack.
 
 ### Fixed (dogfood findings, 2026-11-08)
 

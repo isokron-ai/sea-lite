@@ -765,7 +765,9 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   do either — but the role is self-asserted, so any process that can run
   `sea-lite` (an agent with a shell included) can pass `audit import …
   --trusted --role operator` or `audit review … approved --role operator`
-  and pass or approve its own findings. The role check stops an agent doing
+  and pass or approve its own findings. Changing the gates of an open audit
+  (`audit open AUDIT --gates …` with other gates) needs the same
+  self-asserted role. The role check stops an agent doing
   it by accident with its default role, nothing more. Until
   the runner executes agents inside agent-sandbox, which keeps the CLI and
   the data dir out of their reach, treat the gate results of an audit as

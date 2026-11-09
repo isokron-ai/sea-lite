@@ -114,9 +114,10 @@ until it releases them.
 role. Force release is gated on it so an *agent* configured as an agent cannot
 reach for it by accident, and so the record says `claim_force_released` with a
 `released_by`. It is an audit distinction, not an access control. The same
-holds for `audit import --trusted` and `audit review` (0.7.0): both need the
-operator role, so an agent cannot record its own gate results or approve its
-own findings by accident with its default role, but any process
+holds for `audit import --trusted`, `audit review` and changing the gates of
+an open audit (`audit open --gates`, 0.7.0): all need the operator role, so an
+agent cannot record its own gate results, approve its own findings or cut the
+gates new findings must pass by accident with its default role, but any process
 that can run the CLI can claim the role. Closing that needs the agents to
 run where they cannot reach the CLI or the data dir (agent-sandbox); until
 then it is a documented limit (README, Limitations).

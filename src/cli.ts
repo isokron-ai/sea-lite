@@ -1148,7 +1148,15 @@ function auditCmd(sub: string, positional: string[], flags: Args['flags']): numb
     case 'import': {
       const file = rest[0];
       if (file === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit import AUDIT_ID FILE.csv (- = stdin)');
-      const r = store.auditImport(audit, readFileSync(file === '-' ? 0 : file, 'utf8'), { trusted: flags['trusted'] === true });
+      let text: string;
+      try {
+        text = readFileSync(file === '-' ? 0 : file, 'utf8');
+      } catch (e) {
+        // 0.7.0 review: a missing file was a raw stack trace.
+        const c = (e as NodeJS.ErrnoException).code ?? 'error';
+        throw new SeaError('invalid_input', `cannot read ${file === '-' ? 'stdin' : file}: ${c === 'ENOENT' ? 'no such file' : c === 'EISDIR' ? 'it is a directory' : c}`, { file, code: c });
+      }
+      const r = store.auditImport(audit, text, { trusted: flags['trusted'] === true });
       out(flags, r, () => `created ${r.created}, updated ${r.updated}, unchanged ${r.unchanged}; ${r.queued} entered the review queue\n`);
       return 0;
     }
@@ -1173,6 +1181,10 @@ main(process.argv.slice(2)).then(
     } else if (err instanceof Error && err.name === 'ZodError') {
       // SL-6: one readable line per issue, not the raw issue array.
       process.stderr.write(`invalid_input: ${formatZodError(err as unknown as Parameters<typeof formatZodError>[0])}\n`);
+      process.exitCode = 2;
+    } else if (err instanceof Error && typeof (err as NodeJS.ErrnoException).code === 'string' && (err as NodeJS.ErrnoException).syscall !== undefined) {
+      // A file-system error (ENOENT, EACCES, …) is the environment, not a bug: one line, no stack.
+      process.stderr.write(`${(err as NodeJS.ErrnoException).code}: ${err.message}\n`);
       process.exitCode = 2;
     } else {
       process.stderr.write(`${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
