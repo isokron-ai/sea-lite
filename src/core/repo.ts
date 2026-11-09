@@ -48,6 +48,8 @@ export interface Ctx {
   readonly clock?: ClockGuard;
   /** Byte budget of one sea_list / sea_history page (P2-03); default DEFAULT_MAX_RESPONSE_BYTES. */
   readonly maxResponseBytes?: number;
+  /** Live registered servers on this host (core/identity.ts listInstances), read only when needed (SL-2). */
+  readonly peers?: () => readonly { actor: string; session: string | null; project: string | null }[];
 }
 
 /** 256 KiB: see store.ts DEFAULT_MAX_RESPONSE_BYTES (kept here so handlers need not import the store). */

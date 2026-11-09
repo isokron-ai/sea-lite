@@ -250,6 +250,8 @@ export function release(ctx: Ctx, input: ReleaseInput): ReleaseResult {
       throw new SeaError('invalid_input', 'claim_token is required unless force is set', { ticket_id: id });
     }
     validateFence(row, input.claim_token, ctx.actor, ctx.now);
+    // SL-2: a release with a note is a hand-off; sea_next keeps it from the holder that handed it off (see next()).
+    const handoff = input.note !== undefined;
     const r = ctx.chain.append({
       event_type: EVENT.ticket_claim_released,
       actor_id: ctx.actor,
@@ -261,12 +263,20 @@ export function release(ctx: Ctx, input: ReleaseInput): ReleaseResult {
         scope: parseScopeJson(row.claim_scope),
         reason: input.reason ?? null,
         write_count: row.claim_write_count,
+        // Present only on hand-offs, so other release payloads are unchanged.
+        ...(handoff ? { handoff: true, ...(row.claim_session !== null ? { claim_session: row.claim_session } : {}) } : {}),
       },
     });
     clearClaim(ctx, id, r.event.seq);
+    if (handoff) recordHandoff(ctx.db, id, row.claim_actor ?? ctx.actor, row.claim_session, ctx.now.toISOString(), r.event.seq);
     const note = input.note !== undefined ? addNote(ctx, id, input.note) : null;
     return { ticket: rowToTicket(mustGetRow(ctx.db, id)), forced: false, previous_holder: row.claim_actor, note, head: ctx.chain.head() };
   });
+}
+
+/** Projection of a hand-off (also used by rebuild). */
+export function recordHandoff(db: Ctx['db'], ticket_id: string, actor: string, session: string | null, at: string, seq: number): void {
+  db.prepare(`INSERT OR REPLACE INTO sea_handoffs (ticket_id, actor, session, released_at, released_seq) VALUES (?, ?, ?, ?, ?)`).run(ticket_id, actor, session, at, seq);
 }
 
 function clearClaim(ctx: Ctx, id: string, seq: number): void {
@@ -278,21 +288,173 @@ function clearClaim(ctx: Ctx, id: string, seq: number): void {
     .run(seq, id);
 }
 
+/** An eligible ticket sea_next could not hand out because someone else holds it (SL-4). */
+export interface HeldTicket {
+  ticket_id: string;
+  title: string;
+  holder: string;
+  holder_session: string | null;
+  holder_label: string;
+  /** When the current claim was taken, and how long ago (the claim age). Null when the chain has no claim event for it. */
+  claimed_at: string | null;
+  claim_age_seconds: number | null;
+  /** Seconds since the holder last renewed the lease (any tool call renews it). */
+  silent_seconds: number;
+  expires_at: string;
+  expires_in_seconds: number;
+  /** Silent for more than half its lease: the holder has probably crashed; the claim frees itself at expires_at. */
+  stale: boolean;
+}
+
+/** One of the caller's own hand-offs that sea_next is keeping for another agent (SL-2). */
+export interface HandedOffTicket {
+  ticket_id: string;
+  title: string;
+  released_at: string;
+  /** When sea_next gives it back to the caller even if other agents are around. */
+  yours_again_at: string;
+}
+
 export interface NextResult {
   ticket: Ticket | null;
   claim_token: string | null;
   expires_at: string | null;
-  /** Why nothing came back, when ticket is null. */
-  reason: 'nothing_eligible' | null;
+  /**
+   * Why nothing came back, when ticket is null: `nothing_eligible` (no work
+   * for you at all), `held` (eligible work exists but others hold it),
+   * `held_by_stale_claim` (as held, and at least one holder has gone silent
+   * — see `held[].stale`), `handed_off` (the only work left is what you
+   * handed off; another agent is active).
+   */
+  reason: 'nothing_eligible' | 'held' | 'held_by_stale_claim' | 'handed_off' | null;
   considered: number;
+  /** When ticket is null and eligible work is held by others: who holds it, since when, and when it frees. */
+  held?: HeldTicket[];
+  /** When ticket is null and your own hand-offs are being kept for another agent. */
+  handed_off?: HandedOffTicket[];
   head: ChainHead;
+}
+
+/**
+ * SL-2: how long a hand-off is kept from the agent that handed it off while
+ * other agents are around (then it is anyone's again, so it cannot starve).
+ */
+export const HANDOFF_HOLD_SECONDS = DEFAULT_LEASE_SECONDS;
+/** SL-2: chain activity by another actor this recent counts as "another agent is around". */
+const PEER_ACTIVE_SECONDS = DEFAULT_LEASE_SECONDS;
+const PEER_EVENT_SCAN = 500;
+
+/**
+ * Is any agent other than the caller around to take a hand-off? A live
+ * registered server of another actor or session, a live claim of someone
+ * else, or chain activity of another actor within PEER_ACTIVE_SECONDS.
+ */
+function otherAgentAround(ctx: Ctx): boolean {
+  const me = { actor: ctx.actor, session: ctx.session };
+  for (const p of ctx.peers?.() ?? []) {
+    if ((p.project === null || ctx.project === null || p.project === ctx.project) && !ownsClaim(me, p.actor, p.session)) return true;
+  }
+  const pf = projectFilter(ctx);
+  const claims = ctx.db
+    .prepare(`SELECT t.claim_actor, t.claim_session FROM sea_tickets t WHERE t.claim_token_hash IS NOT NULL AND t.claim_expires_at > ?${pf.sql ? ` AND ${pf.sql}` : ''}`)
+    .all(ctx.now.toISOString(), ...pf.params) as { claim_actor: string; claim_session: string | null }[];
+  if (claims.some((c) => !ownsClaim(me, c.claim_actor, c.claim_session))) return true;
+  const since = new Date(ctx.now.getTime() - PEER_ACTIVE_SECONDS * 1000).toISOString();
+  const recent = ctx.db.prepare(`SELECT actor_id, occurred_at FROM events ORDER BY seq DESC LIMIT ?`).all(PEER_EVENT_SCAN) as { actor_id: string; occurred_at: string }[];
+  return recent.some((e) => e.occurred_at >= since && e.actor_id !== ctx.actor);
+}
+
+/**
+ * SQL for "this ticket is work sea_next may hand out", apart from being
+ * claimed: an eligible status, not parked, assigned to the caller (or
+ * nobody, with include_unassigned), every predecessor terminal, not an epic
+ * (SL-3: kind epic, or the parent_of an open child — an epic is done by
+ * doing its children), and the caller's project / kind / tag filters.
+ */
+function eligibleWhere(ctx: Ctx, input: Pick<NextInput, 'include_unassigned' | 'kind' | 'tag'>): { where: string[]; params: unknown[] } {
+  const where: string[] = [
+    `t.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)})`,
+    `t.priority <> 'parked'`,
+    input.include_unassigned ? `(t.assignee = ? OR t.assignee IS NULL)` : `t.assignee = ?`,
+    `NOT EXISTS (SELECT 1 FROM sea_links l JOIN sea_tickets p ON p.id = l.from_id
+       WHERE l.state = 'active' AND l.link_type = 'blocks' AND l.to_id = t.id AND p.status NOT IN (${sqlIn(TERMINAL_STATES)}))`,
+    `NOT EXISTS (SELECT 1 FROM sea_links l JOIN sea_tickets p ON p.id = l.to_id
+       WHERE l.state = 'active' AND l.link_type = 'depends_on' AND l.from_id = t.id AND p.status NOT IN (${sqlIn(TERMINAL_STATES)}))`,
+    ...EPIC_EXCLUSION,
+  ];
+  const params: unknown[] = [ctx.actor];
+  const pf = projectFilter(ctx);
+  if (pf.sql) {
+    where.push(pf.sql);
+    params.push(...pf.params);
+  }
+  if (input.kind && input.kind.length > 0) {
+    where.push(`t.kind IN (${input.kind.map(() => '?').join(', ')})`);
+    params.push(...input.kind);
+  }
+  if (input.tag !== undefined) {
+    where.push(`EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)`);
+    params.push(input.tag);
+  }
+  return { where, params };
+}
+
+/** SL-3: sea_next never hands out an epic (kind epic, or the parent of an open child). */
+const EPIC_EXCLUSION: readonly string[] = [
+  `t.kind <> 'epic'`,
+  `NOT EXISTS (SELECT 1 FROM sea_links l JOIN sea_tickets c ON c.id = l.to_id
+     WHERE l.state = 'active' AND l.link_type = 'parent_of' AND l.from_id = t.id AND c.status NOT IN (${sqlIn(TERMINAL_STATES)}))`,
+];
+
+/** SL-2: the caller's own current hand-off of `t` (the release + note are the last events on the ticket), kept for HANDOFF_HOLD_SECONDS. */
+const MY_HANDOFF = `EXISTS (SELECT 1 FROM sea_handoffs h WHERE h.ticket_id = t.id AND h.actor = ? AND h.session IS ?
+  AND t.last_seq <= h.released_seq + 1 AND h.released_at > ?)`;
+
+/** SL-4: eligible tickets held by someone else's live claim, earliest to free first. */
+function heldBy(ctx: Ctx, input: NextInput): HeldTicket[] {
+  const { where, params } = eligibleWhere(ctx, input);
+  const now = ctx.now.getTime();
+  const rows = ctx.db
+    .prepare(`SELECT t.* FROM sea_tickets t WHERE ${where.join(' AND ')} AND t.claim_token_hash IS NOT NULL AND t.claim_expires_at > ? ORDER BY t.claim_expires_at, t.id LIMIT 20`)
+    .all(...params, ctx.now.toISOString()) as TicketRow[];
+  const claimedAt = ctx.db.prepare(
+    `SELECT occurred_at FROM events WHERE event_type = ? AND json_extract(payload_canonical, '$.ticket_id') = ? AND seq <= ? ORDER BY seq DESC LIMIT 1`,
+  );
+  const out: HeldTicket[] = [];
+  for (const r of rows) {
+    if (ownsClaim(ctx, r.claim_actor, r.claim_session)) continue;
+    const exp = Date.parse(r.claim_expires_at!);
+    const lease = r.claim_lease_seconds ?? DEFAULT_LEASE_SECONDS;
+    // A renewal sets expires_at = now + lease, so the last sign of life is expires_at - lease.
+    const silent = Math.max(0, Math.round((now - (exp - lease * 1000)) / 1000));
+    const at = (claimedAt.get(EVENT.ticket_claimed, r.id, r.last_seq) as { occurred_at: string } | undefined)?.occurred_at ?? null;
+    out.push({
+      ticket_id: r.id,
+      title: r.title,
+      holder: r.claim_actor!,
+      holder_session: r.claim_session ?? null,
+      holder_label: holderLabel(r.claim_actor!, r.claim_session),
+      claimed_at: at,
+      claim_age_seconds: at === null ? null : Math.max(0, Math.round((now - Date.parse(at)) / 1000)),
+      silent_seconds: silent,
+      expires_at: r.claim_expires_at!,
+      expires_in_seconds: Math.max(0, Math.round((exp - now) / 1000)),
+      stale: silent * 2 > lease,
+    });
+  }
+  return out;
 }
 
 /**
  * The queue's dispatch: the highest-priority unclaimed triaged/in_progress
  * ticket assigned to me (or unassigned) whose predecessors are all terminal,
  * claimed in the same transaction. Predecessors: tickets that `block` this
- * one, and tickets this one `depends_on`.
+ * one, and tickets this one `depends_on`. Never an epic (SL-3). A ticket the
+ * caller handed off (released with a note) goes to another agent first: it
+ * comes back to the caller only when nothing else is eligible and no other
+ * agent is around, or after HANDOFF_HOLD_SECONDS (SL-2). When nothing comes
+ * back, `reason` and `held` say whether eligible work is held, by whom, for
+ * how long, and whether the holder looks gone (SL-4).
  */
 export function next(ctx: Ctx, input: NextInput): NextResult {
   const lease = clampLease(input.lease_seconds);
@@ -302,40 +464,56 @@ export function next(ctx: Ctx, input: NextInput): NextResult {
     // The scope is what the caller will touch regardless of which ticket comes
     // back, so a conflict refuses the dispatch rather than skipping tickets.
     if (scope) assertScopeFree(ctx, scope);
-    const where: string[] = [
-      `t.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)})`,
-      `t.claim_token_hash IS NULL`,
-      `t.priority <> 'parked'`,
-      input.include_unassigned ? `(t.assignee = ? OR t.assignee IS NULL)` : `t.assignee = ?`,
-      `NOT EXISTS (SELECT 1 FROM sea_links l JOIN sea_tickets p ON p.id = l.from_id
-         WHERE l.state = 'active' AND l.link_type = 'blocks' AND l.to_id = t.id AND p.status NOT IN (${sqlIn(TERMINAL_STATES)}))`,
-      `NOT EXISTS (SELECT 1 FROM sea_links l JOIN sea_tickets p ON p.id = l.to_id
-         WHERE l.state = 'active' AND l.link_type = 'depends_on' AND l.from_id = t.id AND p.status NOT IN (${sqlIn(TERMINAL_STATES)}))`,
-    ];
-    const params: unknown[] = [ctx.actor];
-    const pf = projectFilter(ctx);
-    if (pf.sql) {
-      where.push(pf.sql);
-      params.push(...pf.params);
-    }
-    if (input.kind && input.kind.length > 0) {
-      where.push(`t.kind IN (${input.kind.map(() => '?').join(', ')})`);
-      params.push(...input.kind);
-    }
-    if (input.tag !== undefined) {
-      where.push(`EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)`);
-      params.push(input.tag);
-    }
+    const { where, params } = eligibleWhere(ctx, input);
+    where.push(`t.claim_token_hash IS NULL`);
     const order = `CASE t.priority ${Object.entries(PRIORITY_RANK)
       .map(([p, r]) => `WHEN '${p}' THEN ${r}`)
       .join(' ')} END, CASE t.status WHEN 'in_progress' THEN 0 ELSE 1 END, t.created_seq ASC`;
     const considered = (
       ctx.db.prepare(`SELECT COUNT(*) AS n FROM sea_tickets t WHERE ${where.join(' AND ')}`).get(...params) as { n: number }
     ).n;
-    const row = ctx.db.prepare(`SELECT t.* FROM sea_tickets t WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT 1`).get(...params) as
-      | TicketRow
-      | undefined;
-    if (!row) return { ticket: null, claim_token: null, expires_at: null, reason: 'nothing_eligible', considered, head: ctx.chain.head() };
+    const holdSince = new Date(ctx.now.getTime() - HANDOFF_HOLD_SECONDS * 1000).toISOString();
+    const mine = [ctx.actor, ctx.session, holdSince];
+    const pick = (extra: string, extraParams: unknown[]) =>
+      ctx.db.prepare(`SELECT t.* FROM sea_tickets t WHERE ${where.join(' AND ')}${extra} ORDER BY ${order} LIMIT 1`).get(...params, ...extraParams) as
+        | TicketRow
+        | undefined;
+    // SL-2: someone else's work (or work nobody handed off) first.
+    let row = pick(` AND NOT ${MY_HANDOFF}`, mine);
+    let handedOff: HandedOffTicket[] = [];
+    if (!row) {
+      const own = pick(` AND ${MY_HANDOFF}`, mine);
+      if (own) {
+        if (!otherAgentAround(ctx)) row = own; // the only agent: it is yours again
+        else {
+          const rows = ctx.db
+            .prepare(
+              `SELECT t.id, t.title, h.released_at FROM sea_tickets t JOIN sea_handoffs h ON h.ticket_id = t.id WHERE ${where.join(' AND ')} AND ${MY_HANDOFF} ORDER BY h.released_at LIMIT 20`,
+            )
+            .all(...params, ...mine) as { id: string; title: string; released_at: string }[];
+          handedOff = rows.map((r) => ({
+            ticket_id: r.id,
+            title: r.title,
+            released_at: r.released_at,
+            yours_again_at: new Date(Date.parse(r.released_at) + HANDOFF_HOLD_SECONDS * 1000).toISOString(),
+          }));
+        }
+      }
+    }
+    if (!row) {
+      const held = heldBy(ctx, input);
+      const reason: NextResult['reason'] = held.some((h) => h.stale) ? 'held_by_stale_claim' : held.length > 0 ? 'held' : handedOff.length > 0 ? 'handed_off' : 'nothing_eligible';
+      return {
+        ticket: null,
+        claim_token: null,
+        expires_at: null,
+        reason,
+        considered,
+        ...(held.length > 0 ? { held } : {}),
+        ...(handedOff.length > 0 ? { handed_off: handedOff } : {}),
+        head: ctx.chain.head(),
+      };
+    }
     const c = placeClaim(ctx, row, lease, { via: 'sea_next' }, scope, worktree);
     return {
       ticket: rowToTicket(mustGetRow(ctx.db, row.id)),
@@ -501,7 +679,7 @@ export function busyQueueBlocker(ctx: Ctx): Blocker | null {
       `SELECT t.id, t.title, t.claim_actor, t.claim_session, t.claim_expires_at FROM sea_tickets t
         WHERE t.claim_token_hash IS NOT NULL AND t.claim_expires_at > ?${pf.sql ? ` AND ${pf.sql}` : ''}
           AND (
-            (t.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)}) AND t.priority <> 'parked')
+            (t.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)}) AND t.priority <> 'parked' AND ${EPIC_EXCLUSION.join(' AND ')})
             OR EXISTS (SELECT 1 FROM sea_links l JOIN sea_tickets c ON c.id = l.to_id
                         WHERE l.state = 'active' AND l.link_type = 'blocks' AND l.from_id = t.id
                           AND c.status IN (${sqlIn(NEXT_ELIGIBLE_STATES)}) AND c.claim_token_hash IS NULL)

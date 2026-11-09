@@ -11,6 +11,7 @@ import { KronicleLite, type Chain, type Db, type KronicleLiteOptions } from 'kro
 import { clockGuard, fsReference, parseMaxSkew, type ClockGuard, type Reference } from './core/clock.js';
 import { reopenAfterWrite } from './audit/review-state.js';
 import { SeaError } from './core/errors.js';
+import { listInstances } from './core/identity.js';
 import { assertWritable, isBusy, mustGetRow, resolveId, tx, type Ctx } from './core/repo.js';
 import { SEA_MIGRATIONS, SEA_NEWEST_TABLE, SEA_POST_MIGRATION_SQL, SEA_SCHEMA_META_KEY, SEA_SCHEMA_SQL, SEA_SCHEMA_VERSION } from './db/schema.js';
 import * as auditH from './audit/audit.js';
@@ -220,6 +221,7 @@ export class SeaLite {
       ...(this.clockGuard ? { clock: this.clockGuard } : {}),
       instance: this.instance,
       maxResponseBytes: this.maxResponseBytes,
+      peers: () => (this.kronicle.dataDir !== null ? listInstances(this.kronicle.dataDir) : []),
     };
   }
 

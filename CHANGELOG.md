@@ -34,6 +34,31 @@ uses semantic versioning once past 0.x.
   and a `by status: resolved 40, duplicate 1, dropped 1` line — the
   end-of-queue summary that needed `list --json | jq` (SL-7). `board --json`
   has `counts: { open, closed, by_status }`; library `statusCounts()`.
+- **A hand-off went straight back to the same agent (SL-2).** In the
+  dogfood run 6/6 of agent-a's `sea_release {note}` hand-offs were
+  re-claimed by agent-a 1–10 ms later. A release with a note is now a
+  hand-off (`handoff: true` on the release event, new projection table
+  `sea_handoffs`, rebuilt from the chain): `sea_next` gives the hander other
+  work first and keeps the hand-off for another agent; the hander gets it
+  back only when nothing else is eligible and no other agent is around (a
+  live registered server, a live claim, or chain activity in the last 15
+  min), or after `HANDOFF_HOLD_SECONDS` (the default lease, so it cannot
+  starve). Otherwise `reason: "handed_off"`. A release without a note is
+  unchanged.
+- **`sea_next` handed out the epic (SL-3).** It now skips `kind: epic` and a
+  ticket that is the `parent_of` an open child (an epic is done by doing its
+  children); `sea_claim` by id still works, and a held epic no longer makes
+  `wait_seconds` wait.
+- **A crashed agent's held ticket showed as `nothing_eligible` (SL-4).**
+  When eligible work exists but someone else holds it, `sea_next` returns
+  `reason: "held"` or `"held_by_stale_claim"` with `held[]`: the holder,
+  when the claim was taken and its age, seconds since the last renewal, the
+  expiry, and `stale` (silent for over half its lease). The CLI prints it:
+  `nothing free: 1 eligible ticket(s) held by others (a holder looks gone)`
+  / `<id> "title" held by agent-c, claimed 3m12s ago, silent 3m12s (stale…);
+  frees at …`. `tools/list` changes (sea_next / sea_release descriptions,
+  `sea_next` output), so the catalog pin is refreshed; the core profile
+  stays under its 12 KB budget.
 - **Raw zod issue arrays as CLI errors (SL-6).** `next --lease 0` and
   `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
   small: expected number to be >=1`.

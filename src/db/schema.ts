@@ -25,16 +25,16 @@ import { ALL_STATES, LINK_STATES, LINK_TYPES, PRIORITIES, sqlIn, TICKET_KINDS } 
 export const SEA_SCHEMA_VERSION = 4;
 export const SEA_SCHEMA_META_KEY = 'sea_schema_version';
 
-export const SEA_TABLES = ['sea_lease_intents', 'sea_leases', 'sea_field_heads', 'sea_fields', 'sea_tickets_fts', 'sea_notes', 'sea_links', 'sea_tickets'] as const;
+export const SEA_TABLES = ['sea_handoffs', 'sea_lease_intents', 'sea_leases', 'sea_field_heads', 'sea_fields', 'sea_tickets_fts', 'sea_notes', 'sea_links', 'sea_tickets'] as const;
 
 /**
  * 0.7.0 (audit orchestration): typed ticket fields and named exclusive
  * leases. New tables only, created on open; the schema version stays 4 so an
  * older sea-lite keeps opening the store (it ignores these tables and the
  * `sea_ticket.fields_set` / `sea_lease.*` events). Opening skips DDL only
- * when this table exists.
+ * when this table exists (0.7.0 dogfood: `sea_handoffs`, the newest).
  */
-export const SEA_NEWEST_TABLE = 'sea_lease_intents';
+export const SEA_NEWEST_TABLE = 'sea_handoffs';
 
 export const SEA_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS sea_tickets (
@@ -160,6 +160,20 @@ CREATE TABLE IF NOT EXISTS sea_lease_intents (
   evidence_ref    TEXT
 );
 CREATE INDEX IF NOT EXISTS sea_lease_intents_idx ON sea_lease_intents (lease_name, state);
+
+-- 0.7.0 (SL-2): the last hand-off of a ticket (a holder's sea_release with a
+-- note), so sea_next does not give it straight back to the agent that handed
+-- it off. Projected from sea_ticket.claim_released {handoff: true}; current
+-- only while nothing touched the ticket since: the release and its note are
+-- consecutive events, so t.last_seq <= released_seq + 1 (an older build that
+-- claims the ticket leaves a stale row, which that check ignores).
+CREATE TABLE IF NOT EXISTS sea_handoffs (
+  ticket_id     TEXT PRIMARY KEY,
+  actor         TEXT NOT NULL,
+  session       TEXT,
+  released_at   TEXT NOT NULL,
+  released_seq  INTEGER NOT NULL
+);
 `;
 
 /**

@@ -233,8 +233,26 @@ export const NextOutput = z.object({
   ticket: TicketOut.nullable(),
   claim_token: z.string().nullable(),
   expires_at: z.string().nullable(),
-  reason: z.enum(['nothing_eligible']).nullable(),
+  reason: z.enum(['nothing_eligible', 'held', 'held_by_stale_claim', 'handed_off']).nullable(),
   considered: z.number(),
+  held: z
+    .array(
+      z.object({
+        ticket_id: z.string(),
+        title: z.string(),
+        holder: z.string(),
+        holder_session: z.string().nullable(),
+        holder_label: z.string(),
+        claimed_at: z.string().nullable(),
+        claim_age_seconds: z.number().nullable(),
+        silent_seconds: z.number(),
+        expires_at: z.string(),
+        expires_in_seconds: z.number(),
+        stale: z.boolean(),
+      }),
+    )
+    .optional(),
+  handed_off: z.array(z.object({ ticket_id: z.string(), title: z.string(), released_at: z.string(), yours_again_at: z.string() })).optional(),
   head: HeadOut,
   waited: WaitOut.optional(),
 });
