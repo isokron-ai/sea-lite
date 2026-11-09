@@ -6,6 +6,32 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+### Fixed (dogfood findings, 2026-11-08)
+
+- **Concurrent CLI releases could fail on Windows** (CI, windows-latest:
+  1 of 16 concurrent `release` processes exited non-zero, intermittently;
+  latent since C2-02 in 0.6.1). `release` read `cli-claims.json` outside the
+  lock while other processes renamed over it; on Windows that rename or
+  read fails with EPERM / EACCES / EBUSY, and the read turned any error into
+  "no tokens" ("no CLI claim token", exit 2). Reads now take the lock, a
+  read error other than a missing file is an error, and the rename and the
+  lock-file create retry those transient codes (`src/cli-claims.ts`).
+
+- **A misspelt option silently dropped the path lock (SL-1).**
+  `sea-lite next --pathz src/auth` claimed a ticket with no lock and exited
+  0. CLI parsing is now strict for every command (ported from
+  mcp-catalog-snap 0.2.0): an unknown option, a value option with no value
+  (`next --paths --json`), a repeated option, a boolean given a non-boolean
+  (`--json=yes`), a stray positional (`next src/auth`) and a single-dash
+  option (`-p`) are `invalid_input` (exit 2) with a "did you mean" hint;
+  unknown commands and `audit` / `lease` subcommands get one too. Numbers
+  are plain decimal (`--lease 0x10` was 16). `next --help` printed nothing
+  useful and claimed a ticket; it now prints the help. `--trusted` is a
+  flag (it swallowed the file name after it).
+- **Raw zod issue arrays as CLI errors (SL-6).** `next --lease 0` and
+  `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
+  small: expected number to be >=1`.
+
 ### Added (0.7.0 candidate: audit orchestration)
 
 - **Audit tracker for the mcp-audit runner** (library + CLI; no new MCP

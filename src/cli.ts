@@ -4,15 +4,16 @@
  *
  * Exit codes (every command): 0 ok; 1 a conflict (scope_conflict,
  * already_claimed, a fence error, a refused commit) or a failed check
- * (verify, doctor); 2 bad input or any other error. `scope-check` and
+ * (verify, doctor); 2 bad input (including an unknown or misspelt option:
+ * see cli-args.ts) or any other error. `scope-check` and
  * `precommit` are hook contracts: see hooks/README.md.
  */
 
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { defaultDataDir } from 'kronicle-lite';
 import { spawnSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { SeaError } from './core/errors.js';
@@ -50,73 +51,18 @@ import { createServer, PROFILES, type Profile } from './server.js';
 import type { WaitInfo } from './core/wait.js';
 import { DEFAULT_ACTOR, parseRole, parseTracks, SeaLite } from './store.js';
 import { writePrivateFile } from './audit/export.js';
+import { snapshotCliClaims, updateCliClaims } from './cli-claims.js';
+import { COMMANDS, formatZodError, strictArgs, strictInt, unknownCommand, type Args } from './cli-args.js';
 
 export { VERSION } from './version.js';
 import { VERSION } from './version.js';
-
-interface Args {
-  cmd: string;
-  positional: string[];
-  flags: Record<string, string | true>;
-}
-
-/** Flags that never take a value, so `--triaged "title"` does not swallow the title. */
-const BOOLEAN_FLAGS = new Set([
-  'json',
-  'all',
-  'all-projects',
-  'triaged',
-  'hook',
-  'http',
-  'force',
-  'install',
-  'help',
-  'mine',
-  'core',
-  'allow-insecure-token-file',
-]);
-
-function parseArgs(argv: string[]): Args {
-  const [cmd = 'help', ...rest] = argv;
-  const positional: string[] = [];
-  const flags: Record<string, string | true> = {};
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i]!;
-    // `--` ends the options: everything after it is a positional (a path may start with `-`).
-    if (a === '--') {
-      positional.push(...rest.slice(i + 1));
-      break;
-    }
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq > 2) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
-        continue;
-      }
-      const key = a.slice(2);
-      const next = rest[i + 1];
-      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
-        flags[key] = next;
-        i++;
-      } else {
-        flags[key] = true;
-      }
-    } else {
-      positional.push(a);
-    }
-  }
-  return { cmd, positional, flags };
-}
 
 function str(v: string | true | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
 function num(v: string | true | undefined, flag: string): number | undefined {
-  if (typeof v !== 'string') return undefined;
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < 0) throw new SeaError('invalid_input', `--${flag} must be a non-negative integer, got "${v}"`);
-  return n;
+  return strictInt(v, flag);
 }
 
 /** Comma-separated flag values. */
@@ -294,79 +240,6 @@ function repoRelative(raw: string[], flags: Args['flags']): { paths: string[]; p
 
 // ───────────────────────────── CLI claim tokens ─────────────────────────────
 
-/**
- * Tokens of claims taken from the CLI, so `release` needs no token juggling.
- * `<data dir>/cli-claims.json`, mode 0600, keyed by ticket id. Holding a
- * token is holding the claim: the file is as sensitive as the data dir.
- */
-interface CliClaim {
-  token: string;
-  actor: string;
-  session: string | null;
-  expires_at: string;
-}
-const CLI_CLAIMS_FILE = 'cli-claims.json';
-
-function readCliClaims(dataDir: string): Record<string, CliClaim> {
-  try {
-    const j = JSON.parse(readFileSync(join(dataDir, CLI_CLAIMS_FILE), 'utf8')) as { claims?: Record<string, CliClaim> };
-    return j.claims ?? {};
-  } catch {
-    return {};
-  }
-}
-
-function writeCliClaims(dataDir: string, claims: Record<string, CliClaim>): void {
-  const file = join(dataDir, CLI_CLAIMS_FILE);
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ v: 1, claims }, null, 2) + '\n', { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, file);
-}
-
-/** A lock older than this is a crashed holder's: taken over. Every holder is one short read-modify-write. */
-const CLI_CLAIMS_LOCK_STALE_MS = 30_000;
-const CLI_CLAIMS_LOCK_WAIT_MS = 30_000;
-
-/**
- * C2-02 (0.6.1): read-modify-write of cli-claims.json under an exclusive lock
- * file (`open(O_CREAT|O_EXCL)`, retried), so concurrent CLI claims and
- * releases never drop each other's tokens (40 concurrent claims lost up to 34
- * tokens on 0.6.0). The write itself stays temp file + rename.
- */
-function updateCliClaims(dataDir: string, change: (claims: Record<string, CliClaim>) => void): void {
-  mkdirSync(dataDir, { recursive: true });
-  const lock = join(dataDir, `${CLI_CLAIMS_FILE}.lock`);
-  const deadline = Date.now() + CLI_CLAIMS_LOCK_WAIT_MS;
-  let fd: number | null = null;
-  while (fd === null) {
-    try {
-      fd = openSync(lock, 'wx', 0o600);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > CLI_CLAIMS_LOCK_STALE_MS) unlinkSync(lock);
-      } catch {
-        // gone already: retry at once
-      }
-      if (Date.now() > deadline) throw new SeaError('wait_timeout', `${lock} is held by another sea-lite process; remove it if no sea-lite command is running`, { lock });
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5 + Math.floor(Math.random() * 20));
-    }
-  }
-  try {
-    const claims = readCliClaims(dataDir);
-    change(claims);
-    writeCliClaims(dataDir, claims);
-  } finally {
-    closeSync(fd);
-    try {
-      unlinkSync(lock);
-    } catch {
-      // taken over as stale: nothing to remove
-    }
-  }
-}
-
 function rememberTokens(dataDir: string, who: ResolvedIdentity, got: { ticket_id: string; claim_token: string; expires_at: string }[]): void {
   if (got.length === 0) return;
   updateCliClaims(dataDir, (claims) => {
@@ -414,13 +287,23 @@ function out(flags: Args['flags'], json: unknown, text: () => string): void {
 // ───────────────────────────── commands ─────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
-  const { cmd, positional, flags } = parseArgs(argv);
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  const first = argv[0] ?? 'help';
+  if (first === 'help' || first === '--help' || first === '-h') {
     process.stdout.write(HELP);
     return 0;
   }
-  if (cmd === '--version' || cmd === 'version') {
+  if (first === '--version' || first === 'version') {
     process.stdout.write(VERSION + '\n');
+    return 0;
+  }
+  if (!COMMANDS.includes(first)) {
+    process.stderr.write(`${unknownCommand(first)}\n\n${HELP}`);
+    return 2;
+  }
+  // SL-1: strict. An option the command does not take is an error ("did you mean"), never a no-op.
+  const { cmd, sub, positional, flags } = strictArgs(argv);
+  if (flags['help'] === true) {
+    process.stdout.write(HELP);
     return 0;
   }
 
@@ -500,7 +383,8 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'release': {
       const { store, identity, dataDir } = openAs(flags, projectOf(flags));
-      const held = readCliClaims(dataDir);
+      // Under the lock: on Windows an unlocked read races the renames of concurrent CLI commands (see cli-claims.ts).
+      const held = snapshotCliClaims(dataDir);
       const mine = (id: string) => {
         const c = held[id];
         return c !== undefined && c.actor === identity.actor && c.session === identity.session;
@@ -695,9 +579,9 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'audit':
-      return auditCmd(positional, flags);
+      return auditCmd(sub!, positional, flags);
     case 'lease': {
-      const [sub, name] = positional;
+      const [name] = positional;
       if ((sub !== 'show' && sub !== 'release') || name === undefined) throw new SeaError('invalid_input', 'usage: sea-lite lease show NAME | lease release NAME --force (operator)');
       const { store } = openAs(flags, null);
       if (sub === 'show') {
@@ -1144,9 +1028,9 @@ async function serveHttpCmd(store: SeaLite, flags: Args['flags']): Promise<numbe
 }
 
 /** `sea-lite audit …`: the human side of an audit (review queue, export) and the runner's CSV import. */
-function auditCmd(positional: string[], flags: Args['flags']): number {
-  const [sub, audit, ...rest] = positional;
-  if (sub === undefined || audit === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit queue|review|export|import AUDIT_ID …');
+function auditCmd(sub: string, positional: string[], flags: Args['flags']): number {
+  const [audit, ...rest] = positional;
+  if (audit === undefined) throw new SeaError('invalid_input', 'usage: sea-lite audit queue|review|export|import AUDIT_ID …');
   const { store } = openAs(flags, null);
   switch (sub) {
     case 'queue': {
@@ -1209,7 +1093,8 @@ main(process.argv.slice(2)).then(
       process.stderr.write(`${err.code}: ${err.message}\n`);
       process.exitCode = CONFLICT_CODES.has(err.code) ? 1 : 2;
     } else if (err instanceof Error && err.name === 'ZodError') {
-      process.stderr.write(`invalid_input: ${err.message}\n`);
+      // SL-6: one readable line per issue, not the raw issue array.
+      process.stderr.write(`invalid_input: ${formatZodError(err as unknown as Parameters<typeof formatZodError>[0])}\n`);
       process.exitCode = 2;
     } else {
       process.stderr.write(`${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

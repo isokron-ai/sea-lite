@@ -290,6 +290,12 @@ sea_release  note="where I stopped"
 Also: `sea-lite list`, `show ID`, `stats --since 7d`, `rebuild`,
 `doctor`, `whoami`, `heartbeat`. `sea-lite help` lists everything.
 
+The CLI is strict (0.7.0): an option a command does not take, a value
+option with no value, a repeated option or a stray argument is an error
+(exit 2) with the closest spelling — `next --pathz src/auth` says
+`unknown option --pathz for next (did you mean --paths?)` and claims
+nothing, where 0.6 claimed the ticket with no path lock.
+
 ## Tools
 
 | Tool | What it does |
