@@ -11,6 +11,15 @@ The first npm release since 0.6.0: it also ships the fixes listed under
 
 ### Fixed (dogfood findings, 2026-11-08)
 
+- **Concurrent CLI releases could fail on Windows** (CI, windows-latest:
+  1 of 16 concurrent `release` processes exited non-zero, intermittently;
+  latent since C2-02 in 0.6.1). `release` read `cli-claims.json` outside the
+  lock while other processes renamed over it; on Windows that rename or
+  read fails with EPERM / EACCES / EBUSY, and the read turned any error into
+  "no tokens" ("no CLI claim token", exit 2). Reads now take the lock, a
+  read error other than a missing file is an error, and the rename and the
+  lock-file create retry those transient codes (`src/cli-claims.ts`).
+
 - **A misspelt option silently dropped the path lock (SL-1).**
   `sea-lite next --pathz src/auth` claimed a ticket with no lock and exited
   0. CLI parsing is now strict for every command (ported from
