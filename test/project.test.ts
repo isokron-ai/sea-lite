@@ -94,9 +94,9 @@ describe('project keys', () => {
   });
 
   it('normalizes remotes', () => {
-    expect(normalizeRemote('git@github.com:rafe-walker/sea-lite.git')).toBe('github.com/rafe-walker/sea-lite');
-    expect(normalizeRemote('https://user:pw@GitHub.com:443/rafe-walker/sea-lite/')).toBe('github.com/rafe-walker/sea-lite');
-    expect(normalizeRemote('ssh://git@github.com/rafe-walker/sea-lite.git')).toBe('github.com/rafe-walker/sea-lite');
+    expect(normalizeRemote('git@github.com:isokron-ai/sea-lite.git')).toBe('github.com/isokron-ai/sea-lite');
+    expect(normalizeRemote('https://user:pw@GitHub.com:443/isokron-ai/sea-lite/')).toBe('github.com/isokron-ai/sea-lite');
+    expect(normalizeRemote('ssh://git@github.com/isokron-ai/sea-lite.git')).toBe('github.com/isokron-ai/sea-lite');
     expect(normalizeRemote('/srv/git/r.git')).toBe('/srv/git/r');
     expect(originUrl('[core]\n\tbare = false\n[remote "upstream"]\n\turl = x\n[remote "origin"]\n\turl = git@h:o/r.git\n')).toBe('git@h:o/r.git');
   });
