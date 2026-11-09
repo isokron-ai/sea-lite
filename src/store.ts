@@ -407,7 +407,7 @@ export class SeaLite {
   leaseShow(name: string): leaseH.LeaseStatus {
     return leaseH.show(this.ctx(), name);
   }
-  auditOpen(input: { audit_id: string; title: string; catalog_fingerprint?: string }): auditH.OpenAuditResult {
+  auditOpen(input: { audit_id: string; title: string; catalog_fingerprint?: string; gates?: readonly string[] }): auditH.OpenAuditResult {
     return auditH.openAudit(this.ctx(), input);
   }
   auditFinding(audit_id: string, input: auditH.FindingInput): auditH.UpsertFindingResult {

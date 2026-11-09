@@ -340,3 +340,75 @@ describe('SL-9: review decisions are the operator\'s', () => {
     }
   });
 });
+
+describe('audit tracker dogfood fixes (SL-8, SL-10, SL-12)', () => {
+  const withStore = (f: (s: SeaLite) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sea-aud-'));
+    const s = new SeaLite({ dataDir: dir, actor: 'runner' });
+    try {
+      f(s);
+    } finally {
+      s.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('SL-8: rows, export and the queue of an unknown audit are not_found (not an empty header), with how to open one', () => {
+    withStore((s) => {
+      for (const f of [() => s.auditRows('nope'), () => s.auditExport('nope', 'csv'), () => s.auditReviewQueue('nope')]) {
+        expect(codeOf(f)).toBe('not_found');
+      }
+      expect(() => s.auditImport('nope', 'id,title\nF1,t\n')).toThrow(/audit nope not found \(open it first: sea-lite audit open nope --title T, or auditOpen\)/);
+    });
+  });
+
+  it('SL-10: an untrusted re-import of an unchanged export is a no-op (no claimed_result events)', () => {
+    withStore((s) => {
+      s.auditOpen({ audit_id: 'A', title: 'A' });
+      const op = s.as('human', 'operator');
+      op.auditImport(
+        'A',
+        'id,title,verdict,repro_result,intent_result,docs_result,prior_reports_result,refuter_result,gate1_repro\n' +
+          'G1,-2^63 overflow,bug,pass,pass,n/a,pass,pass,=cmd\nG2,two,bug,,,,,,\nG3,three,bug,pass,claimed:pass,,,,\n',
+        { trusted: true },
+      );
+      s.auditImport('A', 'id,title,repro_result\nG2,two,fail\n');
+      op.auditReview('A', { finding_id: 'G1', decision: 'approved', submit_plan: 'PR' });
+      const csv = s.auditExport('A', 'csv') as string;
+      const head = s.chain.head().seq;
+      expect(s.auditImport('A', csv)).toEqual({ created: 0, updated: 0, unchanged: 3, queued: 0 });
+      expect(op.auditImport('A', csv, { trusted: true })).toEqual({ created: 0, updated: 0, unchanged: 3, queued: 0 });
+      expect(s.chain.head().seq).toBe(head);
+      expect(s.auditExport('A', 'csv')).toBe(csv);
+      // a claim that differs from the recorded result is still recorded as a claim
+      expect(s.auditImport('A', 'id,title,repro_result\nG1,-2^63 overflow,fail\n').updated).toBe(1);
+      expect(parseCsv(s.auditExport('A', 'csv') as string).rows[0]!['repro_result']).toBe('pass');
+    });
+  });
+
+  it('SL-12: an audit that uses one gate queues a finding once that gate has a result; the other gates are n/a', () => {
+    withStore((s) => {
+      expect(s.auditOpen({ audit_id: 'R', title: 'refuter only', gates: ['refuter'] }).created).toBe(true);
+      const op = s.as('human', 'operator');
+      expect(op.auditImport('R', 'id,title,refuter_result\nF1,one,pass\nF2,two,\n', { trusted: true })).toMatchObject({ created: 2, queued: 1 });
+      expect(s.auditReviewQueue('R').items.map((i) => i.finding_id)).toEqual(['F1']);
+      const row = parseCsv(s.auditExport('R', 'csv') as string).rows[1]!;
+      expect(row).toMatchObject({ id: 'F2', repro_result: 'n/a', intent_result: 'n/a', docs_result: 'n/a', prior_reports_result: 'n/a', refuter_result: 'pending' });
+      expect(row['gate1_repro']).toBe('not a gate of audit R');
+      // default: all five gates, as before
+      s.auditOpen({ audit_id: 'D', title: 'all gates' });
+      expect(op.auditImport('D', 'id,title,refuter_result\nF1,one,pass\n', { trusted: true }).queued).toBe(0);
+      // bad gate lists
+      expect(codeOf(() => s.auditOpen({ audit_id: 'X', title: 'x', gates: [] }))).toBe('invalid_input');
+      expect(codeOf(() => s.auditOpen({ audit_id: 'X', title: 'x', gates: ['refuter', 'bogus'] }))).toBe('invalid_input');
+      expect(codeOf(() => s.auditOpen({ audit_id: 'X', title: 'x', gates: ['refuter', 'refuter'] }))).toBe('invalid_input');
+      // the field is managed: a caller cannot set it through setFields
+      const epic = s.auditOpen({ audit_id: 'R', title: 'refuter only' }).ticket_id;
+      expect(codeOf(() => s.setFields(epic, { audit_gates: 'repro' }))).toBe('invalid_input');
+      expect(s.fields(epic).fields.audit_gates).toBe('refuter');
+      expect(s.rebuild().tickets).toBeGreaterThan(0);
+      expect(s.verify().ok).toBe(true);
+      expect(s.auditReviewQueue('R').items.map((i) => i.finding_id)).toEqual(['F1']);
+    });
+  });
+});

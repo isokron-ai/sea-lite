@@ -17,7 +17,7 @@ import { tx, type Ctx } from '../core/repo.js';
 import { insertLink, insertTicket } from '../handlers/tickets.js';
 import { looksLikeSecret } from './redact.js';
 import { byField, GATE_SUBSTANCE, reconcileReview, REVIEW_NEUTRAL } from './review-state.js';
-import { GATES, MANAGED_FIELDS, prepareFields, readFields, redactText, setFields, type FieldMap, type FieldName, type Gate, type PreparedFields } from './fields.js';
+import { GATES, MANAGED_FIELDS, omitField, prepareFields, readFields, redactText, setFields, type FieldMap, type FieldName, type Gate, type PreparedFields } from './fields.js';
 
 export const AUDIT_PROJECT_PREFIX = 'audit:';
 const AUDIT_ID = /^[A-Za-z0-9._-]{1,100}$/;
@@ -39,8 +39,23 @@ function epicOf(ctx: Ctx, audit_id: string): string {
         WHERE a.name = 'audit_id' AND a.value = ? AND t.kind = 'epic' ORDER BY a.set_seq LIMIT 1`,
     )
     .get(audit_id) as { id: string } | undefined;
-  if (!id) throw new SeaError('not_found', `audit ${audit_id} not found (open it first)`, { audit_id });
+  // SL-8: say how to open one (0.7.0 candidates said "open it first" with no CLI to do it).
+  if (!id) throw new SeaError('not_found', `audit ${audit_id} not found (open it first: sea-lite audit open ${audit_id} --title T, or auditOpen)`, { audit_id });
   return id.id;
+}
+
+/** SL-12: parse and check a gate list (non-empty, known gates, no repeats). */
+export function parseGates(gates: readonly string[]): Gate[] {
+  if (gates.length === 0) throw new SeaError('invalid_input', `gates: at least one of ${GATES.join(', ')}`);
+  for (const g of gates) if (!(GATES as readonly string[]).includes(g)) throw new SeaError('invalid_input', `unknown gate "${g}" (gates: ${GATES.join(', ')})`, { gate: g });
+  if (new Set(gates).size !== gates.length) throw new SeaError('invalid_input', 'gates: each gate once');
+  return GATES.filter((g) => gates.includes(g));
+}
+
+/** The gates an audit uses (SL-12): its epic's audit_gates, else all five. */
+function auditGates(ctx: Ctx, epic: string): readonly Gate[] {
+  const v = readFields(ctx.db, epic).audit_gates;
+  return v === undefined ? GATES : (String(v).split(',') as Gate[]);
 }
 
 export interface OpenAuditResult {
@@ -48,13 +63,30 @@ export interface OpenAuditResult {
   created: boolean;
 }
 
-/** Idempotent by audit_id. */
-export function openAudit(ctx0: Ctx, input: { audit_id: string; title: string; catalog_fingerprint?: string }): OpenAuditResult {
+/**
+ * Idempotent by audit_id. `gates` (SL-12): the gates this audit uses; a new
+ * finding's other gates start as `n/a` ("not a gate of this audit"), so an
+ * audit with one refuter gate does not need three `n/a` columns per row
+ * before anything reaches the review queue. Default: all five. Re-opening
+ * with other gates changes new findings only.
+ */
+export function openAudit(ctx0: Ctx, input: { audit_id: string; title: string; catalog_fingerprint?: string; gates?: readonly string[] }): OpenAuditResult {
   const ctx = inAudit(ctx0, input.audit_id);
   // #8: everything that is scanned for credentials is prepared before the transaction.
   const title = redactText(input.title, 'title').text;
-  const fp = input.catalog_fingerprint !== undefined ? prepareFields({ catalog_fingerprint: input.catalog_fingerprint }, true) : null;
-  const identity = prepareFields({ audit_id: input.audit_id, ...(input.catalog_fingerprint !== undefined ? { catalog_fingerprint: input.catalog_fingerprint } : {}) }, true);
+  const gates = input.gates !== undefined ? parseGates(input.gates) : null;
+  const fp =
+    input.catalog_fingerprint !== undefined || gates !== null
+      ? prepareFields({ ...(input.catalog_fingerprint !== undefined ? { catalog_fingerprint: input.catalog_fingerprint } : {}), ...(gates !== null ? { audit_gates: gates.join(',') } : {}) }, true)
+      : null;
+  const identity = prepareFields(
+    {
+      audit_id: input.audit_id,
+      ...(input.catalog_fingerprint !== undefined ? { catalog_fingerprint: input.catalog_fingerprint } : {}),
+      ...(gates !== null ? { audit_gates: gates.join(',') } : {}),
+    },
+    true,
+  );
   return tx(ctx.db, () => {
     const existing = ctx.db
       .prepare(`SELECT a.ticket_id AS id FROM sea_fields a JOIN sea_tickets t ON t.id = a.ticket_id WHERE a.name = 'audit_id' AND a.value = ? AND t.kind = 'epic'`)
@@ -116,6 +148,8 @@ export interface PreparedFinding {
   title: { text: string; redacted: boolean };
   identity: PreparedFields;
   gateIdentity: Record<Gate, PreparedFields>;
+  /** SL-12: the identity of a gate the audit does not use (result n/a, with a note saying so). */
+  gateUnused: Record<Gate, PreparedFields>;
   fields: PreparedFields;
   gates: [Gate, PreparedFields][];
 }
@@ -130,6 +164,9 @@ export function prepareFinding(audit_id: string, input: FindingInput): PreparedF
     title: redactText(input.title, 'title'),
     identity: prepareFields({ audit_id, finding_id: input.finding_id, tracker_status: 'Not started' }, true),
     gateIdentity: Object.fromEntries(GATES.map((g) => [g, prepareFields({ audit_id, gate_of: input.finding_id, gate: g, result: 'pending' }, true)])) as Record<Gate, PreparedFields>,
+    gateUnused: Object.fromEntries(
+      GATES.map((g) => [g, prepareFields({ audit_id, gate_of: input.finding_id, gate: g, result: 'n/a', note: `not a gate of audit ${audit_id}` }, true)]),
+    ) as Record<Gate, PreparedFields>,
     fields: prepareFields(input.fields ?? {}),
     gates: (Object.entries(input.gates ?? {}) as [Gate, GateInput][]).map(([g, v]) => [g, gatePatch(g, v)]),
   };
@@ -157,10 +194,11 @@ export function applyFinding(ctx0: Ctx, audit_id: string, p: PreparedFinding): U
     id = insertTicket(ctx, { title: p.title.text, body: '', kind: 'investigation', priority: 'medium', tags: ['audit', 'finding'], assignee: ctx.actor, status: 'triaged' }).row.id;
     insertLink(ctx, epic, id, 'parent_of');
     setFields(ctx, id, p.identity);
+    const used = auditGates(ctx, epic);
     for (const g of GATES) {
       const gid = insertTicket(ctx, { title: `${g}: ${p.finding_id}`, body: '', kind: 'chore', priority: 'medium', tags: ['audit', 'gate'], assignee: ctx.actor, status: 'triaged' }).row.id;
       insertLink(ctx, id, gid, 'parent_of');
-      setFields(ctx, gid, p.gateIdentity[g]);
+      setFields(ctx, gid, used.includes(g) ? p.gateIdentity[g] : p.gateUnused[g]);
     }
   } else if (setTitle(ctx, id, p.title.text)) changed.push('title');
   const r = setFields(ctx, id, p.fields);
@@ -193,9 +231,18 @@ function gatePatch(gate: Gate, v: GateInput): PreparedFields {
   return prepareFields(patch, true);
 }
 
-function gateWrite(ctx: Ctx, audit_id: string, finding_id: string, gate: Gate, patch: PreparedFields): { changed: string[]; redacted: string[] } {
+function gateWrite(ctx: Ctx, audit_id: string, finding_id: string, gate: Gate, patch0: PreparedFields): { changed: string[]; redacted: string[] } {
   const gid = byField(ctx, audit_id, 'gate_of', finding_id, { name: 'gate', value: gate });
   if (!gid) throw new SeaError('not_found', `finding ${finding_id} not found in audit ${audit_id}`, { finding_id });
+  // SL-10: claiming the result the gate already has recorded is a no-op. An
+  // untrusted re-import of an unchanged export sends every recorded result
+  // back as a claim; 0.7.0 candidates chained a claimed_result for each.
+  let patch = patch0;
+  const claimed = patch.values.claimed_result;
+  if (claimed !== undefined && claimed !== null) {
+    const cur = readFields(ctx.db, gid).result;
+    if (cur !== undefined && cur !== 'pending' && String(cur) === String(claimed)) patch = omitField(patch, 'claimed_result');
+  }
   const r = setFields(ctx, gid, patch);
   return { changed: r.changed, redacted: r.redacted ?? [] };
 }
@@ -226,6 +273,7 @@ export interface ReviewItem {
 /** Findings awaiting a human decision, oldest first. Compact by design. */
 export function reviewQueue(ctx: Ctx, audit_id: string): { items: ReviewItem[] } {
   auditProject(audit_id);
+  epicOf(ctx, audit_id); // SL-8: an unknown audit is not_found, not an empty queue
   const rows = ctx.db
     .prepare(
       `SELECT t.id, t.title FROM sea_fields r
@@ -357,6 +405,7 @@ const GATE_RESULT_COLUMN: Record<Gate, (typeof EXPORT_COLUMNS)[number]> = {
 /** Every finding of an audit as export rows, ordered by finding id. */
 export function findingRows(ctx: Ctx, audit_id: string): ExportRow[] {
   auditProject(audit_id);
+  epicOf(ctx, audit_id); // SL-8: an unknown audit is not_found, not a header-only export
   const rows = ctx.db
     .prepare(
       `SELECT t.id, t.title, f.value AS finding_id FROM sea_fields f

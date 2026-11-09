@@ -75,6 +75,18 @@ describe('sea-lite audit / lease', () => {
     expect(sl(['audit', 'review', 'ph2', 'G2', 'approved', '--role', 'operator'])).toMatchObject({ code: 0, out: expect.stringMatching(/^G2: approved/) });
   });
 
+  it('SL-8 / SL-12: audit open on the CLI (with --gates); an unknown audit is an error, not an empty export', () => {
+    expect(sl(['audit', 'export', 'nope'])).toMatchObject({ code: 2, out: '', err: expect.stringMatching(/^not_found: audit nope not found \(open it first: sea-lite audit open nope/) });
+    expect(sl(['audit', 'queue', 'nope']).code).toBe(2);
+    expect(sl(['audit', 'open', 'ph3', '--title', 'PostHog 3', '--gates', 'refuter'])).toMatchObject({ code: 0, out: expect.stringMatching(/^opened audit ph3 \(epic [0-9a-f]{8}\); gates refuter$/m) });
+    expect(sl(['audit', 'open', 'ph3']).out).toMatch(/^already open: audit ph3/);
+    expect(sl(['audit', 'open', 'ph4', '--gates', 'refuter,nope']).err).toMatch(/unknown gate "nope"/);
+    const csv = join(base, 'f.csv');
+    writeFileSync(csv, 'id,title,refuter_result\nF1,one,pass\n');
+    expect(sl(['audit', 'import', 'ph3', csv, '--trusted', '--role', 'operator']).out).toMatch(/1 entered the review queue/);
+    expect(sl(['audit', 'export', 'ph3']).out.split('\r\n')[1]).toMatch(/,n\/a,n\/a,n\/a,n\/a,pass,pending,/);
+  });
+
   it('lease show, and force release only as operator', () => {
     const s = new SeaLite({ dataDir: data, actor: 'w1' });
     s.leaseAcquire({ name: 'sandbox:ph2' });

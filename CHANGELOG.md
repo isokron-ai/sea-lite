@@ -59,6 +59,22 @@ uses semantic versioning once past 0.x.
   frees at …`. `tools/list` changes (sea_next / sea_release descriptions,
   `sea_next` output), so the catalog pin is refreshed; the core profile
   stays under its 12 KB budget.
+- **No CLI to open an audit; an unknown audit exported a bare header
+  (SL-8).** `sea-lite audit open AUDIT [--title T] [--gates g,g]` opens one
+  (idempotent). `audit export` / `queue` and library `auditRows` /
+  `auditExport` / `auditReviewQueue` of an unknown audit are `not_found`
+  (exit 2) instead of a header with exit 0, and the not-found message says
+  how to open it.
+- **Export → import was not a no-op (SL-10).** An untrusted re-import of an
+  unchanged export reported "updated 8" and chained 40
+  `sea_ticket.fields_set {claimed_result}` events: every recorded result came
+  back as a claim. A claim equal to the gate's recorded result is now a
+  no-op; a different claim is still recorded.
+- **The review queue needed all five gates (SL-12).** An audit can declare
+  the gates it uses (`auditOpen({ gates })`, `audit open --gates refuter`;
+  managed field `audit_gates` on the epic); a new finding's other gates
+  start `n/a` with a note, so the queue logic and the export columns are
+  unchanged. Default: all five, as before.
 - **Raw zod issue arrays as CLI errors (SL-6).** `next --lease 0` and
   `claim 55c3` now print one line, e.g. `invalid_input: lease_seconds: Too
   small: expected number to be >=1`.

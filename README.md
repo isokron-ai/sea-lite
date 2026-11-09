@@ -694,7 +694,12 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   out of every code project's `sea_next` / `sea_list`. A finding gets gate
   sub-tickets `repro`, `intent`, `docs`, `prior_reports`, `refuter`
   (`parent_of`). Upserts are idempotent by finding id and write nothing when
-  nothing changed.
+  nothing changed. Open an audit from the library (`auditOpen`) or the CLI
+  (`sea-lite audit open AUDIT --title T`); `gates` / `--gates refuter`
+  names the gates the audit uses, and a new finding's other gates start
+  `n/a` ("not a gate of audit …"), so an audit with one refuter gate needs
+  no `n/a` columns before a finding reaches the queue (default: all five).
+  An unknown audit is `not_found` everywhere (import, queue, export).
 - **Human review queue**: once every gate has a result (`pass | fail | n/a`)
   the finding is `review: pending`; `sea-lite audit queue AUDIT`, then
   `sea-lite audit review AUDIT FINDING approved|rejected|hold [--plan P]
@@ -725,7 +730,9 @@ sea.auditGate('posthog-2', { finding_id: 'L3', gate: 'repro', result: 'pass', ev
   duplicate or unknown column and a duplicate id, naming the row. Imported
   gate results are **claims** (`claimed:pass`; they never count toward
   review) unless the import is `--trusted`, which needs the operator role:
-  an agent-written CSV cannot pass its own gates. `--out` writes a fresh
+  an agent-written CSV cannot pass its own gates. Re-importing an unchanged
+  export, trusted or not, writes nothing (a claim equal to the recorded
+  result is a no-op). `--out` writes a fresh
   0600 file and renames it into place, so a planted link is replaced, never
   written through.
 
