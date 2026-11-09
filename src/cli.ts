@@ -12,8 +12,8 @@
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { defaultDataDir } from 'kronicle-lite';
 import { spawnSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { SeaError } from './core/errors.js';
@@ -51,6 +51,7 @@ import { createServer, PROFILES, type Profile } from './server.js';
 import type { WaitInfo } from './core/wait.js';
 import { DEFAULT_ACTOR, parseRole, parseTracks, SeaLite } from './store.js';
 import { writePrivateFile } from './audit/export.js';
+import { snapshotCliClaims, updateCliClaims } from './cli-claims.js';
 import { COMMANDS, formatZodError, strictArgs, strictInt, unknownCommand, type Args } from './cli-args.js';
 
 export { VERSION } from './version.js';
@@ -239,79 +240,6 @@ function repoRelative(raw: string[], flags: Args['flags']): { paths: string[]; p
 
 // ───────────────────────────── CLI claim tokens ─────────────────────────────
 
-/**
- * Tokens of claims taken from the CLI, so `release` needs no token juggling.
- * `<data dir>/cli-claims.json`, mode 0600, keyed by ticket id. Holding a
- * token is holding the claim: the file is as sensitive as the data dir.
- */
-interface CliClaim {
-  token: string;
-  actor: string;
-  session: string | null;
-  expires_at: string;
-}
-const CLI_CLAIMS_FILE = 'cli-claims.json';
-
-function readCliClaims(dataDir: string): Record<string, CliClaim> {
-  try {
-    const j = JSON.parse(readFileSync(join(dataDir, CLI_CLAIMS_FILE), 'utf8')) as { claims?: Record<string, CliClaim> };
-    return j.claims ?? {};
-  } catch {
-    return {};
-  }
-}
-
-function writeCliClaims(dataDir: string, claims: Record<string, CliClaim>): void {
-  const file = join(dataDir, CLI_CLAIMS_FILE);
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ v: 1, claims }, null, 2) + '\n', { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, file);
-}
-
-/** A lock older than this is a crashed holder's: taken over. Every holder is one short read-modify-write. */
-const CLI_CLAIMS_LOCK_STALE_MS = 30_000;
-const CLI_CLAIMS_LOCK_WAIT_MS = 30_000;
-
-/**
- * C2-02 (0.6.1): read-modify-write of cli-claims.json under an exclusive lock
- * file (`open(O_CREAT|O_EXCL)`, retried), so concurrent CLI claims and
- * releases never drop each other's tokens (40 concurrent claims lost up to 34
- * tokens on 0.6.0). The write itself stays temp file + rename.
- */
-function updateCliClaims(dataDir: string, change: (claims: Record<string, CliClaim>) => void): void {
-  mkdirSync(dataDir, { recursive: true });
-  const lock = join(dataDir, `${CLI_CLAIMS_FILE}.lock`);
-  const deadline = Date.now() + CLI_CLAIMS_LOCK_WAIT_MS;
-  let fd: number | null = null;
-  while (fd === null) {
-    try {
-      fd = openSync(lock, 'wx', 0o600);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > CLI_CLAIMS_LOCK_STALE_MS) unlinkSync(lock);
-      } catch {
-        // gone already: retry at once
-      }
-      if (Date.now() > deadline) throw new SeaError('wait_timeout', `${lock} is held by another sea-lite process; remove it if no sea-lite command is running`, { lock });
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5 + Math.floor(Math.random() * 20));
-    }
-  }
-  try {
-    const claims = readCliClaims(dataDir);
-    change(claims);
-    writeCliClaims(dataDir, claims);
-  } finally {
-    closeSync(fd);
-    try {
-      unlinkSync(lock);
-    } catch {
-      // taken over as stale: nothing to remove
-    }
-  }
-}
-
 function rememberTokens(dataDir: string, who: ResolvedIdentity, got: { ticket_id: string; claim_token: string; expires_at: string }[]): void {
   if (got.length === 0) return;
   updateCliClaims(dataDir, (claims) => {
@@ -455,7 +383,8 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'release': {
       const { store, identity, dataDir } = openAs(flags, projectOf(flags));
-      const held = readCliClaims(dataDir);
+      // Under the lock: on Windows an unlocked read races the renames of concurrent CLI commands (see cli-claims.ts).
+      const held = snapshotCliClaims(dataDir);
       const mine = (id: string) => {
         const c = held[id];
         return c !== undefined && c.actor === identity.actor && c.session === identity.session;
