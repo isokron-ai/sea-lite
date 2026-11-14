@@ -6,6 +6,25 @@ uses semantic versioning once past 0.x.
 
 ## [0.7.1] — Unreleased
 
+### Added — releases by trusted publishing with provenance
+
+- **`.github/workflows/release.yml`.** A pushed `vX.Y.Z` tag runs the CI
+  gates on the tagged commit (lint, typecheck, tests, catalog check) and packs
+  the tested build in a job with no token; then, from the `npm-publish`
+  environment, publishes that tarball with npm trusted publishing (OIDC, no
+  npm token anywhere) and `--provenance`, and checks the registry serves the
+  same integrity with a provenance attestation. Only the publish job has
+  `id-token: write`, and it installs no dependencies. A manual run is a dry
+  run and cannot publish.
+- **`scripts/release-check.mjs`** (not shipped) and **`RELEASING.md`**: the
+  tag, npm/Node, pack and registry checks; the one-time owner setup and the
+  release steps.
+- package.json `repository` and `bugs` name `github.com/isokron-ai/sea-lite`,
+  where the repository now lives (npm refuses a provenance statement whose
+  repository differs), and so do the links in server.json and the README.
+  package.json `homepage` and server.json `websiteUrl` point to
+  isokron.ai/open-source.
+
 Hook latency: `scope-check` (cc-anchor's PreToolUse Edit guard), `board`
 and `heartbeat` each start a fresh process per call.
 
