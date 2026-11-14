@@ -4,6 +4,27 @@ All notable changes to sea-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.7.2] — Unreleased
+
+### Added — releases by trusted publishing with provenance
+
+- **`.github/workflows/release.yml`.** A pushed `vX.Y.Z` tag runs the CI
+  gates on the tagged commit (lint, typecheck, tests, catalog check) and packs
+  the tested build in a job with no token; then, from the `npm-publish`
+  environment, publishes that tarball with npm trusted publishing (OIDC, no
+  npm token anywhere) and `--provenance`, and checks the registry serves the
+  same integrity with a provenance attestation. Only the publish job has
+  `id-token: write`; it installs no project dependencies. A tag whose commit is
+  not on `main` is refused. A manual run is a dry run and cannot publish.
+- **`scripts/release-check.mjs`** (not shipped) and **`RELEASING.md`**: the
+  tag, npm/Node, pack and registry checks; the one-time owner setup and the
+  release steps.
+- package.json `repository` and `bugs` name `github.com/isokron-ai/sea-lite`,
+  where the repository now lives (npm refuses a provenance statement whose
+  repository differs), and so do the links in server.json and the README.
+  package.json `homepage` and server.json `websiteUrl` point to
+  isokron.ai/open-source/sea-lite.
+
 ## [0.7.1] — Unreleased
 
 Hook latency: `scope-check` (cc-anchor's PreToolUse Edit guard), `board`
