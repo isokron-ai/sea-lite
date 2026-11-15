@@ -813,4 +813,4 @@ Apache-2.0. See `LICENSE` and `NOTICE`.
 
 ---
 
-Built and maintained by [IsoKron](https://isokron.ai).
+Built and maintained by [IsoKron](https://isokron.ai/?utm_source=npm&utm_medium=readme&utm_campaign=sea-lite), which tests MCP servers for write safety.

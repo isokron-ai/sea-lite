@@ -1,6 +1,6 @@
 {
   "name": "sea-lite",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "MCP work queue for parallel coding agents: claim fencing, path-scoped claims, typed links, atomic batches, hash-chained history (composes with kronicle-lite).",
   "license": "Apache-2.0",
   "type": "module",
@@ -57,6 +57,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/isokron-ai/sea-lite.git"
+  },
+  "homepage": "https://isokron.ai/open-source/sea-lite?utm_source=npm&utm_medium=package&utm_campaign=sea-lite",
+  "bugs": {
+    "url": "https://github.com/isokron-ai/sea-lite/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.1.2",
